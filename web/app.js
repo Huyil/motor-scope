@@ -63,7 +63,12 @@
   const S = {
     catalog: { variables: [], peripherals: [], defaults: [], stall: {}, meta: {} },
     index: new Map(),
+    // S.rows: 用户拥有的所有行（含仅支撑 AVG 的隐藏通道、两个开关都关的行）
+    rows: new Map(),
+    // S.signals: 真正下发给 /api/config 并被采样的通道；samples 的列顺序与它一致
     signals: [],
+    virtuals: [],
+    virtualSeq: 0,
     samples: [],
     lastT: 0,
     status: null,
@@ -75,6 +80,10 @@
     autoZero: false,
     fillOn: true,
     gridOn: true,
+    zeroLine: true,
+    glow: false,
+    focusId: null,
+    focusPinned: false,
     paused: false,
     pauseAt: 0,
     dirty: true,
@@ -95,22 +104,33 @@
     },
     ui: {
       tab: 'vars',
+      view: 'list',
       search: '',
       openGroups: new Set(['motor', 'adc', 'sys']),
+      openNodes: new Set(['g:motor', 'g:adc', 'g:sys']),
       openPeriph: new Set(['ADC', 'ATIM', 'GPIOA']),
       openRegs: new Set(),
       overlayDismissed: false,
       drawer: false,
       log: false,
       connecting: false,
+      tableOpen: true,
+      topCompact: false,
     },
     es: null,
     selRows: new Map(),
     liveRows: new Map(),
     legendEls: new Map(),
+    avgCells: new Map(),
+    arrayEntries: new Map(),
+    vtRows: new Map(),
     toastKeys: new Set(),
     configTimer: 0,
     configDirty: false,
+    lastStatsAt: 0,
+    lastChannelKey: '',
+    historyTimer: 0,
+    glowBuf: { cv: null, ctx: null, w: 0, h: 0 },
     lastStatusAt: 0,
     serverUptime: 0,
     errors: new Set(),
@@ -132,6 +152,16 @@
     D.selCount = $('#selCount');
     D.selectedList = $('#selectedList');
     D.legend = $('#legend');
+    D.valueTable = $('#valueTable');
+    D.tableCard = $('#tableCard');
+    D.tableBody = $('#tableBody');
+    D.tableCount = $('#tableCount');
+    D.tableSum = $('#tableSum');
+    D.tableHead = $('#tableHead');
+    D.btnTableToggle = $('#btnTableToggle');
+    D.viewNote = $('#viewNote');
+    D.topbar = $('#topbar');
+    D.actions = $('#topActions');
     D.chart = $('#chart');
     D.wrap = $('#canvasWrap');
     D.tip = $('#cursorTip');
@@ -214,13 +244,46 @@
     }
   }
 
-  // ---------------------------------------------------------------- signals
+  // ---------------------------------------------------------------- rows / channels
+  // 设计：S.rows 是用户拥有的行（含隐藏支撑通道、两个开关都关的行）；
+  // S.signals 只放真正要下发给 /api/config 的通道，samples 的列与它一一对应。
+  const MAX_SAMPLED = 24;
+
   function byId(id) { return S.signals.find((s) => s.id === id) || null; }
+  function rowById(id) {
+    if (S.rows.has(id)) return S.rows.get(id);
+    return S.virtuals.find((v) => v.id === id) || null;
+  }
   function signalIndex(id) { return S.signals.findIndex((s) => s.id === id); }
+  function isHidden(row) { return !!row.support && !row.table && !row.plot; }
+  function plotRows() {
+    const out = [];
+    for (const r of S.rows.values()) if (r.plot) out.push(r);
+    for (const v of S.virtuals) if (v.plot) out.push(v);
+    return out;
+  }
+  function tableRows() {
+    const out = [];
+    for (const r of S.rows.values()) if (r.table) out.push(r);
+    for (const v of S.virtuals) if (v.table) out.push(v);
+    return out;
+  }
+  function avgVirtualFor(arrayId) { return S.virtuals.find((v) => v.arrayId === arrayId) || null; }
+
+  function visibleRowCount() {
+    const ids = new Set();
+    for (const r of S.rows.values()) if (r.table || r.plot) ids.add(r.id);
+    for (const v of S.virtuals) if (v.table || v.plot) ids.add(v.id);
+    return ids.size;
+  }
 
   function normalizeSignal(d) {
     const bit = Array.isArray(d.bit) ? [Number(d.bit[0]), Number(d.bit[1])] : null;
+    const visible = d.visible !== false;
+    const table = d.table !== undefined ? !!d.table : visible;
+    const plot = d.plot !== undefined ? !!d.plot : visible;
     return {
+      kind: 'channel',
       id: String(d.id || d.name || ''),
       name: String(d.name || d.id || ''),
       addr: Number(d.addr) >>> 0,
@@ -232,10 +295,14 @@
       unit: d.unit !== undefined ? String(d.unit || '') : inferUnit(d.name),
       color: String(d.color || '#22d3ee'),
       step: !!d.step,
-      visible: d.visible !== false,
+      table,
+      plot,
+      support: !!d.support,
+      visible,
       axis: d.axis === 'right' ? 'right' : d.axis === 'left' ? 'left' : inferAxis(d.name),
       type: String(d.type || ''),
       value: null,
+      ci: -1,
     };
   }
 
@@ -254,33 +321,57 @@
   }
 
   function nextColor() {
-    const used = new Set(S.signals.map((s) => s.color));
+    const used = new Set();
+    for (const r of S.rows.values()) used.add(r.color);
+    for (const v of S.virtuals) used.add(v.color);
     const palette = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6', '#60a5fa',
       '#fb7185', '#facc15', '#2dd4bf', '#c084fc', '#fb923c', '#4ade80'];
-    return palette.find((c) => !used.has(c)) || palette[S.signals.length % palette.length];
+    return palette.find((c) => !used.has(c)) || palette[(S.rows.size + S.virtuals.length) % palette.length];
   }
 
   function isStepSignal(entry) {
     return !!entry.bit || /(threshold|state|level|conts|power|overlevel|direction)/i.test(entry.name || '');
   }
 
-  function addSignal(id, opts = {}) {
-    const entry = S.index.get(id);
-    if (!entry) { toast('找不到信号: ' + id, 'err'); return; }
-    const old = byId(id);
-    if (old) { flashRow(id); return; }
-    if (S.signals.length >= 16) { toast('最多同时显示 16 路', 'err'); return; }
-    const sig = normalizeSignal({
+  function newRow(entry, opts = {}) {
+    return normalizeSignal({
       ...entry,
       color: opts.color || nextColor(),
       scale: opts.scale ?? 1,
       offset: opts.offset ?? 0,
       unit: opts.unit !== undefined ? opts.unit : inferUnit(entry.name),
       step: opts.step ?? isStepSignal(entry),
-      visible: true,
+      table: opts.table !== undefined ? !!opts.table : true,
+      plot: opts.plot !== undefined ? !!opts.plot : true,
+      support: !!opts.support,
     });
-    S.signals.push(sig);
+  }
+
+  function addRow(entry, opts = {}) {
+    if (!entry) return null;
+    const id = entry.id || entry.name;
+    const old = S.rows.get(id);
+    if (old) {
+      if (opts.table !== undefined) old.table = !!opts.table;
+      if (opts.plot !== undefined) old.plot = !!opts.plot;
+      if (opts.support === false) old.support = false;
+      afterSignalsChanged();
+      return old;
+    }
+    if (S.signals.length >= MAX_SAMPLED) {
+      toast('最多同时采样 ' + MAX_SAMPLED + ' 路（含数组 AVG 的支撑通道）', 'err');
+      return null;
+    }
+    const row = newRow(entry, opts);
+    S.rows.set(id, row);
     afterSignalsChanged();
+    return row;
+  }
+
+  function addSignal(id, opts = {}) {
+    const entry = S.index.get(id);
+    if (!entry) { toast('找不到信号: ' + id, 'err'); return null; }
+    return addRow(entry, opts);
   }
 
   function addCustomSignal(addr, size, signed, name) {
@@ -291,23 +382,180 @@
       bit: null, type: signed ? 'int' : 'uint', kind: 'custom', group: '自定义',
     };
     S.index.set(id, entry);
-    addSignal(id);
+    addRow(entry, { table: true, plot: true });
+  }
+
+  function releaseOrphans() {
+    const used = new Set();
+    for (const v of S.virtuals) for (const id of v.sourceIds) used.add(id);
+    for (const [id, row] of Array.from(S.rows.entries())) {
+      if (row.support && !row.table && !row.plot && !used.has(id)) S.rows.delete(id);
+    }
+  }
+
+  function removeVirtual(v) {
+    const i = S.virtuals.indexOf(v);
+    if (i >= 0) S.virtuals.splice(i, 1);
+    releaseOrphans();
   }
 
   function removeSignal(id) {
-    const i = signalIndex(id);
-    if (i < 0) return;
-    S.signals.splice(i, 1);
-    for (const row of S.samples) {
-      if (Array.isArray(row[1]) && i < row[1].length) row[1].splice(i, 1);
+    const row = S.rows.get(id);
+    const vr = S.virtuals.find((v) => v.id === id);
+    if (!row && !vr) return;
+    if (vr) {
+      removeVirtual(vr);
+      afterSignalsChanged();
+      return;
+    }
+    S.rows.delete(id);
+    for (const v of Array.from(S.virtuals)) {
+      const at = v.sourceIds.indexOf(id);
+      if (at >= 0) {
+        v.sourceIds.splice(at, 1);
+        if (!v.sourceIds.length) removeVirtual(v);
+      }
+    }
+    releaseOrphans();
+    afterSignalsChanged();
+  }
+
+  function ensureSupport(entries) {
+    let added = 0;
+    for (const entry of entries) {
+      const id = entry.id || entry.name;
+      if (!id || S.rows.has(id)) continue;
+      if (S.signals.length + added >= MAX_SAMPLED) {
+        toast('数组展开需要 ' + entries.length + ' 路支撑通道，超过 ' + MAX_SAMPLED + ' 路上限', 'err');
+        return false;
+      }
+      S.rows.set(id, newRow({ ...entry, id, name: entry.name || id }, { table: false, plot: false, support: true }));
+      added++;
+    }
+    return true;
+  }
+
+  function createVirtual(arrayId, entries, opts = {}) {
+    let v = avgVirtualFor(arrayId);
+    if (v) return v;
+    const first = entries[0] || {};
+    const baseName = arrayId.replace(/\[\]$/, '');
+    v = {
+      kind: 'virtual',
+      id: 'avg:' + arrayId,
+      arrayId,
+      name: baseName + '[] AVG',
+      sourceIds: entries.map((e) => e.id),
+      color: opts.color || nextColor(),
+      axis: opts.axis || inferAxis(baseName),
+      unit: entries.every((e) => (inferUnit(e.name) === inferUnit(first.name))) ? inferUnit(first.name) : '',
+      scale: 1,
+      offset: 0,
+      step: false,
+      table: false,
+      plot: false,
+      support: false,
+      value: null,
+      _src: [],
+    };
+    S.virtuals.push(v);
+    return v;
+  }
+
+  function setRowFlag(id, flag, on, entry) {
+    if (flag !== 'table' && flag !== 'plot') return;
+    let row = S.rows.get(id);
+    if (!row) {
+      if (!on) return;
+      const src = entry || S.index.get(id);
+      if (!src) { toast('找不到信号: ' + id, 'err'); return; }
+      row = newRow(src, { table: flag === 'table', plot: flag === 'plot', support: false });
+      S.rows.set(id, row);
+      afterSignalsChanged();
+      return;
+    }
+    if (row.support && on) row.support = false;
+    row[flag] = !!on;
+    if (!row.table && !row.plot) {
+      const used = S.virtuals.some((v) => v.sourceIds.indexOf(row.id) >= 0);
+      row.support = used;
     }
     afterSignalsChanged();
   }
 
+  function setBothFlags(id, on) {
+    let row = S.rows.get(id);
+    if (!row) {
+      if (!on) return;
+      addSignal(id, { table: true, plot: true });
+      return;
+    }
+    row.table = row.plot = !!on;
+    afterSignalsChanged();
+  }
+
+  function setAvgFlag(arrayId, entries, flag, on) {
+    if (flag !== 'table' && flag !== 'plot') return;
+    let v = avgVirtualFor(arrayId);
+    if (!v) {
+      if (!on) return;
+      if (!ensureSupport(entries)) return;
+      v = createVirtual(arrayId, entries);
+    } else if (on) {
+      if (!ensureSupport(entries)) return;
+      v.sourceIds = entries.map((e) => e.id);
+    }
+    v[flag] = !!on;
+    if (!v.table && !v.plot) removeVirtual(v);
+    afterSignalsChanged();
+  }
+
+  function syncChannels() {
+    const before = S.signals.map((s) => s.id).join('|');
+    const need = new Set();
+    for (const r of S.rows.values()) if (r.table || r.plot) need.add(r.id);
+    for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
+    const next = [];
+    for (const r of S.rows.values()) if (need.has(r.id)) next.push(r);
+    S.signals = next;
+    next.forEach((r, i) => { r.ci = i; });
+    for (const v of S.virtuals) {
+      v._src = v.sourceIds
+        .map((id) => S.rows.get(id))
+        .filter((r) => r && r.ci >= 0)
+        .map((r) => r.ci);
+    }
+    const after = S.signals.map((s) => s.id).join('|');
+    if (before !== after) {
+      // 服务端在通道构成变化时会清历史；本地也清，否则旧列会和新列错位。
+      S.samples = [];
+      S.lastT = 0;
+      S.hoverT = null;
+      S.paused = false;
+      S.pauseAt = 0;
+      resetStall();
+      updatePauseUI();
+      updateStallUI(0);
+      S.lastChannelKey = after;
+      scheduleHistoryReload();
+      S.dirty = true;
+    }
+  }
+
+  function scheduleHistoryReload() {
+    if (S.historyTimer) clearTimeout(S.historyTimer);
+    S.historyTimer = setTimeout(() => {
+      S.historyTimer = 0;
+      loadHistory();
+    }, 500);
+  }
+
   function afterSignalsChanged() {
+    syncChannels();
     renderCatalog();
     renderSelected();
     renderLegend();
+    renderValueTable();
     renderStallSelects();
     renderCalib();
     updateEmptyHint();
@@ -326,8 +574,10 @@
     renderCatalog();
     renderSelected();
     renderLegend();
+    renderValueTable();
     renderStallSelects();
     renderCalib();
+    syncTablePanel();
     resizeChart();
     updateOverlay();
     connectSSE();
@@ -352,33 +602,54 @@
   function restoreConfig() {
     let restored = false;
     try {
-      const raw = localStorage.getItem('ms.cfg.v1');
+      const raw = localStorage.getItem('ms.cfg.v2') || localStorage.getItem('ms.cfg.v1');
       if (raw) {
         const c = JSON.parse(raw);
-        const list = [];
-        for (const item of c.signals || []) {
-          let entry = S.index.get(item.id);
-          if (!entry && item.id.startsWith('custom.') && item.addr !== undefined) {
-            entry = {
-              id: item.id, name: item.name || item.id,
-              addr: Number(item.addr) >>> 0, size: Number(item.size) || 4,
-              signed: !!item.signed, bit: null, type: 'custom',
-              kind: 'custom', group: '自定义',
-            };
-            S.index.set(item.id, entry);
+        const rows = c.rows || c.signals || [];
+        if (Array.isArray(rows) && rows.length) {
+          S.rows.clear();
+          S.virtuals = [];
+          for (const item of rows) {
+            let entry = S.index.get(item.id);
+            if (!entry && item.id && item.addr !== undefined) {
+              entry = {
+                id: item.id, name: item.name || item.id,
+                addr: Number(item.addr) >>> 0, size: Number(item.size) || 4,
+                signed: !!item.signed, bit: null, type: item.type || 'custom',
+                kind: 'custom', group: '自定义',
+              };
+              S.index.set(item.id, entry);
+            }
+            if (!entry) continue;
+            const row = normalizeSignal({
+              ...entry, ...item,
+              table: item.table !== undefined ? item.table : item.visible !== false,
+              plot: item.plot !== undefined ? item.plot : item.visible !== false,
+              support: !!item.support,
+            });
+            S.rows.set(row.id, row);
           }
-          if (!entry) continue;
-          list.push(normalizeSignal({ ...entry, ...item }));
-        }
-        if (list.length) {
-          S.signals = list;
-          restored = true;
+          for (const v of c.virtuals || []) {
+            const sourceIds = (v.sourceIds || []).filter((id) => S.rows.has(id));
+            if (!sourceIds.length) continue;
+            S.virtuals.push({
+              ...v, kind: 'virtual', sourceIds,
+              table: !!v.table, plot: !!v.plot, support: false,
+              scale: 1, offset: 0, step: false, _src: [],
+            });
+          }
+          releasedAfterRestore();
+          restored = S.rows.size > 0;
         }
         S.windowSec = Number(c.windowSec) || S.windowSec;
         S.rate = Number(c.rate) || S.rate;
         S.autoZero = !!c.autoZero;
         S.fillOn = c.fillOn !== false;
         S.gridOn = c.gridOn !== false;
+        S.zeroLine = c.zeroLine !== false;
+        S.glow = !!c.glow;
+        S.ui.view = c.view === 'tree' ? 'tree' : 'list';
+        S.ui.tableOpen = c.tableOpen !== false;
         if (c.stall) {
           S.stall.enabled = c.stall.enabled !== false;
           S.stall.autoPause = !!c.stall.autoPause;
@@ -388,28 +659,35 @@
       }
     } catch (e) { console.warn(e); }
 
-    if (!restored && S.signals.length) {
-      // 没有本地配置: 用服务端当前的通道
-      syncToggles();
-      return;
-    }
-    if (!restored) {
+    if (!restored && !S.rows.size) {
       const defaults = S.catalog.defaults || [];
       const names = defaults.length ? defaults : (S.catalog.variables || []).slice(0, 4).map((v) => v.name);
       for (let i = 0; i < names.length; i++) {
         const entry = S.index.get(names[i]);
         if (!entry) continue;
-        S.signals.push(normalizeSignal({
-          ...entry, color: ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399'][i % 4],
-          unit: 'counts', step: isStepSignal(entry),
+        S.rows.set(entry.id, newRow(entry, {
+          color: ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399'][i % 4],
+          unit: 'counts', table: true, plot: true,
         }));
       }
     }
+    syncChannels();
     const st = S.catalog.stall || {};
-    if (!byId(S.stall.currentId)) S.stall.currentId = st.current || (S.signals[0]?.id || '');
-    if (!byId(S.stall.thresholdId)) S.stall.thresholdId = st.threshold || (S.signals[1]?.id || '');
+    const sampled = S.signals.filter((s) => !isHidden(s));
+    if (!byId(S.stall.currentId)) S.stall.currentId = st.current || (sampled[0]?.id || '');
+    if (!byId(S.stall.thresholdId)) S.stall.thresholdId = st.threshold || (sampled[1]?.id || '');
     syncToggles();
-    if (S.signals.length) sendConfig(true);
+    updateViewSeg();
+    syncTablePanel();
+    if (S.rows.size) sendConfig(true);
+  }
+
+  function releasedAfterRestore() {
+    const used = new Set();
+    for (const v of S.virtuals) for (const id of v.sourceIds) used.add(id);
+    for (const [id, row] of Array.from(S.rows.entries())) {
+      if (row.support && !row.table && !row.plot && !used.has(id)) S.rows.delete(id);
+    }
   }
 
   function syncToggles() {
@@ -419,28 +697,35 @@
     const az = $('#autoZero'); if (az) az.checked = S.autoZero;
     const fo = $('#fillOn'); if (fo) fo.checked = S.fillOn;
     const go = $('#gridOn'); if (go) go.checked = S.gridOn;
+    const zl = $('#zeroLine'); if (zl) zl.checked = S.zeroLine;
+    const gl = $('#glowOn'); if (gl) gl.checked = S.glow;
     const se = $('#stallEnable'); if (se) se.checked = S.stall.enabled;
     const ap = $('#autoPause'); if (ap) ap.checked = S.stall.autoPause;
   }
 
   function saveLocal() {
     try {
-      localStorage.setItem('ms.cfg.v1', JSON.stringify({
-        signals: S.signals.map((s) => {
-          const rec = {
-            id: s.id, scale: s.scale, offset: s.offset, unit: s.unit,
-            color: s.color, step: s.step, visible: s.visible, axis: s.axis,
-          };
-          if (s.id.startsWith('custom.')) {
-            rec.name = s.name; rec.addr = s.addr; rec.size = s.size; rec.signed = s.signed;
-          }
-          return rec;
-        }),
+      localStorage.setItem('ms.cfg.v2', JSON.stringify({
+        v: 2,
+        rows: Array.from(S.rows.values()).map((s) => ({
+          id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
+          scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
+          step: s.step, axis: s.axis, type: s.type,
+          table: !!s.table, plot: !!s.plot, support: !!s.support,
+        })),
+        virtuals: S.virtuals.map((v) => ({
+          id: v.id, arrayId: v.arrayId, name: v.name, sourceIds: v.sourceIds.slice(),
+          color: v.color, axis: v.axis, unit: v.unit, table: !!v.table, plot: !!v.plot,
+        })),
         rate: S.rate,
         windowSec: S.windowSec,
         autoZero: S.autoZero,
         fillOn: S.fillOn,
         gridOn: S.gridOn,
+        zeroLine: S.zeroLine,
+        glow: S.glow,
+        view: S.ui.view,
+        tableOpen: S.ui.tableOpen,
         stall: {
           enabled: S.stall.enabled,
           autoPause: S.stall.autoPause,
@@ -452,14 +737,19 @@
   }
 
   function adoptSignals(list, rate) {
-    S.signals = (list || []).filter((x) => x && x.id).map(normalizeSignal);
-    S.samples = [];
-    S.lastT = 0;
-    resetStall();
+    S.rows.clear();
+    S.virtuals = [];
+    for (const x of list || []) {
+      if (!x || !x.id) continue;
+      const row = normalizeSignal(x);
+      S.rows.set(row.id, row);
+    }
+    syncChannels();
     if (rate) S.rate = Number(rate) || S.rate;
     const st = S.catalog.stall || {};
-    if (!byId(S.stall.currentId)) S.stall.currentId = st.current || (S.signals[0]?.id || '');
-    if (!byId(S.stall.thresholdId)) S.stall.thresholdId = st.threshold || (S.signals[1]?.id || '');
+    const sampled = S.signals.filter((s) => !isHidden(s));
+    if (!byId(S.stall.currentId)) S.stall.currentId = st.current || (sampled[0]?.id || '');
+    if (!byId(S.stall.thresholdId)) S.stall.thresholdId = st.threshold || (sampled[1]?.id || '');
     syncToggles();
   }
 
@@ -472,10 +762,12 @@
       S.configDirty = false;
       const payload = {
         rate: S.rate,
+        // 只发实际需要采样的通道 union；AVG 虚拟行没有地址，不会出现在这里。
         signals: S.signals.map((s) => ({
           id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
           bit: s.bit, scale: s.scale, offset: s.offset, unit: s.unit,
-          color: s.color, step: s.step, visible: s.visible,
+          color: s.color, step: s.step, visible: !isHidden(s),
+          role: s.support ? 'support' : 'signal',
         })),
       };
       try {
@@ -498,12 +790,12 @@
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'hello') {
         applyStatus(msg.status);
-        if (!S.signals.length && msg.config?.signals?.length) {
+        if (!S.rows.size && msg.config?.signals?.length) {
           adoptSignals(msg.config.signals, msg.config.rate);
-          renderSelected(); renderLegend(); renderStallSelects(); renderCalib();
+          renderSelected(); renderLegend(); renderValueTable(); renderStallSelects(); renderCalib();
           saveLocal();
           loadHistory();
-        } else if (S.signals.length) {
+        } else if (S.rows.size) {
           // 服务重启/重连后把页面的通道和频率重新下发, 否则服务端会退回默认配置
           sendConfig(true).then(loadHistory);
         } else {
@@ -537,7 +829,10 @@
     for (const s of S.samples) map.set(s[0], s);
     for (const s of list) {
       if (!Array.isArray(s) || s.length < 2) continue;
-      if (!map.has(s[0])) map.set(s[0], [Number(s[0]), s[1] || []]);
+      const vals = s[1] || [];
+      // 配置切换期间服务端还可能吐旧列数的样本，丢掉避免列错位
+      if (!S.signals.length || vals.length !== S.signals.length) continue;
+      if (!map.has(s[0])) map.set(s[0], [Number(s[0]), vals]);
     }
     const arr = Array.from(map.values()).sort((a, b) => a[0] - b[0]);
     S.samples = arr;
@@ -552,11 +847,13 @@
 
   function onSamples(batch) {
     if (!batch.length) return;
-    const n = S.signals.length;
+    const nchan = S.signals.length;
     for (const item of batch) {
       const t = Number(item[0]);
       const vals = item[1] || [];
       if (!isFinite(t)) continue;
+      // 旧配置的在途样本列数不同，丢弃
+      if (!nchan || vals.length !== nchan) continue;
       S.samples.push([t, vals]);
       S.lastT = t;
       detectStall(t, vals);
@@ -580,17 +877,61 @@
     return S.samples.length ? S.samples[S.samples.length - 1] : null;
   }
 
+  function channelValue(row, vals) {
+    const i = row.ci;
+    if (i < 0 || i >= vals.length) return null;
+    const raw = vals[i];
+    if (raw === undefined || raw === null) return null;
+    const v = raw * row.scale + row.offset;
+    return isFinite(v) ? v : null;
+  }
+
+  function virtualValue(v, vals) {
+    let sum = 0, n = 0;
+    const src = v._src;
+    for (let k = 0; k < src.length; k++) {
+      const ch = S.signals[src[k]];
+      if (!ch) continue;
+      const raw = vals[src[k]];
+      if (raw === undefined || raw === null) continue;
+      const val = raw * ch.scale + ch.offset;
+      if (!isFinite(val)) continue;
+      sum += val; n++;
+    }
+    return n ? sum / n : null;
+  }
+
+  function rowValue(row, vals) {
+    return row.kind === 'virtual' ? virtualValue(row, vals) : channelValue(row, vals);
+  }
+
+  function fmtPhysical(row, v) {
+    if (v === null || v === undefined || !isFinite(v)) return '--';
+    if (row.kind === 'virtual') return (Math.round(v * 10) / 10).toLocaleString('en-US');
+    if ((row.scale ?? 1) === 1 && (row.offset ?? 0) === 0) return fmtInt(v);
+    return (Math.round(v * 100) / 100).toLocaleString('en-US');
+  }
+
+  function fmtStat(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '--';
+    if (Math.abs(v) >= 100) return Math.round(v).toLocaleString('en-US');
+    return (Math.round(v * 10) / 10).toLocaleString('en-US');
+  }
+
+  function rowValueText(row, vals) {
+    const v = rowValue(row, vals);
+    return fmtPhysical(row, v);
+  }
+
   function refreshLiveValues() {
     const last = latestSample();
     if (!last) return;
     const vals = last[1];
-    const sigs = S.signals;
     const cur = byId(S.stall.currentId);
     const thr = byId(S.stall.thresholdId);
-    const ci = cur ? sigs.indexOf(cur) : -1;
-    const ti = thr ? sigs.indexOf(thr) : -1;
+    const ci = cur ? cur.ci : -1;
+    const ti = thr ? thr.ci : -1;
     if (cur && ci >= 0 && ci < vals.length) {
-      const v = vals[ci] * cur.scale + cur.offset;
       D.curVal.textContent = fmtValue(cur, vals[ci]);
       D.curUnit.textContent = cur.unit || '';
       D.curRaw.textContent = cur.name;
@@ -611,25 +952,67 @@
       const pct = tv > 0 ? clamp((cv / tv) * 100, 0, 100) : 0;
       D.marginBar.style.width = pct.toFixed(1) + '%';
     }
-    // 已选列表 / 图例 / 目录里的选中行
-    for (const sig of sigs) {
-      const i = sigs.indexOf(sig);
-      if (i < 0 || i >= vals.length) continue;
-      const txt = fmtValue(sig, vals[i]);
-      const row = S.selRows.get(sig.id);
-      if (row) {
-        const el = row.querySelector('.sel-val');
-        if (el) el.textContent = txt;
-      }
-      const chip = S.legendEls.get(sig.id);
-      if (chip) {
-        const el = chip.querySelector('.lval');
-        if (el) el.textContent = txt;
-      }
-      const live = S.liveRows.get(sig.id);
+    // 目录/波形列表/图例/数值表里的实时值
+    for (const row of S.rows.values()) {
+      const txt = rowValueText(row, vals);
+      const sel = S.selRows.get(row.id);
+      if (sel) { const el = sel.querySelector('.sel-val'); if (el) el.textContent = txt; }
+      const chip = S.legendEls.get(row.id);
+      if (chip) { const el = chip.querySelector('.lval'); if (el) el.textContent = txt; }
+      const live = S.liveRows.get(row.id);
       if (live) live.textContent = txt;
+      const vt = S.vtRows.get(row.id);
+      if (vt) { vt.cur.textContent = txt; vt.cur.title = row.name + ' · ' + hex(row.addr); }
+    }
+    for (const v of S.virtuals) {
+      const txt = rowValueText(v, vals);
+      const sel = S.selRows.get(v.id);
+      if (sel) { const el = sel.querySelector('.sel-val'); if (el) el.textContent = txt; }
+      const chip = S.legendEls.get(v.id);
+      if (chip) { const el = chip.querySelector('.lval'); if (el) el.textContent = txt; }
+      const avg = S.avgCells.get(v.id);
+      if (avg) avg.textContent = txt;
+      const vt = S.vtRows.get(v.id);
+      if (vt) vt.cur.textContent = txt;
     }
     updateStallUI(last[0]);
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (now - S.lastStatsAt > 240) {
+      S.lastStatsAt = now;
+      updateTableStats();
+    }
+  }
+
+  function tableWindow() {
+    if (S.view && isFinite(S.view.start) && isFinite(S.view.end)) return [S.view.start, S.view.end];
+    const end = S.paused ? (S.pauseAt || S.lastT) : S.lastT;
+    return [end - S.windowSec * 1000, end];
+  }
+
+  function updateTableStats() {
+    const rows = tableRows();
+    if (!rows.length) return;
+    const [start, end] = tableWindow();
+    const range = sampleRange(start, end);
+    for (const row of rows) {
+      const vt = S.vtRows.get(row.id);
+      if (!vt) continue;
+      let mn = Infinity, mx = -Infinity, sum = 0, n = 0;
+      for (let i = range[0]; i < range[1]; i++) {
+        const v = rowValue(row, S.samples[i][1]);
+        if (v === null || !isFinite(v)) continue;
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+        sum += v; n++;
+      }
+      vt.min.textContent = n ? fmtStat(mn) : '--';
+      vt.max.textContent = n ? fmtStat(mx) : '--';
+      vt.avg.textContent = n ? fmtStat(sum / n) : '--';
+    }
+    if (D.tableSum) {
+      const span = Math.max(0, (end - start) / 1000);
+      D.tableSum.textContent = span.toFixed(0) + ' s 窗口 · ' + rows.length + ' 项';
+    }
   }
 
   function updateStallUI(t) {
@@ -649,8 +1032,8 @@
       let marginTxt = '未达到堵转阈值';
       if (last) {
         const cur = byId(st.currentId), thr = byId(st.thresholdId);
-        const ci = cur ? S.signals.indexOf(cur) : -1;
-        const ti = thr ? S.signals.indexOf(thr) : -1;
+        const ci = cur ? cur.ci : -1;
+        const ti = thr ? thr.ci : -1;
         if (ci >= 0 && ti >= 0 && ci < last[1].length && ti < last[1].length) {
           const cv = last[1][ci] * cur.scale + cur.offset;
           const tv = last[1][ti] * thr.scale + thr.offset;
@@ -669,8 +1052,8 @@
     const cur = byId(st.currentId);
     const thr = byId(st.thresholdId);
     if (!cur || !thr) return;
-    const ci = S.signals.indexOf(cur);
-    const ti = S.signals.indexOf(thr);
+    const ci = cur.ci;
+    const ti = thr.ci;
     if (ci < 0 || ti < 0 || ci >= vals.length || ti >= vals.length) return;
     const cv = vals[ci] * cur.scale + cur.offset;
     const tv = vals[ti] * thr.scale + thr.offset;
@@ -761,9 +1144,9 @@
       toast('连接失败: ' + st.connect_error, 'err');
     }
     updateOverlay();
-    if (!S.signals.length && st.config?.signals?.length && !S.ui.connecting) {
+    if (!S.rows.size && st.config?.signals?.length && !S.ui.connecting) {
       adoptSignals(st.config.signals, st.config.rate);
-      renderSelected(); renderLegend(); renderStallSelects(); renderCalib();
+      renderSelected(); renderLegend(); renderValueTable(); renderStallSelects(); renderCalib();
     }
   }
 
@@ -825,6 +1208,7 @@
       D.btnConnect.disabled = false;
       if (label) label.textContent = old || '连接';
       updateOverlay();
+      fitTopbar();
       refreshStatus();
     }
   }
@@ -841,19 +1225,94 @@
     const body = D.catalogBody;
     if (!body) return;
     S.liveRows.clear();
+    S.avgCells.clear();
+    S.arrayEntries = S.arrayEntries || new Map();
+    S.arrayEntries.clear();
     const tab = S.ui.tab;
     const q = S.ui.search.trim().toLowerCase();
-    D.sigCount.textContent = String(S.signals.length);
-    D.selCount.textContent = String(S.signals.length);
+    D.sigCount.textContent = String(visibleRowCount());
+    D.selCount.textContent = String(plotRows().length);
     D.search.placeholder = tab === 'periph' ? '搜索外设 / 寄存器 / 位' : tab === 'custom' ? '自定义地址' : '搜索变量 / 寄存器 / 地址';
-    if (tab === 'vars') renderVars(body, q);
-    else if (tab === 'periph') renderPeriph(body, q);
-    else renderCustom(body);
+    if (D.viewNote) {
+      D.viewNote.textContent = S.ui.view === 'tree'
+        ? '对象 · 结构体 · 数组 · 位域'
+        : (tab === 'periph' ? '按外设分组' : tab === 'vars' ? '按对象分组' : '任意地址');
+    }
+    if (tab === 'vars') {
+      if (S.ui.view === 'tree') renderVarsTree(body, q); else renderVars(body, q);
+    } else if (tab === 'periph') {
+      if (S.ui.view === 'tree') renderPeriphTree(body, q); else renderPeriph(body, q);
+    } else {
+      renderCustom(body);
+    }
   }
 
   function matchText(parts, q) {
     if (!q) return true;
     return parts.some((p) => String(p || '').toLowerCase().includes(q));
+  }
+
+  function rowFlagButtons(id, entry) {
+    const wrap = document.createElement('span');
+    wrap.className = 'sig-toggles';
+    const row = S.rows.get(id);
+    for (const [flag, label, title] of [['table', '表', '数值表'], ['plot', '波', '波形']]) {
+      const b = document.createElement('button');
+      b.className = 'tgl tgl-' + flag + (row && row[flag] ? ' on' : '');
+      b.textContent = label;
+      b.title = (row && row[flag] ? '从' : '加入') + title;
+      b.dataset.rowToggle = id;
+      b.dataset.flag = flag;
+      b.setAttribute('aria-label', (row && row[flag] ? '从' : '加入') + title);
+      b.setAttribute('aria-pressed', row && row[flag] ? 'true' : 'false');
+      wrap.appendChild(b);
+    }
+    return wrap;
+  }
+
+  function sigRow(entry, kind, opts = {}) {
+    const rowEl = document.createElement('div');
+    const eid = entry.id || entry.name;
+    const row = S.rows.get(eid);
+    rowEl.className = 'sig-row' + (row ? ' selected' : '') + (row && !row.table && !row.plot ? ' idle' : '');
+    rowEl.dataset.id = eid;
+    rowEl.dataset.kind = kind;
+    if (opts.bit) rowEl.classList.add('bit-row');
+    if (opts.reg) rowEl.classList.add('reg-row');
+    if (opts.tree) rowEl.classList.add('tree-leaf');
+    const main = document.createElement('div');
+    main.className = 'sig-main';
+    if (opts.reg && opts.hasBits) {
+      const t = document.createElement('button');
+      t.className = 'reg-toggle';
+      t.dataset.regToggle = eid;
+      t.textContent = S.ui.openRegs.has(entry.id) ? '−' : '+';
+      t.title = '展开位域';
+      main.appendChild(t);
+    }
+    const name = document.createElement('span');
+    name.className = 'sig-name';
+    if (entry.bit) {
+      name.innerHTML = esc(entry.name) + ' <span class="bit">[' +
+        (entry.bit[1] > 1 ? (entry.bit[0] + ':' + (entry.bit[0] + entry.bit[1] - 1)) : entry.bit[0]) + ']</span>';
+    } else {
+      name.textContent = entry.name;
+    }
+    name.title = entry.name + '\n' + hex(entry.addr) + ' · ' + (entry.size * 8) + ' bit ' + (entry.signed ? 'signed' : 'unsigned') +
+      '\n点击数：切换“表/波”；两个小按钮可分别开关';
+    main.appendChild(name);
+    const meta = document.createElement('div');
+    meta.className = 'sig-meta';
+    meta.textContent = hex(entry.addr) + ' · ' + (entry.type || (entry.size * 8 + 'b'));
+    main.appendChild(meta);
+    const val = document.createElement('span');
+    val.className = 'sig-val';
+    val.textContent = '—';
+    rowEl.appendChild(rowFlagButtons(eid, entry));
+    rowEl.appendChild(main);
+    rowEl.appendChild(val);
+    S.liveRows.set(eid, val);
+    return rowEl;
   }
 
   function renderVars(body, q) {
@@ -904,53 +1363,258 @@
     body.appendChild(frag);
   }
 
-  function sigRow(entry, kind, opts = {}) {
-    const row = document.createElement('div');
-    const eid = entry.id || entry.name;
-    const selected = !!byId(eid);
-    row.className = 'sig-row' + (selected ? ' selected' : '');
-    row.dataset.id = eid;
-    row.dataset.kind = kind;
-    if (opts.bit) row.classList.add('bit-row');
-    if (opts.reg) row.classList.add('reg-row');
-    const check = document.createElement('span');
-    check.className = 'sig-check';
-    check.textContent = selected ? '✓' : '';
-    const main = document.createElement('div');
-    main.className = 'sig-main';
-    if (opts.reg && opts.hasBits) {
-      const t = document.createElement('button');
-      t.className = 'reg-toggle';
-      t.dataset.regToggle = eid;
-      t.textContent = S.ui.openRegs.has(entry.id) ? '−' : '+';
-      t.title = '展开位域';
-      main.appendChild(t);
+  // ---- tree model ----
+  function pathSegments(path) {
+    return String(path).split('.').map((seg) => {
+      const m = /^([^\[\]]+?)(?:\[(\d+)\])?$/.exec(seg);
+      if (!m) return { name: seg, idx: null };
+      return { name: m[1], idx: m[2] !== undefined ? Number(m[2]) : null };
+    });
+  }
+
+  function makeTreeNode(name, full) {
+    return {
+      name, full, key: 'n:' + full, children: new Map(), indices: new Map(),
+      leaf: null, isArray: false, isIndex: false, idx: null,
+    };
+  }
+
+  function buildVarForest(vars) {
+    const roots = new Map();
+    for (const v of vars) {
+      let group = v.group || '全局';
+      let path;
+      if (group === v.name) { group = '全局'; path = v.name; }
+      else if (String(v.name).startsWith(group + '.')) path = v.name.slice(group.length + 1);
+      else path = v.name;
+      let root = roots.get(group);
+      if (!root) {
+        root = makeTreeNode(group, group);
+        root.key = 'g:' + group;
+        roots.set(group, root);
+      }
+      let cur = root;
+      for (const seg of pathSegments(path)) {
+        if (seg.idx !== null) {
+          let arr = cur.children.get(seg.name);
+          if (!arr) {
+            arr = makeTreeNode(seg.name, cur.full + '.' + seg.name);
+            arr.isArray = true;
+            cur.children.set(seg.name, arr);
+          }
+          let elem = arr.indices.get(seg.idx);
+          if (!elem) {
+            elem = makeTreeNode('[' + seg.idx + ']', arr.full + '[' + seg.idx + ']');
+            elem.isIndex = true;
+            elem.idx = seg.idx;
+            arr.indices.set(seg.idx, elem);
+          }
+          cur = elem;
+        } else {
+          let child = cur.children.get(seg.name);
+          if (!child) {
+            child = makeTreeNode(seg.name, cur.full + '.' + seg.name);
+            cur.children.set(seg.name, child);
+          }
+          cur = child;
+        }
+      }
+      cur.leaf = v;
     }
-    const name = document.createElement('span');
-    name.className = 'sig-name';
-    if (entry.bit) {
-      name.innerHTML = esc(entry.name) + ' <span class="bit">[' +
-        (entry.bit[1] > 1 ? (entry.bit[0] + ':' + (entry.bit[0] + entry.bit[1] - 1)) : entry.bit[0]) + ']</span>';
-    } else {
-      name.textContent = entry.name;
+    return roots;
+  }
+
+  function treeLeafCount(node) {
+    let n = node.leaf ? 1 : 0;
+    for (const c of node.children.values()) n += treeLeafCount(c);
+    for (const c of node.indices.values()) n += treeLeafCount(c);
+    return n;
+  }
+
+  function arrayEntriesOf(node) {
+    const out = [];
+    const idx = Array.from(node.indices.keys()).sort((a, b) => a - b);
+    for (const i of idx) {
+      const elem = node.indices.get(i);
+      if (elem && elem.leaf) {
+        out.push({ ...elem.leaf, id: elem.leaf.id || elem.leaf.name });
+      }
     }
-    name.title = entry.name + '\n' + hex(entry.addr) + ' · ' + (entry.size * 8) + ' bit ' + (entry.signed ? 'signed' : 'unsigned');
-    main.appendChild(name);
-    const meta = document.createElement('div');
-    meta.className = 'sig-meta';
-    meta.textContent = hex(entry.addr) + ' · ' + (entry.type || (entry.size * 8 + 'b'));
-    main.appendChild(meta);
+    return out;
+  }
+
+  function isScalarArray(node) {
+    if (!node.isArray || !node.indices.size) return false;
+    for (const elem of node.indices.values()) {
+      if (!elem.leaf || elem.children.size) return false;
+    }
+    return true;
+  }
+
+  function renderVarsTree(body, q) {
+    const vars = S.catalog.variables || [];
+    const filtered = q ? vars.filter((v) => matchText([v.name, v.group, hex(v.addr), v.type], q)) : vars;
+    if (!filtered.length) {
+      body.innerHTML = '<div class="cat-empty muted">没有匹配的变量</div>';
+      return;
+    }
+    const roots = buildVarForest(filtered);
+    const priority = { motor: 0, adc: 1, sys: 2, '全局': 99 };
+    const ordered = Array.from(roots.entries()).sort((a, b) => {
+      const pa = priority[a[0]] ?? 10, pb = priority[b[0]] ?? 10;
+      if (pa !== pb) return pa - pb;
+      return (a[1].leaf?.addr || 0) - (b[1].leaf?.addr || 0);
+    });
+    const frag = document.createDocumentFragment();
+    for (const [, root] of ordered) frag.appendChild(renderTreeNode(root, 0, q, true));
+    body.innerHTML = '';
+    body.appendChild(frag);
+  }
+
+  function renderTreeNode(node, depth, q, isRoot = false) {
+    const open = !!q || S.ui.openNodes.has(node.key);
+    if (!node.children.size && !node.indices.size && node.leaf) {
+      const wrap = document.createElement('div');
+      wrap.className = 'tree-leaf-row';
+      wrap.style.setProperty('--depth', String(depth));
+      const row = sigRow(node.leaf, 'var', { tree: true });
+      wrap.appendChild(row);
+      return wrap;
+    }
+    const box = document.createElement('div');
+    box.className = 'tree-node' + (open ? ' open' : '');
+    const head = document.createElement('div');
+    head.className = 'tree-head';
+    head.dataset.node = node.key;
+    head.style.setProperty('--depth', String(depth));
+    head.innerHTML = '<span class="arrow">▶</span><span class="tname"></span><span class="tkind"></span><span class="taddr"></span><span class="tcount"></span>';
+    const nLeaves = treeLeafCount(node);
+    const nm = head.querySelector('.tname');
+    nm.textContent = node.name + (node.isArray ? '[]' : '');
+    const kind = head.querySelector('.tkind');
+    kind.textContent = node.isArray ? 'array' : (depth === 0 ? 'object' : 'struct');
+    const addr = head.querySelector('.taddr');
+    const firstLeaf = node.leaf || firstLeafOf(node);
+    if (firstLeaf) addr.textContent = hex(firstLeaf.addr, 6);
+    head.querySelector('.tcount').textContent = nLeaves + ' 项';
+    head.title = (node.full || node.name) + (firstLeaf ? '\n' + hex(firstLeaf.addr) : '');
+    box.appendChild(head);
+    const inner = document.createElement('div');
+    inner.className = 'tree-body';
+    if (node.leaf) inner.appendChild(sigRow(node.leaf, 'var', { tree: true }));
+    if (node.isArray) {
+      if (isScalarArray(node)) {
+        inner.appendChild(renderArrayTable(node, node.indices, depth + 1));
+      } else {
+        for (const i of Array.from(node.indices.keys()).sort((a, b) => a - b)) {
+          inner.appendChild(renderTreeNode(node.indices.get(i), depth + 1, q));
+        }
+      }
+    }
+    const kids = Array.from(node.children.values()).sort((a, b) => {
+      if (a.isArray !== b.isArray) return a.isArray ? -1 : 1;
+      const aa = firstLeafOf(a), bb = firstLeafOf(b);
+      return (aa?.addr || 0) - (bb?.addr || 0);
+    });
+    for (const c of kids) inner.appendChild(renderTreeNode(c, depth + 1, q));
+    box.appendChild(inner);
+    return box;
+  }
+
+  function firstLeafOf(node) {
+    if (node.leaf) return node.leaf;
+    for (const c of node.children.values()) { const l = firstLeafOf(c); if (l) return l; }
+    for (const c of node.indices.values()) { const l = firstLeafOf(c); if (l) return l; }
+    return null;
+  }
+
+  function renderArrayTable(node, indices, depth) {
+    const entries = arrayEntriesOf(node);
+    S.arrayEntries.set(node.full, entries);
+    const vid = 'avg:' + node.full;
+    const v = S.virtuals.find((x) => x.arrayId === node.full);
+    const wrap = document.createElement('div');
+    wrap.className = 'array-table';
+    wrap.style.setProperty('--depth', String(depth));
+    const head = document.createElement('div');
+    head.className = 'at-row at-head';
+    head.innerHTML = '<span class="at-idx">idx</span><span class="at-val">当前值</span><span class="at-tgl">表 / 波</span>';
+    wrap.appendChild(head);
+    for (const i of Array.from(indices.keys()).sort((a, b) => a - b)) {
+      const elem = indices.get(i);
+      if (!elem || !elem.leaf) continue;
+      const entry = { ...elem.leaf, id: elem.leaf.id || elem.leaf.name };
+      if (!entry.id) continue;
+      const rowEl = document.createElement('div');
+      rowEl.className = 'at-row';
+      const ix = document.createElement('span');
+      ix.className = 'at-idx';
+      ix.textContent = '[' + i + ']';
+      const val = document.createElement('span');
+      val.className = 'at-val';
+      val.textContent = '—';
+      S.liveRows.set(entry.id, val);
+      rowEl.appendChild(ix);
+      rowEl.appendChild(val);
+      rowEl.appendChild(rowFlagButtons(entry.id, entry));
+      wrap.appendChild(rowEl);
+    }
+    const avg = document.createElement('div');
+    avg.className = 'at-row avg';
+    const ix = document.createElement('span');
+    ix.className = 'at-idx';
+    ix.textContent = 'AVG';
     const val = document.createElement('span');
-    val.className = 'sig-val';
+    val.className = 'at-val';
     val.textContent = '—';
-    row.appendChild(check);
-    row.appendChild(main);
-    row.appendChild(val);
-    if (selected) S.liveRows.set(eid, val);
-    return row;
+    S.avgCells.set(vid, val);
+    const tg = document.createElement('span');
+    tg.className = 'sig-toggles';
+    for (const [flag, label, title] of [['table', '表', '数值表'], ['plot', '波', '波形']]) {
+      const b = document.createElement('button');
+      b.className = 'tgl tgl-' + flag + (v && v[flag] ? ' on' : '');
+      b.textContent = label;
+      b.title = (v && v[flag] ? '从' : '加入') + '数组平均值到' + title;
+      b.dataset.avgToggle = node.full;
+      b.dataset.flag = flag;
+      b.setAttribute('aria-pressed', v && v[flag] ? 'true' : 'false');
+      tg.appendChild(b);
+    }
+    avg.appendChild(ix);
+    avg.appendChild(val);
+    avg.appendChild(tg);
+    wrap.appendChild(avg);
+    const note = document.createElement('div');
+    note.className = 'at-note';
+    note.textContent = 'AVG = 数组元素物理量平均；勾选“表/波”后自动下发元素支撑通道（隐藏，不画图例）';
+    wrap.appendChild(note);
+    return wrap;
   }
 
   function renderPeriph(body, q) {
+    body.innerHTML = '';
+    renderPeriphInto(body, q);
+  }
+
+  function renderPeriphTree(body, q) {
+    const open = !!q || S.ui.openNodes.has('g:periph');
+    const box = document.createElement('div');
+    box.className = 'tree-node' + (open ? ' open' : '');
+    const head = document.createElement('div');
+    head.className = 'tree-head';
+    head.dataset.node = 'g:periph';
+    head.innerHTML = '<span class="arrow">▶</span><span class="tname">外设</span><span class="tkind">periph</span><span class="tcount"></span>';
+    head.querySelector('.tcount').textContent = (S.catalog.peripherals || []).length + ' 个';
+    box.appendChild(head);
+    const inner = document.createElement('div');
+    inner.className = 'tree-body';
+    renderPeriphInto(inner, q);
+    box.appendChild(inner);
+    body.innerHTML = '';
+    body.appendChild(box);
+  }
+
+  function renderPeriphInto(body, q) {
     const list = S.catalog.peripherals || [];
     const frag = document.createDocumentFragment();
     let any = false;
@@ -986,15 +1650,15 @@
         const rid = p.name + '.' + r.name;
         const hasBits = (r._bits || []).length > 0;
         const regOpen = !!q || S.ui.openRegs.has(rid) || r._autoOpen;
-        const block = document.createElement('div');
-        block.className = 'reg-block' + (regOpen ? ' open' : '');
-        block.dataset.reg = rid;
+        const blockDiv = document.createElement('div');
+        blockDiv.className = 'reg-block' + (regOpen ? ' open' : '');
+        blockDiv.dataset.reg = rid;
         const entry = {
           id: rid, name: rid, addr: r.addr, size: r.size || 4,
           signed: !!r.signed, bit: null, type: r.type || '', group: p.name,
         };
-        const row = sigRow(entry, 'reg', { reg: true, hasBits });
-        block.appendChild(row);
+        const rowEl = sigRow(entry, 'reg', { reg: true, hasBits });
+        blockDiv.appendChild(rowEl);
         if (hasBits) {
           const bitsBox = document.createElement('div');
           bitsBox.className = 'bit-list';
@@ -1006,14 +1670,13 @@
             };
             bitsBox.appendChild(sigRow(bentry, 'bit', { bit: true }));
           }
-          block.appendChild(bitsBox);
+          blockDiv.appendChild(bitsBox);
         }
-        inner.appendChild(block);
+        inner.appendChild(blockDiv);
       }
       box.appendChild(inner);
       frag.appendChild(box);
     }
-    body.innerHTML = '';
     if (!any) {
       body.innerHTML = '<div class="cat-empty muted">没有匹配的寄存器</div>';
     } else {
@@ -1032,9 +1695,9 @@
       '</select></div><div class="field"><label>类型</label><select id="custSigned">' +
       '<option value="0">无符号</option><option value="1">有符号</option></select></div></div>' +
       '<div class="field"><label>名称（可选）</label><input id="custName" placeholder="自定义信号"></div>' +
-      '<button id="custAdd" class="btn primary">添加到波形</button>';
+      '<button id="custAdd" class="btn primary">添加（表 + 波形）</button>';
     body.appendChild(form);
-    const list = S.signals.filter((s) => s.id.startsWith('custom.'));
+    const list = Array.from(S.rows.values()).filter((s) => s.id.startsWith('custom.'));
     if (list.length) {
       const head = document.createElement('div');
       head.className = 'side-title';
@@ -1042,13 +1705,7 @@
       head.textContent = '自定义信号';
       body.appendChild(head);
       for (const s of list) {
-        const row = document.createElement('div');
-        row.className = 'sig-row selected';
-        row.innerHTML = '<span class="sig-check">✓</span><div class="sig-main"><span class="sig-name"></span><div class="sig-meta"></div></div><span class="sig-val">—</span>';
-        row.querySelector('.sig-name').textContent = s.name;
-        row.querySelector('.sig-meta').textContent = hex(s.addr) + ' · ' + (s.size * 8) + 'b';
-        row.addEventListener('click', () => removeSignal(s.id));
-        body.appendChild(row);
+        body.appendChild(sigRow(s, 'var', { tree: true }));
       }
     }
     $('#custAdd')?.addEventListener('click', () => {
@@ -1077,33 +1734,61 @@
     if (!box) return;
     box.innerHTML = '';
     S.selRows.clear();
-    if (!S.signals.length) {
-      box.innerHTML = '<div class="cat-empty muted">勾选左侧信号加入波形</div>';
+    const rows = plotRows();
+    D.selCount.textContent = String(rows.length);
+    if (!rows.length) {
+      const empty = tableRows().length
+        ? '数值表里有信号，但“波”都关着'
+        : '把左侧“波”打开，加入波形列表';
+      box.innerHTML = '<div class="cat-empty muted">' + empty + '</div>';
       return;
     }
-    for (const sig of S.signals) {
-      const row = document.createElement('div');
-      row.className = 'sel-row';
-      row.dataset.id = sig.id;
-      row.innerHTML = '<span class="dot"></span><span class="sel-name"></span><span class="sel-val">—</span><button class="sel-x" title="移除">×</button>';
-      row.querySelector('.dot').style.background = sig.color;
-      row.querySelector('.dot').style.color = sig.color;
-      row.querySelector('.sel-name').textContent = sig.name;
-      row.querySelector('.sel-name').title = hex(sig.addr) + ' · ' + sig.name;
-      row.addEventListener('click', (e) => {
-        if (e.target.closest('.sel-x')) {
+    for (const row of rows) {
+      const el = document.createElement('div');
+      el.className = 'sel-row';
+      el.dataset.id = row.id;
+      el.innerHTML = '<span class="dot"></span><span class="sel-name"></span><span class="sel-tgls"></span><span class="sel-val">—</span><button class="sel-x" title="移除">×</button>';
+      const dot = el.querySelector('.dot');
+      dot.style.background = row.color;
+      dot.style.color = row.color;
+      const nm = el.querySelector('.sel-name');
+      nm.textContent = shortName(row.name);
+      nm.title = row.kind === 'virtual'
+        ? row.name + ' · ' + row.sourceIds.length + ' 个数组元素平均'
+        : hex(row.addr) + ' · ' + row.name;
+      const tgs = el.querySelector('.sel-tgls');
+      for (const [flag, label, title] of [['table', '表', '数值表'], ['plot', '波', '波形']]) {
+        const b = document.createElement('button');
+        b.className = 'tgl tgl-' + flag + (row[flag] ? ' on' : '');
+        b.textContent = label;
+        b.title = title;
+        b.setAttribute('aria-label', title);
+        b.addEventListener('click', (e) => {
           e.stopPropagation();
-          removeSignal(sig.id);
-        } else {
-          openDrawer();
-          setTimeout(() => {
-            const inp = document.querySelector('.calib-row[data-id="' + CSS.escape(sig.id) + '"] input');
-            if (inp) inp.focus();
-          }, 80);
-        }
+          if (row.kind === 'virtual') {
+            const entries = S.arrayEntries.get(row.arrayId) || [];
+            setAvgFlag(row.arrayId, entries, flag, !row[flag]);
+          } else {
+            setRowFlag(row.id, flag, !row[flag], S.index.get(row.id));
+          }
+        });
+        tgs.appendChild(b);
+      }
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.sel-x') || e.target.closest('.tgl')) return;
+        if (row.kind === 'virtual') { toast('AVG 虚拟行没有地址，可在左侧数组表里管理'); return; }
+        openDrawer();
+        setTimeout(() => {
+          const inp = document.querySelector('.calib-row[data-id="' + CSS.escape(row.id) + '"] input');
+          if (inp) inp.focus();
+        }, 80);
       });
-      box.appendChild(row);
-      S.selRows.set(sig.id, row);
+      el.querySelector('.sel-x').addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeSignal(row.id);
+      });
+      box.appendChild(el);
+      S.selRows.set(row.id, el);
     }
     if (S.samples.length) refreshLiveValues();
     updateEmptyHint();
@@ -1114,32 +1799,124 @@
     if (!box) return;
     box.innerHTML = '';
     S.legendEls.clear();
-    for (const sig of S.signals) {
+    for (const row of plotRows()) {
       const chip = document.createElement('div');
-      chip.className = 'legend-chip' + (sig.visible ? '' : ' off');
-      chip.dataset.id = sig.id;
-      chip.title = sig.name + ' · ' + hex(sig.addr) + ' · ' + (sig.unit || '') + (sig.step ? ' · step' : '');
+      chip.className = 'legend-chip' + (S.focusId === row.id ? ' focus' : '');
+      if (S.focusPinned && S.focusId === row.id) chip.classList.add('pinned');
+      chip.dataset.id = row.id;
+      chip.title = row.kind === 'virtual'
+        ? row.name + ' · 数组平均 · ' + (row.unit || '')
+        : row.name + ' · ' + hex(row.addr) + ' · ' + (row.unit || '') + (row.step ? ' · step' : '') +
+          '\n单击聚焦（其他路淡出），再次单击取消';
       chip.innerHTML = '<span class="dot"></span><span class="lname"></span><span class="lax"></span><span class="lval">—</span>';
-      chip.querySelector('.dot').style.background = sig.color;
-      chip.querySelector('.dot').style.color = sig.color;
-      chip.querySelector('.lname').textContent = shortName(sig.name);
-      if (sig.axis === 'right') chip.querySelector('.lax').textContent = 'R';
+      const dot = chip.querySelector('.dot');
+      dot.style.background = row.color;
+      dot.style.color = row.color;
+      chip.querySelector('.lname').textContent = shortName(row.name);
+      if (row.axis === 'right') chip.querySelector('.lax').textContent = 'R';
+      if (row.kind === 'virtual') chip.querySelector('.lax').textContent = '';
+      chip.addEventListener('pointerenter', () => setFocus(row.id, false));
+      chip.addEventListener('pointerleave', () => { if (!S.focusPinned) setFocus(null, false); });
       chip.addEventListener('click', () => {
-        sig.visible = !sig.visible;
-        chip.classList.toggle('off', !sig.visible);
-        saveLocal();
-        S.dirty = true;
+        if (S.focusPinned && S.focusId === row.id) {
+          S.focusPinned = false;
+          setFocus(null, false);
+        } else {
+          S.focusPinned = true;
+          setFocus(row.id, true);
+        }
       });
       box.appendChild(chip);
-      S.legendEls.set(sig.id, chip);
+      S.legendEls.set(row.id, chip);
     }
     if (S.samples.length) refreshLiveValues();
   }
 
+  function setFocus(id, pinned) {
+    if (S.focusId === id && pinned === S.focusPinned) return;
+    S.focusId = id;
+    if (!pinned && !id) S.focusPinned = false;
+    for (const [rid, chip] of S.legendEls.entries()) {
+      const on = !id || rid === id;
+      chip.classList.toggle('dim', !on);
+      chip.classList.toggle('focus', rid === id);
+      chip.classList.toggle('pinned', rid === id && S.focusPinned);
+    }
+    S.dirty = true;
+  }
+
+  function setTableOpen(open) {
+    S.ui.tableOpen = !!open;
+    syncTablePanel();
+    saveLocal();
+    S.dirty = true;
+  }
+
+  function syncTablePanel() {
+    if (!D.tableCard) return;
+    D.tableCard.classList.toggle('collapsed', !S.ui.tableOpen);
+    if (D.btnTableToggle) D.btnTableToggle.setAttribute('aria-expanded', S.ui.tableOpen ? 'true' : 'false');
+  }
+
+  function updateViewSeg() {
+    const seg = $('#viewSeg');
+    if (!seg) return;
+    for (const b of seg.querySelectorAll('button')) {
+      b.classList.toggle('active', b.dataset.view === S.ui.view);
+    }
+  }
+
+  function renderValueTable() {
+    const body = D.valueTable;
+    if (!body) return;
+    body.innerHTML = '';
+    S.vtRows.clear();
+    const rows = tableRows();
+    if (D.tableCount) D.tableCount.textContent = String(rows.length);
+    if (!rows.length) {
+      body.innerHTML = '<div class="vt-empty">还没有“表”打开的项；在左侧信号行或数组表里点“表”。</div>';
+      if (D.tableSum) D.tableSum.textContent = '';
+      return;
+    }
+    for (const row of rows) {
+      const el = document.createElement('div');
+      el.className = 'vt-row' + (row.kind === 'virtual' ? ' avg' : '');
+      el.dataset.id = row.id;
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = row.color;
+      dot.style.color = row.color;
+      const nm = document.createElement('span');
+      nm.className = 'vt-name';
+      nm.textContent = shortName(row.name);
+      nm.title = row.kind === 'virtual' ? row.name : hex(row.addr) + ' · ' + row.name;
+      const cur = document.createElement('span');
+      cur.className = 'num vt-cur';
+      cur.textContent = '—';
+      const mn = document.createElement('span'); mn.className = 'num vt-stat'; mn.textContent = '--';
+      const mx = document.createElement('span'); mx.className = 'num vt-stat'; mx.textContent = '--';
+      const av = document.createElement('span'); av.className = 'num vt-stat'; av.textContent = '--';
+      const un = document.createElement('span'); un.className = 'vt-c-unit'; un.textContent = row.unit || '';
+      el.append(dot, nm, cur, mn, mx, av, un);
+      body.appendChild(el);
+      S.vtRows.set(row.id, { cur, min: mn, max: mx, avg: av });
+    }
+    updateTableStats();
+    if (S.samples.length) refreshLiveValues();
+  }
+
   function updateEmptyHint() {
-    const has = S.signals.length > 0;
-    D.empty.classList.toggle('hidden', has);
-    D.empty.querySelector('div').textContent = has ? '' : '还没有信号';
+    const hasPlot = plotRows().length > 0;
+    const hasTable = tableRows().length > 0;
+    D.empty.classList.toggle('hidden', hasPlot);
+    const div = D.empty.querySelector('div');
+    const small = D.empty.querySelector('small');
+    if (div) div.textContent = '还没有波形';
+    if (small) {
+      small.textContent = hasTable
+        ? '数值表里有信号；把对应行的“波”打开就会画出来'
+        : '在左侧把“波”打开，或点击“连接”';
+    }
   }
 
   // ---------------------------------------------------------------- stall selects / calibration
@@ -1147,20 +1924,21 @@
     for (const [el, current] of [[D.curSel, S.stall.currentId], [D.thrSel, S.stall.thresholdId]]) {
       if (!el) continue;
       el.innerHTML = '';
-      if (!S.signals.length) {
+      const usable = S.signals.filter((x) => !isHidden(x));
+      if (!usable.length) {
         const o = document.createElement('option');
         o.value = '';
         o.textContent = '（先添加信号）';
         el.appendChild(o);
         continue;
       }
-      for (const s of S.signals) {
+      for (const s of usable) {
         const o = document.createElement('option');
         o.value = s.id;
         o.textContent = s.name;
         el.appendChild(o);
       }
-      const want = current || S.signals[0].id;
+      const want = current || usable[0].id;
       el.value = want;
       if (el.value !== want) {
         if (el === D.curSel) S.stall.currentId = el.value;
@@ -1173,11 +1951,12 @@
     const box = D.calibList;
     if (!box) return;
     box.innerHTML = '';
-    if (!S.signals.length) {
+    const rows = Array.from(S.rows.values()).filter((r) => !r.support);
+    if (!rows.length) {
       box.innerHTML = '<div class="muted" style="font-size:10.5px">先添加信号</div>';
       return;
     }
-    for (const sig of S.signals) {
+    for (const sig of rows) {
       const row = document.createElement('div');
       row.className = 'calib-row';
       row.dataset.id = sig.id;
@@ -1252,6 +2031,55 @@
     return [start, lo];
   }
 
+  function ensureGlowBuffer(pw, ph) {
+    const b = S.glowBuf;
+    const w = clamp(Math.round(pw * 0.55), 240, 640);
+    const h = clamp(Math.round(ph * 0.55), 140, 400);
+    if (!b.cv) b.cv = document.createElement('canvas');
+    if (!b.ctx) b.ctx = b.cv.getContext('2d');
+    if (b.w !== w || b.h !== h) {
+      b.w = w; b.h = h;
+      b.cv.width = w; b.cv.height = h;
+      b.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      b.ctx.clearRect(0, 0, w, h);
+    }
+    return b;
+  }
+
+  function primaryRow(rows) {
+    const cur = byId(S.stall.currentId);
+    if (cur && cur.plot) return cur;
+    return rows.find((r) => r.kind !== 'virtual' && /current/i.test(r.name)) ||
+      rows.find((r) => r.kind === 'virtual') || rows[0] || null;
+  }
+
+  function axisRef(range) {
+    if (range.min <= 0 && range.max >= 0) return { v: 0, label: '0' };
+    return { v: (range.min + range.max) / 2, label: 'mid' };
+  }
+
+  function drawZeroLine(ctx, range, Y, x0, pw, y0, ph, color) {
+    const ref = axisRef(range);
+    const y = Math.round(Y(ref.v)) + 0.5;
+    if (y < y0 + 1 || y > y0 + ph - 1) return;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x0 + pw, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = '9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    const ly = y - 3 < y0 + 9 ? y + 11 : y - 3;
+    ctx.fillStyle = 'rgba(190,210,232,.55)';
+    ctx.fillText(ref.label, x0 + 4, ly);
+    ctx.restore();
+  }
+
   function draw() {
     const cv = D.chart;
     const ctx = cv.getContext('2d');
@@ -1259,8 +2087,8 @@
     if (!W || !H) return;
     ctx.clearRect(0, 0, W, H);
 
-    const vis = S.signals.filter((s) => s.visible);
-    const anyRight = vis.some((s) => s.axis === 'right');
+    const rows = plotRows();
+    const anyRight = rows.some((s) => s.axis === 'right');
     const pad = { l: 58, r: anyRight ? 56 : 16, t: 16, b: 36 };
     const x0 = pad.l, y0 = pad.t;
     const pw = Math.max(10, W - pad.l - pad.r);
@@ -1269,28 +2097,22 @@
     const start = end - S.windowSec * 1000;
 
     const range = sampleRange(start, end);
-    const indices = [];
-    for (let i = range[0]; i < range[1]; i++) indices.push(i);
+    const i0 = range[0], i1 = range[1];
 
-    const leftSigs = vis.filter((s) => s.axis !== 'right');
-    const rightSigs = vis.filter((s) => s.axis === 'right');
+    const leftSigs = rows.filter((s) => s.axis !== 'right');
+    const rightSigs = rows.filter((s) => s.axis === 'right');
     const axisRange = (list) => {
       let mn = Infinity, mx = -Infinity, dmin = Infinity;
-      for (const sig of list) {
-        const idx = S.signals.indexOf(sig);
-        for (const i of indices) {
-          const v = S.samples[i][1][idx];
-          if (v === undefined) continue;
-          const tv = v * sig.scale + sig.offset;
-          if (!isFinite(tv)) continue;
+      for (const row of list) {
+        for (let i = i0; i < i1; i++) {
+          const tv = rowValue(row, S.samples[i][1]);
+          if (tv === null || !isFinite(tv)) continue;
           if (tv < mn) mn = tv;
           if (tv < dmin) dmin = tv;
           if (tv > mx) mx = tv;
         }
       }
       if (!isFinite(mn)) return null;
-      // 常量信号 (例如 vol 恒为 1050) 如果只按 0 跨度加 1, 右轴会出现
-      // 1,049/1,050/1,051 这种没信息量的刻度; 给一个最小可见跨度.
       const mid = (mx + mn) / 2;
       const minSpan = Math.max(2, Math.abs(mid) * 0.10);
       if (mx - mn < minSpan) { mn = mid - minSpan / 2; mx = mid + minSpan / 2; }
@@ -1300,15 +2122,15 @@
       else if (dmin >= 0 && mn < 0) mn = Math.max(0, mn);
       return { min: mn, max: mx };
     };
-    let left = axisRange(leftSigs) || { min: 0, max: 1 };
-    let right = axisRange(rightSigs) || { min: 0, max: 1 };
+    const left = axisRange(leftSigs) || { min: 0, max: 1 };
+    const right = axisRange(rightSigs) || { min: 0, max: 1 };
     const labelLeft = leftSigs.length ? left : right;
     S.view = { x0, y0, pw, ph, start, end, left, right, anyRight };
 
     const X = (t) => x0 + ((t - start) / Math.max(1, end - start)) * pw;
     const YL = (v) => y0 + ph - ((v - labelLeft.min) / Math.max(1e-9, labelLeft.max - labelLeft.min)) * ph;
     const YR = (v) => y0 + ph - ((v - right.min) / Math.max(1e-9, right.max - right.min)) * ph;
-    const yFor = (sig, v) => (sig.axis === 'right' ? YR(v) : YL(v));
+    const yFor = (row, v) => (row.axis === 'right' ? YR(v) : YL(v));
 
     // background
     const bg = ctx.createLinearGradient(0, y0, 0, y0 + ph);
@@ -1353,6 +2175,13 @@
         ctx.fillText((rel >= -0.05 ? '0' : rel.toFixed(0)) + 's', x, y0 + ph + 8);
       }
     }
+
+    // 0 / center reference
+    if (S.zeroLine) {
+      if (leftSigs.length) drawZeroLine(ctx, left, YL, x0, pw, y0, ph, 'rgba(190,214,240,.26)');
+      if (anyRight) drawZeroLine(ctx, right, YR, x0, pw, y0, ph, 'rgba(96,165,250,.16)');
+    }
+
     // axes
     ctx.strokeStyle = 'rgba(120,150,190,.22)';
     ctx.beginPath();
@@ -1360,7 +2189,7 @@
     if (anyRight) { ctx.moveTo(x0 + pw + 0.5, y0); ctx.lineTo(x0 + pw + 0.5, y0 + ph); }
     ctx.stroke();
 
-    const cur = byId(S.stall.currentId);
+    const primary = primaryRow(rows);
     // stall bands (使用合并后的事件, 与 "N 次" 计数一致)
     if (S.stall.enabled && S.stall.events.length) {
       for (const ev of S.stall.events) {
@@ -1376,68 +2205,88 @@
     }
 
     // fills (primary current only)
-    if (S.fillOn && cur) {
-      const sig = cur;
-      const idx = S.signals.indexOf(sig);
-      if (vis.includes(sig) && indices.length > 1) {
+    if (S.fillOn && primary && primary.plot) {
+      const row = primary;
+      if (i1 - i0 > 1) {
         ctx.beginPath();
         let started = false;
-        for (const i of indices) {
-          const vals = S.samples[i][1];
-          if (vals[idx] === undefined) continue;
+        for (let i = i0; i < i1; i++) {
+          const v = rowValue(row, S.samples[i][1]);
+          if (v === null) continue;
           const x = X(S.samples[i][0]);
-          const y = yFor(sig, vals[idx] * sig.scale + sig.offset);
+          const y = yFor(row, v);
           if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
         }
         if (started) {
-          const lastX = X(S.samples[indices[indices.length - 1]][0]);
+          const lastX = X(S.samples[i1 - 1][0]);
           ctx.lineTo(lastX, y0 + ph);
-          ctx.lineTo(X(S.samples[indices[0]][0]), y0 + ph);
+          ctx.lineTo(X(S.samples[i0][0]), y0 + ph);
           ctx.closePath();
           const g = ctx.createLinearGradient(0, y0, 0, y0 + ph);
-          g.addColorStop(0, hexAlpha(sig.color, .14));
-          g.addColorStop(1, hexAlpha(sig.color, 0));
+          g.addColorStop(0, hexAlpha(row.color, .14));
+          g.addColorStop(1, hexAlpha(row.color, 0));
           ctx.fillStyle = g;
           ctx.fill();
         }
       }
     }
 
+    const focus = S.focusId;
+    const alphaFor = (row) => {
+      if (focus) return row.id === focus ? 1 : 0.12;
+      return row.id === (primary && primary.id) ? 1 : 0.62;
+    };
+    const widthFor = (row) => {
+      const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name) || row.name.endsWith('.thresholdLast');
+      if (isThr) return 1.2;
+      return row.id === (primary && primary.id) ? 2.2 : 1.15;
+    };
+
     // traces
-    for (const sig of vis) {
-      const idx = S.signals.indexOf(sig);
-      const isThr = sig.id === S.stall.thresholdId || /threshold/i.test(sig.name);
-      const isCur = sig.id === S.stall.currentId;
+    for (const row of rows) {
+      const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name);
+      const isPrimary = primary && row.id === primary.id;
+      const alpha = alphaFor(row);
       ctx.beginPath();
-      let started = false, prevX = 0, prevY = 0;
-      for (const i of indices) {
-        const vals = S.samples[i][1];
-        if (vals[idx] === undefined) continue;
+      let started = false, prevY = 0;
+      for (let i = i0; i < i1; i++) {
+        const v = rowValue(row, S.samples[i][1]);
+        if (v === null) continue;
         const x = X(S.samples[i][0]);
-        const y = yFor(sig, vals[idx] * sig.scale + sig.offset);
+        const y = yFor(row, v);
         if (!started) {
           ctx.moveTo(x, y); started = true;
-        } else if (sig.step) {
+        } else if (row.step) {
           ctx.lineTo(x, prevY);
           ctx.lineTo(x, y);
         } else {
           ctx.lineTo(x, y);
         }
-        prevX = x; prevY = y;
+        prevY = y;
       }
       if (!started) continue;
-      ctx.lineWidth = isThr ? 1.3 : (isCur ? 2 : 1.6);
-      ctx.strokeStyle = sig.color;
+      if (S.glow) {
+        // 轻量光晕：不累积亮度缓冲，只沿当前路径加一圈低 alpha 辉光，
+        // 避免把整条历史反复叠加成一片白。
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = hexAlpha(row.color, 0.055 * alpha);
+        ctx.lineWidth = widthFor(row) * 5.5;
+        ctx.setLineDash([]);
+        ctx.stroke();
+        ctx.strokeStyle = hexAlpha(row.color, 0.10 * alpha);
+        ctx.lineWidth = widthFor(row) * 2.4;
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.lineWidth = widthFor(row);
+      ctx.strokeStyle = alpha >= 1 ? row.color : hexAlpha(row.color, alpha);
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
-      if (isThr) {
-        ctx.setLineDash([6, 4]);
-      } else {
-        ctx.setLineDash([]);
-      }
-      if (isCur) {
+      ctx.setLineDash(isThr ? [6, 4] : []);
+      if (isPrimary && !focus) {
         ctx.save();
-        ctx.shadowColor = hexAlpha(sig.color, .55);
+        ctx.shadowColor = hexAlpha(row.color, .55);
         ctx.shadowBlur = 8;
         ctx.stroke();
         ctx.restore();
@@ -1470,14 +2319,13 @@
       ctx.setLineDash([]);
       const nearest = nearestSample(S.hoverT);
       if (nearest) {
-        for (const sig of vis) {
-          const idx = S.signals.indexOf(sig);
-          const v = nearest[1][idx];
-          if (v === undefined) continue;
-          const y = yFor(sig, v * sig.scale + sig.offset);
+        for (const row of rows) {
+          const v = rowValue(row, nearest[1]);
+          if (v === null) continue;
+          const y = yFor(row, v);
           ctx.beginPath();
           ctx.arc(x, y, 3, 0, Math.PI * 2);
-          ctx.fillStyle = sig.color;
+          ctx.fillStyle = row.color;
           ctx.fill();
           ctx.strokeStyle = 'rgba(5,10,18,.9)';
           ctx.lineWidth = 1.5;
@@ -1556,12 +2404,11 @@
     const near = nearestSample(t);
     if (!near) { D.tip.classList.add('hidden'); return; }
     const rows = [];
-    for (const sig of S.signals.filter((s) => s.visible)) {
-      const idx = S.signals.indexOf(sig);
-      const v = near[1][idx];
-      if (v === undefined) continue;
-      rows.push('<div class="ct-row"><span class="dot" style="background:' + sig.color + ';color:' + sig.color + '"></span>' +
-        '<span>' + esc(shortName(sig.name)) + '</span><span class="v">' + esc(fmtValue(sig, v)) + '</span></div>');
+    for (const row of plotRows()) {
+      const v = rowValue(row, near[1]);
+      if (v === null) continue;
+      rows.push('<div class="ct-row"><span class="dot" style="background:' + row.color + ';color:' + row.color + '"></span>' +
+        '<span>' + esc(shortName(row.name)) + '</span><span class="v">' + esc(fmtPhysical(row, v)) + '</span></div>');
     }
     const rel = ((t - view.end) / 1000).toFixed(2);
     D.tip.innerHTML = '<div class="ct-time">' + rel + ' s · t=' + (near[0] / 1000).toFixed(2) + ' s</div>' + rows.join('');
@@ -1584,10 +2431,43 @@
     S.dirty = true;
   }
 
+  // ---------------------------------------------------------------- topbar fit
+  function setupTopbarFit() {
+    if (!D.topbar || !D.actions) return;
+    let raf = 0;
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; fitTopbar(); });
+    };
+    if (window.ResizeObserver) new ResizeObserver(schedule).observe(D.topbar);
+    window.addEventListener('resize', schedule);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(schedule).catch(() => {});
+    schedule();
+  }
+
+  function fitTopbar() {
+    const actions = D.actions;
+    if (!actions) return;
+    const wasCompact = actions.classList.contains('compact');
+    // 量的是“图标+文字”的自然宽度：先临时去掉 compact，再恢复
+    if (wasCompact) actions.classList.remove('compact');
+    const kids = Array.from(actions.children).filter((el) => getComputedStyle(el).display !== 'none');
+    let need = 0;
+    for (const el of kids) need += el.offsetWidth;
+    const gap = parseFloat(getComputedStyle(actions).gap) || 6;
+    need += gap * Math.max(0, kids.length - 1);
+    const avail = actions.clientWidth;
+    // 带回差，避免边界抖动导致文字反复闪现
+    const compact = wasCompact ? (need + 28 > avail) : (need > avail);
+    actions.classList.toggle('compact', compact);
+    S.ui.topCompact = compact;
+  }
+
   // ---------------------------------------------------------------- UI bindings
   function bindUI() {
-    window.addEventListener('resize', resizeChart);
+    window.addEventListener('resize', () => { resizeChart(); fitTopbar(); });
     if (window.ResizeObserver) new ResizeObserver(resizeChart).observe(D.wrap);
+    setupTopbarFit();
 
     D.chart.addEventListener('pointermove', onPointerMove);
     D.chart.addEventListener('pointerleave', onPointerLeave);
@@ -1625,7 +2505,21 @@
       S.ui.tab = b.dataset.tab;
       renderCatalog();
     }));
+    $$('#viewSeg button').forEach((b) => b.addEventListener('click', () => {
+      S.ui.view = b.dataset.view === 'tree' ? 'tree' : 'list';
+      updateViewSeg();
+      saveLocal();
+      renderCatalog();
+    }));
     $('#btnReloadSymbols').addEventListener('click', reloadCatalog);
+
+    // value table collapse
+    D.btnTableToggle?.addEventListener('click', (e) => { e.stopPropagation(); setTableOpen(!S.ui.tableOpen); });
+    D.tableHead?.addEventListener('click', (e) => {
+      if (e.target.closest('#btnTableToggle')) return;
+      setTableOpen(!S.ui.tableOpen);
+    });
+    syncTablePanel();
 
     // toolbar
     D.winSel.addEventListener('change', () => { S.windowSec = Number(D.winSel.value); D.winSel2.value = D.winSel.value; saveLocal(); S.dirty = true; });
@@ -1633,6 +2527,8 @@
     $('#autoZero').addEventListener('change', (e) => { S.autoZero = e.target.checked; saveLocal(); S.dirty = true; });
     $('#fillOn').addEventListener('change', (e) => { S.fillOn = e.target.checked; saveLocal(); S.dirty = true; });
     $('#gridOn').addEventListener('change', (e) => { S.gridOn = e.target.checked; saveLocal(); S.dirty = true; });
+    $('#zeroLine').addEventListener('change', (e) => { S.zeroLine = e.target.checked; saveLocal(); S.dirty = true; });
+    $('#glowOn').addEventListener('change', (e) => { S.glow = e.target.checked; saveLocal(); S.dirty = true; });
 
     // drawer
     $$('#srcSeg button').forEach((b) => b.addEventListener('click', () => {
@@ -1692,6 +2588,35 @@
   }
 
   function onCatalogClick(e) {
+    const tgl = e.target.closest('[data-row-toggle]');
+    if (tgl) {
+      e.preventDefault();
+      e.stopPropagation();
+      const id = tgl.dataset.rowToggle;
+      const flag = tgl.dataset.flag;
+      const row = S.rows.get(id);
+      setRowFlag(id, flag, !(row && row[flag]), S.index.get(id));
+      return;
+    }
+    const atgl = e.target.closest('[data-avg-toggle]');
+    if (atgl) {
+      e.preventDefault();
+      e.stopPropagation();
+      const arrayId = atgl.dataset.avgToggle;
+      const entries = S.arrayEntries.get(arrayId) || [];
+      const v = S.virtuals.find((x) => x.arrayId === arrayId);
+      setAvgFlag(arrayId, entries, atgl.dataset.flag, !(v && v[atgl.dataset.flag]));
+      return;
+    }
+    const treeHead = e.target.closest('.tree-head');
+    if (treeHead) {
+      const key = treeHead.dataset.node;
+      if (key) {
+        if (S.ui.openNodes.has(key)) S.ui.openNodes.delete(key); else S.ui.openNodes.add(key);
+        treeHead.parentElement.classList.toggle('open');
+      }
+      return;
+    }
     const group = e.target.closest('.cat-group-head');
     if (group) {
       const g = group.dataset.group;
@@ -1718,8 +2643,13 @@
     if (!row) return;
     const id = row.dataset.id;
     if (!id) return;
-    if (byId(id)) { removeSignal(id); return; }
-    addSignal(id);
+    const existing = S.rows.get(id);
+    if (existing) {
+      // 两个开关都关是合法状态；行点击只在这两种状态间切换
+      setBothFlags(id, !(existing.table || existing.plot));
+      return;
+    }
+    addSignal(id, { table: true, plot: true });
   }
 
   function openDrawer() {
@@ -1756,6 +2686,11 @@
     const q = D.btnPause.querySelector('.ico-play');
     if (p) p.classList.toggle('hidden', S.paused);
     if (q) q.classList.toggle('hidden', !S.paused);
+    const label = D.btnPause.querySelector('.btn-label');
+    if (label) label.textContent = S.paused ? '继续' : '暂停';
+    D.btnPause.setAttribute('aria-label', S.paused ? '继续' : '暂停');
+    D.btnPause.title = (S.paused ? '继续' : '暂停') + ' (空格)';
+    if (typeof fitTopbar === 'function') fitTopbar();
   }
 
   function clearAll() {
@@ -1778,6 +2713,14 @@
       const v = chip.querySelector('.lval'); if (v) v.textContent = '—';
     }
     for (const el of S.liveRows.values()) el.textContent = '—';
+    for (const el of S.avgCells.values()) el.textContent = '—';
+    for (const vt of S.vtRows.values()) {
+      vt.cur.textContent = '—';
+      vt.min.textContent = '--';
+      vt.max.textContent = '--';
+      vt.avg.textContent = '--';
+    }
+    S.lastStatsAt = 0;
     S.dirty = true;
     toast('已清空缓冲', 'ok');
   }
@@ -1804,18 +2747,20 @@
 
   function downloadCsv() {
     if (!S.samples.length) { toast('没有数据', 'err'); return; }
-    const sigs = S.signals;
+    const rows = [];
+    for (const r of S.rows.values()) if (r.table || r.plot) rows.push(r);
+    for (const v of S.virtuals) if (v.table || v.plot) rows.push(v);
+    if (!rows.length) { toast('没有可导出的通道', 'err'); return; }
     const lines = [];
-    lines.push(['t_s'].concat(sigs.map((s) => s.name + (s.unit ? ' [' + s.unit + ']' : ''))).map(csvCell).join(','));
+    lines.push(['t_s'].concat(rows.map((r) => r.name + (r.unit ? ' [' + r.unit + ']' : ''))).map(csvCell).join(','));
     const t0 = S.samples[0][0];
     for (const [t, vals] of S.samples) {
-      const row = [((t - t0) / 1000).toFixed(3)];
-      for (let i = 0; i < sigs.length; i++) {
-        const s = sigs[i];
-        const raw = vals[i];
-        row.push(raw === undefined || raw === null ? '' : String(Number((raw * s.scale + s.offset).toFixed(4))));
+      const line = [((t - t0) / 1000).toFixed(3)];
+      for (const row of rows) {
+        const v = rowValue(row, vals);
+        line.push(v === null || !isFinite(v) ? '' : String(Number(v.toFixed(4))));
       }
-      lines.push(row.join(','));
+      lines.push(line.join(','));
     }
     const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
@@ -1846,14 +2791,15 @@
       S.lastT = 0;
       resetStall();
       // 按 id 重新解析地址（固件重编译后地址会变）
-      for (const sig of S.signals) {
-        const e = S.index.get(sig.id);
+      for (const row of S.rows.values()) {
+        const e = S.index.get(row.id);
         if (e) {
-          sig.addr = e.addr; sig.size = e.size; sig.signed = e.signed;
-          sig.bit = e.bit; sig.type = e.type;
+          row.addr = e.addr; row.size = e.size; row.signed = e.signed;
+          row.bit = e.bit; row.type = e.type;
         }
       }
-      renderCatalog(); renderSelected(); renderStallSelects(); renderCalib(); sendConfig(true);
+      syncChannels();
+      renderCatalog(); renderSelected(); renderLegend(); renderValueTable(); renderStallSelects(); renderCalib(); sendConfig(true);
       toast('符号表已更新', 'ok');
     } catch (e) {
       toast('重建失败: ' + e.message, 'err');
