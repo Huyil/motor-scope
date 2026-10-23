@@ -128,7 +128,7 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 
 ```bash
 cmd.exe /c "curl -s http://127.0.0.1:8765/api/status"
-cmd.exe /c "curl -s 'http://127.0.0.1:8765/api/history/next?after=1441480.1&timeout=20'"
+cmd.exe /c 'curl -s "http://127.0.0.1:8765/api/history/next?after=1441480.1&timeout=20"'
 ```
 
 Python：
