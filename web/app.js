@@ -16,6 +16,8 @@
   function fmtAxis(v) {
     if (!isFinite(v)) return '';
     const a = Math.abs(v);
+    if (a >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (a >= 1e4) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
     if (a >= 1000) return Math.round(v).toLocaleString('en-US');
     if (a >= 100) return String(Math.round(v));
     if (a >= 10) return (Math.round(v * 10) / 10).toString();
@@ -226,7 +228,7 @@
       bit,
       scale: Number(d.scale ?? 1),
       offset: Number(d.offset ?? 0),
-      unit: String(d.unit || ''),
+      unit: d.unit !== undefined ? String(d.unit || '') : inferUnit(d.name),
       color: String(d.color || '#22d3ee'),
       step: !!d.step,
       visible: d.visible !== false,
@@ -239,6 +241,15 @@
   function inferAxis(name) {
     return /(vol|speed|level|state|power|conts|tick|duty|ccr|arr|batlevel|direction|overlevel)/i.test(String(name || ''))
       ? 'right' : 'left';
+  }
+
+  function inferUnit(name) {
+    const n = String(name || '');
+    if (/(threshold|current|adc\.RES|offset)/i.test(n)) return 'counts';
+    if (/(vol|ccr|duty)/i.test(n)) return 'duty';
+    if (/speed/i.test(n)) return 'cnt';
+    if (/(tick|msTick)/i.test(n)) return 'ms';
+    return '';
   }
 
   function nextColor() {
@@ -263,7 +274,7 @@
       color: opts.color || nextColor(),
       scale: opts.scale ?? 1,
       offset: opts.offset ?? 0,
-      unit: opts.unit ?? 'counts',
+      unit: opts.unit !== undefined ? opts.unit : inferUnit(entry.name),
       step: opts.step ?? isStepSignal(entry),
       visible: true,
     });
@@ -338,25 +349,6 @@
   }
 
   function restoreConfig() {
-    if (S.signals.length) {
-      // 服务端已有配置, 但仍恢复本地窗口/堵转偏好
-      try {
-        const raw = localStorage.getItem('ms.cfg.v1');
-        if (raw) {
-          const c = JSON.parse(raw);
-          S.windowSec = Number(c.windowSec) || S.windowSec;
-          S.autoZero = !!c.autoZero;
-          S.fillOn = c.fillOn !== false;
-          S.gridOn = c.gridOn !== false;
-          if (c.stall) {
-            S.stall.enabled = c.stall.enabled !== false;
-            S.stall.autoPause = !!c.stall.autoPause;
-          }
-        }
-      } catch {}
-      syncToggles();
-      return;
-    }
     let restored = false;
     try {
       const raw = localStorage.getItem('ms.cfg.v1');
@@ -364,7 +356,16 @@
         const c = JSON.parse(raw);
         const list = [];
         for (const item of c.signals || []) {
-          const entry = S.index.get(item.id);
+          let entry = S.index.get(item.id);
+          if (!entry && item.id.startsWith('custom.') && item.addr !== undefined) {
+            entry = {
+              id: item.id, name: item.name || item.id,
+              addr: Number(item.addr) >>> 0, size: Number(item.size) || 4,
+              signed: !!item.signed, bit: null, type: 'custom',
+              kind: 'custom', group: '自定义',
+            };
+            S.index.set(item.id, entry);
+          }
           if (!entry) continue;
           list.push(normalizeSignal({ ...entry, ...item }));
         }
@@ -386,6 +387,11 @@
       }
     } catch (e) { console.warn(e); }
 
+    if (!restored && S.signals.length) {
+      // 没有本地配置: 用服务端当前的通道
+      syncToggles();
+      return;
+    }
     if (!restored) {
       const defaults = S.catalog.defaults || [];
       const names = defaults.length ? defaults : (S.catalog.variables || []).slice(0, 4).map((v) => v.name);
@@ -419,10 +425,16 @@
   function saveLocal() {
     try {
       localStorage.setItem('ms.cfg.v1', JSON.stringify({
-        signals: S.signals.map((s) => ({
-          id: s.id, scale: s.scale, offset: s.offset, unit: s.unit,
-          color: s.color, step: s.step, visible: s.visible,
-        })),
+        signals: S.signals.map((s) => {
+          const rec = {
+            id: s.id, scale: s.scale, offset: s.offset, unit: s.unit,
+            color: s.color, step: s.step, visible: s.visible, axis: s.axis,
+          };
+          if (s.id.startsWith('custom.')) {
+            rec.name = s.name; rec.addr = s.addr; rec.size = s.size; rec.signed = s.signed;
+          }
+          return rec;
+        }),
         rate: S.rate,
         windowSec: S.windowSec,
         autoZero: S.autoZero,
@@ -874,9 +886,10 @@
 
   function sigRow(entry, kind, opts = {}) {
     const row = document.createElement('div');
-    const selected = !!byId(entry.id);
+    const eid = entry.id || entry.name;
+    const selected = !!byId(eid);
     row.className = 'sig-row' + (selected ? ' selected' : '');
-    row.dataset.id = entry.id;
+    row.dataset.id = eid;
     row.dataset.kind = kind;
     if (opts.bit) row.classList.add('bit-row');
     if (opts.reg) row.classList.add('reg-row');
@@ -888,7 +901,7 @@
     if (opts.reg && opts.hasBits) {
       const t = document.createElement('button');
       t.className = 'reg-toggle';
-      t.dataset.regToggle = entry.id;
+      t.dataset.regToggle = eid;
       t.textContent = S.ui.openRegs.has(entry.id) ? '−' : '+';
       t.title = '展开位域';
       main.appendChild(t);
@@ -913,7 +926,7 @@
     row.appendChild(check);
     row.appendChild(main);
     row.appendChild(val);
-    if (selected) S.liveRows.set(entry.id, val);
+    if (selected) S.liveRows.set(eid, val);
     return row;
   }
 
@@ -1086,10 +1099,11 @@
       chip.className = 'legend-chip' + (sig.visible ? '' : ' off');
       chip.dataset.id = sig.id;
       chip.title = sig.name + ' · ' + hex(sig.addr) + ' · ' + (sig.unit || '') + (sig.step ? ' · step' : '');
-      chip.innerHTML = '<span class="dot"></span><span class="lname"></span><span class="lval">—</span>';
+      chip.innerHTML = '<span class="dot"></span><span class="lname"></span><span class="lax"></span><span class="lval">—</span>';
       chip.querySelector('.dot').style.background = sig.color;
       chip.querySelector('.dot').style.color = sig.color;
       chip.querySelector('.lname').textContent = shortName(sig.name);
+      if (sig.axis === 'right') chip.querySelector('.lax').textContent = 'R';
       chip.addEventListener('click', () => {
         sig.visible = !sig.visible;
         chip.classList.toggle('off', !sig.visible);
@@ -1255,11 +1269,15 @@
         }
       }
       if (!isFinite(mn)) return null;
-      if (mx - mn < 1e-9) { mn -= 1; mx += 1; }
+      // 常量信号 (例如 vol 恒为 1050) 如果只按 0 跨度加 1, 右轴会出现
+      // 1,049/1,050/1,051 这种没信息量的刻度; 给一个最小可见跨度.
+      const mid = (mx + mn) / 2;
+      const minSpan = Math.max(2, Math.abs(mid) * 0.10);
+      if (mx - mn < minSpan) { mn = mid - minSpan / 2; mx = mid + minSpan / 2; }
       const p = (mx - mn) * 0.08;
       mn -= p; mx += p;
       if (S.autoZero) mn = Math.min(0, mn);
-      else if (dmin >= 0 && mn < 0) mn = 0;
+      else if (dmin >= 0 && mn < 0) mn = Math.max(0, mn);
       return { min: mn, max: mx };
     };
     let left = axisRange(leftSigs) || { min: 0, max: 1 };
@@ -1279,8 +1297,8 @@
     ctx.fillStyle = bg;
     ctx.fillRect(x0, y0, pw, ph);
 
-    // grid
-    if (S.gridOn) {
+    // grid lines (labels always on, grid optional)
+    {
       ctx.strokeStyle = 'rgba(120,150,190,.10)';
       ctx.lineWidth = 1;
       ctx.font = '9.5px ' + getComputedStyle(document.body).getPropertyValue('--mono');
@@ -1290,7 +1308,9 @@
         const ratio = i / ticks;
         const v = labelLeft.min + (labelLeft.max - labelLeft.min) * ratio;
         const y = Math.round(y0 + ph - ratio * ph) + 0.5;
-        ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + pw, y); ctx.stroke();
+        if (S.gridOn) {
+          ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + pw, y); ctx.stroke();
+        }
         ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
         ctx.fillText(fmtAxis(v), x0 - 9, y);
         if (anyRight) {
@@ -1304,7 +1324,9 @@
       const xt = 5;
       for (let i = 0; i <= xt; i++) {
         const x = Math.round(x0 + pw * i / xt) + 0.5;
-        ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + ph); ctx.stroke();
+        if (S.gridOn) {
+          ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + ph); ctx.stroke();
+        }
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
         const t = start + (end - start) * i / xt;
         const rel = (t - end) / 1000;
@@ -1770,8 +1792,8 @@
       const row = [((t - t0) / 1000).toFixed(3)];
       for (let i = 0; i < sigs.length; i++) {
         const s = sigs[i];
-        const raw = vals[i] ?? 0;
-        row.push(String(Number((raw * s.scale + s.offset).toFixed(4))));
+        const raw = vals[i];
+        row.push(raw === undefined || raw === null ? '' : String(Number((raw * s.scale + s.offset).toFixed(4))));
       }
       lines.push(row.join(','));
     }

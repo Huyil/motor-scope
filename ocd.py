@@ -209,6 +209,7 @@ class OcdProcess:
         self.log: Deque[str] = deque(maxlen=400)
         self._reader: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._job = _WindowsJob()
 
     # ---- 日志 -----------------------------------------------------
     def _append_log(self, line: str) -> None:
@@ -256,6 +257,7 @@ class OcdProcess:
 
         self._reader = threading.Thread(target=self._reader_loop, name="ocd-log", daemon=True)
         self._reader.start()
+        self._job.assign(self.proc)
 
         deadline = time.monotonic() + timeout
         last_err = ""
@@ -310,6 +312,7 @@ class OcdProcess:
                 proc.kill()
             except Exception:
                 pass
+        self._job.close()
         self._append_log("OpenOCD 已关闭")
 
     @property
@@ -325,6 +328,91 @@ def _quote_arg(arg: str) -> str:
     if not arg or any(c.isspace() for c in arg) or '"' in arg:
         return '"%s"' % arg.replace('"', '\\"')
     return arg
+
+
+class _WindowsJob:
+    """把 openocd 子进程放进 Job Object; 服务器被强杀时子进程也一起死.
+
+    之前实机踩过: 控制台/父进程被 taskkill, openocd 还占着 H7-TOOL,
+    下一次连接就是 "CMSIS-DAP command mismatch"。KILL_ON_JOB_CLOSE 兜底。
+    """
+
+    def __init__(self):
+        self.handle = None
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class IO_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ("ReadOperationCount", ctypes.c_ulonglong),
+                    ("WriteOperationCount", ctypes.c_ulonglong),
+                    ("OtherOperationCount", ctypes.c_ulonglong),
+                    ("ReadTransferCount", ctypes.c_ulonglong),
+                    ("WriteTransferCount", ctypes.c_ulonglong),
+                    ("OtherTransferCount", ctypes.c_ulonglong),
+                ]
+
+            class BASIC(ctypes.Structure):
+                _fields_ = [
+                    ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                    ("PerJobUserTimeLimit", ctypes.c_longlong),
+                    ("LimitFlags", wintypes.DWORD),
+                    ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t),
+                    ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t),
+                    ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD),
+                ]
+
+            class EXT(ctypes.Structure):
+                _fields_ = [
+                    ("BasicLimitInformation", BASIC),
+                    ("IoInfo", IO_COUNTERS),
+                    ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t),
+                ]
+
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.CreateJobObjectW.restype = wintypes.HANDLE
+            h = k32.CreateJobObjectW(None, None)
+            if not h:
+                return
+            info = EXT()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            if not k32.SetInformationJobObject(h, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                k32.CloseHandle(h)
+                return
+            self.handle = h
+        except Exception:
+            self.handle = None
+
+    def assign(self, proc) -> None:
+        if not self.handle:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            k32.AssignProcessToJobObject(self.handle, wintypes.HANDLE(int(proc._handle)))
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if not self.handle:
+            return
+        try:
+            import ctypes
+            ctypes.WinDLL("kernel32").CloseHandle(self.handle)
+        except Exception:
+            pass
+        self.handle = None
 
 
 # ---- 采样区域规划 ---------------------------------------------------

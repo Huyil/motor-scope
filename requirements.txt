@@ -1,0 +1,2 @@
+# 只有从 AXF/DWARF 重新生成 signals.json 时需要; 运行时不依赖第三方库.
+pyelftools>=0.29

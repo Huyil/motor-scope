@@ -57,6 +57,19 @@ def default_axis(name: str) -> str:
     return "right" if _AXIS_RIGHT.search(name or "") else "left"
 
 
+def default_unit(name: str) -> str:
+    n = name or ""
+    if re.search(r"(threshold|current|adc\.RES|offset)", n, re.I):
+        return "counts"
+    if re.search(r"(vol|ccr|duty)", n, re.I):
+        return "duty"
+    if re.search(r"speed", n, re.I):
+        return "cnt"
+    if re.search(r"(tick|msTick)", n, re.I):
+        return "ms"
+    return ""
+
+
 PALETTE = [
     "#22d3ee", "#f59e0b", "#a78bfa", "#34d399", "#f472b6",
     "#60a5fa", "#fb7185", "#facc15", "#2dd4bf", "#c084fc",
@@ -88,7 +101,10 @@ class Signal:
             self.width = int(data.get("width") or 0)
         self.scale = float(data.get("scale") or 1.0)
         self.offset = float(data.get("offset") or 0.0)
-        self.unit = str(data.get("unit") or "")
+        if data.get("unit") is not None:
+            self.unit = str(data.get("unit") or "")
+        else:
+            self.unit = default_unit(self.name)
         self.color = str(data.get("color") or "")
         self.step = bool(data.get("step"))
         self.visible = data.get("visible", True) is not False
@@ -112,11 +128,14 @@ class Signal:
         return (1 << bits) - 1
 
     def decode(self, raw: int) -> int:
-        v = raw & self.mask()
-        if self.signed and not self.width:
-            sign = 1 << (self.size * 8 - 1)
-            if v & sign:
-                v -= sign << 1
+        if self.width:
+            v = (raw >> self.shift) & self.mask()
+        else:
+            v = raw & self.mask()
+            if self.signed:
+                sign = 1 << (self.size * 8 - 1)
+                if v & sign:
+                    v -= sign << 1
         return v
 
     def span(self) -> Tuple[int, int]:
@@ -635,7 +654,7 @@ class App:
             d.update({
                 "id": name, "color": PALETTE[i % len(PALETTE)],
                 "scale": 1.0, "offset": 0.0,
-                "unit": "counts",
+                "unit": default_unit(name),
                 "step": any(k in name for k in ("threshold", "state", "level", "conts")),
                 "visible": True,
                 "axis": default_axis(name),
@@ -1072,12 +1091,16 @@ def parse_args(argv: Optional[Sequence[str]] = None):
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    args = parse_args(argv)
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        # Windows 真控制台让 Python 走 Unicode API (PEP 528), 不要强改;
+        # 管道/日志 (isatty=False) 用 UTF-8, 便于重定向和本仓库的测试抓取.
+        if os.name != "nt" or not sys.stdout.isatty():
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if os.name != "nt" or not sys.stderr.isatty():
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+    args = parse_args(argv)
     app = App(args)
 
     server = None

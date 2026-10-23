@@ -255,6 +255,7 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .legend-chip.off { opacity: .38; }
 .legend-chip .dot { width: 7px; height: 7px; }
 .legend-chip .lname { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.legend-chip .lax { font-family: var(--mono); font-size: 8px; line-height: 1; color: #9db2ca; border: 1px solid var(--line2); border-radius: 3px; padding: 1px 3px; flex: 0 0 auto; }
 .legend-chip .lval { font-family: var(--mono); color: var(--text); margin-left: 2px; font-variant-numeric: tabular-nums; }
 .chart-tools { margin-left: auto; display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .tool { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
@@ -364,9 +365,10 @@ input[type="checkbox"]:checked::before { transform: rotate(-45deg) scale(1); }
 .seg button { flex: 1; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; }
 .seg button.active { background: rgba(34,211,238,.12); color: var(--cyan); }
 .calib-list { display: flex; flex-direction: column; gap: 7px; }
-.calib-row { display: grid; grid-template-columns: minmax(0,1fr) 62px 62px 54px; gap: 5px; align-items: center; }
+.calib-row { display: grid; grid-template-columns: minmax(0,1fr) 50px 50px 44px 38px; gap: 4px; align-items: center; }
 .calib-row .cname { font-family: var(--mono); font-size: 10px; color: #b9cbe0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.calib-row input { width: 100%; height: 25px; border: 1px solid var(--line); border-radius: 5px; background: rgba(6,11,21,.85); padding: 0 5px; font-family: var(--mono); font-size: 10px; outline: none; }
+.calib-row input, .calib-row select { width: 100%; height: 25px; border: 1px solid var(--line); border-radius: 5px; background: rgba(6,11,21,.85); padding: 0 4px; font-family: var(--mono); font-size: 10px; outline: none; }
+.calib-row select.axis { padding: 0; text-align: center; color: var(--cyan); }
 .calib-row input.unit { color: var(--muted); }
 #catalogMeta { word-break: break-all; }
 
