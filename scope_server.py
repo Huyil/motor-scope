@@ -468,13 +468,17 @@ class Sampler(threading.Thread):
     def set_signals(self, signals: Sequence[Signal], rate: float) -> None:
         key = tuple((s.addr, s.size, s.shift, s.width) for s in signals)
         with self._cond:
-            if key != self._sig_key:
+            changed = key != self._sig_key
+            if changed:
                 # 通道构成变了, 旧样本的列对不上, 丢掉
                 self.history.clear()
                 self._sig_key = key
             self.signals = list(signals)
             self.rate = max(1.0, min(500.0, float(rate or 100)))
-            self.generation += 1
+            # 只有列构成变了才让 Agent 的 cursor 作废; 页面重连重复下发同一套
+            # 配置时不能把 generation 推高, 否则 long-poll 会被误判为 reset.
+            if changed:
+                self.generation += 1
             self.error = ""
             self._cond.notify_all()
         self._wake.set()

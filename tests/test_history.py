@@ -27,6 +27,12 @@ class HistoryTest(unittest.TestCase):
     def tearDown(self):
         self.s.stop()
 
+    def test_same_config_keeps_generation(self):
+        g = self.s.generation
+        self.s.set_signals(list(self.s.signals), 100)
+        self.assertEqual(self.s.generation, g)
+        self.assertEqual(len(self.s.history), 10)
+
     def test_before_default(self):
         r = self.s.history_before(None, 3)
         self.assertEqual([x[1][0] for x in r["samples"]], [7, 8, 9])
