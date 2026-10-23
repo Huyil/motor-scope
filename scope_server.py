@@ -438,7 +438,8 @@ class Sampler(threading.Thread):
         super().__init__(name="motor-scope-sampler", daemon=True)
         self.hub = hub
         self.recorder = Recorder()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._wake = threading.Event()
         self.source: Optional[Source] = None
@@ -457,15 +458,16 @@ class Sampler(threading.Thread):
 
     # ---- 配置 ----
     def set_source(self, source: Optional[Source]) -> None:
-        with self._lock:
+        with self._cond:
             self.source = source
             self.generation += 1
             self.error = ""
+            self._cond.notify_all()
         self._wake.set()
 
     def set_signals(self, signals: Sequence[Signal], rate: float) -> None:
         key = tuple((s.addr, s.size, s.shift, s.width) for s in signals)
-        with self._lock:
+        with self._cond:
             if key != self._sig_key:
                 # 通道构成变了, 旧样本的列对不上, 丢掉
                 self.history.clear()
@@ -474,6 +476,7 @@ class Sampler(threading.Thread):
             self.rate = max(1.0, min(500.0, float(rate or 100)))
             self.generation += 1
             self.error = ""
+            self._cond.notify_all()
         self._wake.set()
 
     def snapshot(self) -> Tuple[Optional[Source], List[Signal], float, int]:
@@ -483,6 +486,8 @@ class Sampler(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        with self._cond:
+            self._cond.notify_all()
 
     # ---- 主循环 ----
     def run(self) -> None:
@@ -507,9 +512,10 @@ class Sampler(threading.Thread):
                 self.last_t = t_ms
                 self.recorder.append(t_ms, values)
                 row = [round(t_ms, 1), values]
-                with self._lock:
+                with self._cond:
                     self.history.append(row)
                     self.error = ""
+                    self._cond.notify_all()
                 self.hub.publish({"type": "s", "b": [row]})
                 if t0 - self._rate_t0 >= 1.0:
                     self.rate_actual = self._rate_n / (t0 - self._rate_t0)
@@ -537,6 +543,103 @@ class Sampler(threading.Thread):
             cutoff = self.last_t - max(1.0, min(180.0, seconds)) * 1000.0
             return [row for row in self.history if row[0] >= cutoff]
 
+    def _signals_meta(self) -> List[Dict[str, Any]]:
+        return [s.to_dict() for s in self.signals]
+
+    def history_before(self, before: Optional[float] = None, limit: int = 1000) -> Dict[str, Any]:
+        """读 before 之前的最近 limit 点; before 缺省=最新, 立即返回."""
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 1000
+        limit = max(1, min(40000, limit))
+        with self._lock:
+            rows = list(self.history)
+            signals = self._signals_meta()
+            generation = self.generation
+            if not rows:
+                return {"signals": signals, "samples": [], "cursor": before,
+                        "oldest": None, "latest": None, "gap": False,
+                        "reset": False, "generation": generation, "count": 0}
+            oldest, latest = rows[0][0], rows[-1][0]
+            if before is None:
+                before = latest
+            try:
+                before = float(before)
+            except (TypeError, ValueError):
+                before = latest
+            gap = before < oldest
+            end = 0
+            while end < len(rows) and rows[end][0] <= before:
+                end += 1
+            start = max(0, end - limit)
+            selected = rows[start:end]
+            cursor = selected[-1][0] if selected else before
+            return {"signals": signals, "samples": selected, "cursor": cursor,
+                    "oldest": oldest, "latest": latest, "gap": gap,
+                    "reset": False, "generation": generation, "count": len(selected)}
+
+    def history_after(self, after: Optional[float] = None, limit: int = 1000,
+                      timeout: float = 20.0) -> Dict[str, Any]:
+        """long-poll: 返回 after 之后的样本; 没有就等, 最多 timeout 秒."""
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 1000
+        limit = max(1, min(40000, limit))
+        try:
+            timeout = float(timeout)
+        except (TypeError, ValueError):
+            timeout = 20.0
+        timeout = max(0.0, min(60.0, timeout))
+        deadline = time.monotonic() + timeout
+        with self._cond:
+            start_gen = self.generation
+            if after is None:
+                after = self.history[-1][0] if self.history else -1.0
+            else:
+                try:
+                    after = float(after)
+                except (TypeError, ValueError):
+                    after = -1.0
+            while True:
+                rows = list(self.history)
+                signals = self._signals_meta()
+                generation = self.generation
+                oldest = rows[0][0] if rows else None
+                latest = rows[-1][0] if rows else None
+                if generation != start_gen:
+                    # 配置/信号源变了, 旧 cursor 作废
+                    return {"signals": signals, "samples": [], "cursor": after,
+                            "oldest": oldest, "latest": latest, "gap": True,
+                            "reset": True, "timeout": False,
+                            "generation": generation, "count": 0}
+                if rows:
+                    gap = after < oldest
+                    start = 0
+                    if not gap:
+                        while start < len(rows) and rows[start][0] <= after:
+                            start += 1
+                    if start < len(rows):
+                        selected = rows[start:start + limit]
+                        return {"signals": signals, "samples": selected,
+                                "cursor": selected[-1][0], "oldest": oldest,
+                                "latest": latest, "gap": gap, "reset": False,
+                                "timeout": False, "generation": generation,
+                                "count": len(selected)}
+                if self._stop.is_set():
+                    return {"signals": signals, "samples": [], "cursor": after,
+                            "oldest": oldest, "latest": latest, "gap": False,
+                            "reset": False, "timeout": False, "stopped": True,
+                            "generation": generation, "count": 0}
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    return {"signals": signals, "samples": [], "cursor": after,
+                            "oldest": oldest, "latest": latest, "gap": False,
+                            "reset": False, "timeout": True,
+                            "generation": generation, "count": 0}
+                self._cond.wait(min(remain, 1.0))
+
     def status(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -546,6 +649,10 @@ class Sampler(threading.Thread):
                 "last_t": round(self.last_t, 1),
                 "error": self.error,
                 "signals": len(self.signals),
+                "generation": self.generation,
+                "history": len(self.history),
+                "oldest_t": self.history[0][0] if self.history else None,
+                "latest_t": self.history[-1][0] if self.history else None,
             }
 
 
@@ -898,14 +1005,50 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.app.status_payload())
             if path == "/api/catalog":
                 return self._json(self.app.catalog)
+            if path == "/api/history/next":
+                qs = parse_qs(urlparse(self.path).query)
+                after = None
+                if qs.get("after"):
+                    try:
+                        after = float(qs["after"][0])
+                    except ValueError:
+                        after = None
+                try:
+                    limit = int((qs.get("limit") or ["1000"])[0])
+                except ValueError:
+                    limit = 1000
+                try:
+                    timeout = float((qs.get("timeout") or ["20"])[0])
+                except ValueError:
+                    timeout = 20.0
+                return self._json(self.app.sampler.history_after(after, limit, timeout))
             if path == "/api/history":
                 qs = parse_qs(urlparse(self.path).query)
+                if "before" in qs or "limit" in qs:
+                    before = None
+                    if qs.get("before"):
+                        try:
+                            before = float(qs["before"][0])
+                        except ValueError:
+                            before = None
+                    try:
+                        limit = int((qs.get("limit") or ["1000"])[0])
+                    except ValueError:
+                        limit = 1000
+                    return self._json(self.app.sampler.history_before(before, limit))
                 try:
                     seconds = float((qs.get("seconds") or ["60"])[0])
                 except ValueError:
                     seconds = 60.0
-                return self._json({"samples": self.app.sampler.history_snapshot(seconds),
-                                   "last_t": self.app.sampler.last_t})
+                samples = self.app.sampler.history_snapshot(seconds)
+                return self._json({
+                    "samples": samples,
+                    "last_t": self.app.sampler.last_t,
+                    "generation": self.app.sampler.generation,
+                    "signals": self.app.sampler._signals_meta(),
+                    "oldest": samples[0][0] if samples else None,
+                    "latest": samples[-1][0] if samples else None,
+                })
             if path == "/api/log":
                 return self._json({"log": self.app.log_tail(200)})
             if path == "/api/record.csv":

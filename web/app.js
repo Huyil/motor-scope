@@ -112,6 +112,7 @@
     configTimer: 0,
     configDirty: false,
     lastStatusAt: 0,
+    serverUptime: 0,
     errors: new Set(),
     sampleCountSeen: 0,
   };
@@ -501,8 +502,13 @@
           adoptSignals(msg.config.signals, msg.config.rate);
           renderSelected(); renderLegend(); renderStallSelects(); renderCalib();
           saveLocal();
+          loadHistory();
+        } else if (S.signals.length) {
+          // 服务重启/重连后把页面的通道和频率重新下发, 否则服务端会退回默认配置
+          sendConfig(true).then(loadHistory);
+        } else {
+          loadHistory();
         }
-        loadHistory();
       } else if (msg.type === 'status') {
         applyStatus(msg.status);
       } else if (msg.type === 's') {
@@ -510,7 +516,7 @@
       }
     };
     es.onerror = () => {
-      S.connPill.classList.add('warn');
+      D.connPill.classList.add('warn');
       if (!S.toastKeys.has('sse')) {
         S.toastKeys.add('sse');
         toast('实时连接中断，正在重连…', 'err');
@@ -706,6 +712,20 @@
   function applyStatus(st) {
     if (!st) return;
     S.status = st;
+    const up = Number(st.uptime) || 0;
+    if (S.serverUptime > 0 && up + 1 < S.serverUptime) {
+      // 服务重启: 时间轴/游标全部作废, 清掉旧样本再重新拉
+      S.samples = [];
+      S.lastT = 0;
+      S.pauseAt = 0;
+      S.paused = false;
+      S.hoverT = null;
+      resetStall();
+      updatePauseUI();
+      updateStallUI(0);
+      S.dirty = true;
+    }
+    S.serverUptime = up;
     S.source = st.source || { kind: 'none', connected: false };
     S.sampler = st.sampler || {};
     S.record = st.record || {};

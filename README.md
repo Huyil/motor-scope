@@ -260,8 +260,10 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 python scope_server.py --port 8790 --rate 50
 python scope_server.py --openocd D:\Code\DR2159\tools\openocd
 python gen_signals.py                          # 重建 signals.json
-python -m unittest tests.test_core -v          # 区域合并/位域/解析单测
+python -m unittest tests.test_core tests.test_history -v   # 区域/位域/历史游标单测
 ```
+
+Agent / 脚本读取用的 HTTP API（`/api/history` 读之前、`/api/history/next` long-poll 读之后）见 **[API.md](API.md)**。
 
 没有硬件也可以验证 Tcl 客户端：
 
@@ -284,6 +286,7 @@ tools/motor_scope/
 ├─ start_scope_sim.bat  一键仿真
 ├─ regen_signals.bat    重新生成符号
 ├─ requirements.txt     pyelftools（仅重建符号时需要）
+├─ API.md              Agent/脚本用的 HTTP API（history/next/status/catalog）
 ├─ web/                 index.html / style.css / app.js（原生 canvas，无前端依赖）
 ├─ tests/               mock_tcl.py + test_core.py
 └─ docs/                截图
