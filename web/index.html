@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MotorScope · DR2159</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cpath d='M3 18h6l2-8 4 14 3-10 2 4h9' fill='none' stroke='%2322d3ee' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="8" fill="#0b1220" stroke="#1e293b"/>
+        <path d="M3.5 19h5.5l2.2-8.5 4.1 14 3-10 2.1 4.5h7.6" fill="none" stroke="#22d3ee" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div class="brand-text">
+        <b>MOTOR<span>SCOPE</span></b>
+        <small>DR2159 · CW32L011</small>
+      </div>
+    </div>
+
+    <div id="connPill" class="conn-pill">
+      <span class="dot"></span>
+      <span id="connText">未连接</span>
+      <span id="connRate" class="sep">-- Hz</span>
+    </div>
+
+    <div class="top-actions">
+      <button id="btnConnect" class="btn primary" title="连接 / 切换信号源">
+        <svg viewBox="0 0 24 24"><path d="M9 7V3m6 4V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v4"/></svg>
+        <span>连接</span>
+      </button>
+      <button id="btnPause" class="btn icon" title="暂停 / 继续 (空格)">
+        <svg viewBox="0 0 24 24" class="ico-pause"><path d="M8 5h3v14H8zM13 5h3v14h-3z"/></svg>
+        <svg viewBox="0 0 24 24" class="ico-play hidden"><path d="M8 5l12 7-12 7z"/></svg>
+      </button>
+      <button id="btnClear" class="btn icon" title="清空 (C)">
+        <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg>
+      </button>
+      <button id="btnRecord" class="btn icon" title="录制 (R)">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg>
+      </button>
+      <button id="btnCsv" class="btn icon" title="导出 CSV">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
+      </button>
+      <button id="btnShot" class="btn icon" title="截图">
+        <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
+      </button>
+      <button id="btnSettings" class="btn icon" title="设置">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5L9 6.1a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L5 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.7 1L9.5 21h5l.3-3.1a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z"/></svg>
+      </button>
+      <button id="btnSidebar" class="btn icon only-mobile" title="信号列表">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="layout">
+    <aside id="sidebar">
+      <div class="side-head">
+        <div class="side-title">信号 <span id="sigCount" class="badge">0</span></div>
+        <button id="btnReloadSymbols" class="mini" title="从 AXF 重新生成符号">刷新</button>
+      </div>
+
+      <div class="searchbox">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input id="search" type="search" placeholder="搜索变量 / 寄存器 / 地址" autocomplete="off">
+        <kbd>/</kbd>
+      </div>
+
+      <div class="tabs" id="catalogTabs">
+        <button class="tab active" data-tab="vars">变量</button>
+        <button class="tab" data-tab="periph">外设</button>
+        <button class="tab" data-tab="custom">自定义</button>
+      </div>
+
+      <div id="catalogBody" class="catalog-body"></div>
+
+      <div class="selected-block">
+        <div class="side-title">已显示 <span id="selCount" class="badge">0</span></div>
+        <div id="selectedList" class="selected-list"></div>
+      </div>
+    </aside>
+
+    <main id="main">
+      <section id="hero">
+        <div class="metric" id="mCurrent">
+          <label>电机电流</label>
+          <div class="metric-value"><strong id="curVal">--</strong><span id="curUnit">counts</span></div>
+          <small id="curRaw">motor.over.current</small>
+        </div>
+        <div class="metric" id="mThreshold">
+          <label>堵转阈值</label>
+          <div class="metric-value"><strong id="thrVal">--</strong><span id="thrUnit">counts</span></div>
+          <small id="thrRaw">motor.over.thresholdLast</small>
+        </div>
+        <div class="metric" id="mMargin">
+          <label>余量</label>
+          <div class="metric-value"><strong id="marginVal">--</strong><span id="marginUnit">counts</span></div>
+          <div class="bar"><i id="marginBar"></i></div>
+        </div>
+        <div class="stall-card" id="stallCard">
+          <div class="stall-top"><span class="stall-dot"></span><b id="stallText">安全</b><span id="stallCount" class="stall-count">0 次</span></div>
+          <div class="stall-sub" id="stallSub">未达到堵转阈值</div>
+        </div>
+      </section>
+
+      <section id="chartCard">
+        <div class="chart-toolbar">
+          <div class="legend" id="legend"></div>
+          <div class="chart-tools">
+            <label class="tool"><span>窗口</span>
+              <select id="winSel">
+                <option value="5">5 s</option>
+                <option value="10">10 s</option>
+                <option value="20" selected>20 s</option>
+                <option value="30">30 s</option>
+                <option value="60">60 s</option>
+              </select>
+            </label>
+            <label class="tool check"><input type="checkbox" id="autoZero"> 从 0</label>
+            <label class="tool check"><input type="checkbox" id="fillOn" checked> 填充</label>
+            <label class="tool check"><input type="checkbox" id="gridOn" checked> 网格</label>
+          </div>
+        </div>
+        <div id="canvasWrap">
+          <canvas id="chart"></canvas>
+          <div id="cursorTip" class="cursor-tip hidden"></div>
+          <div id="stallRibbon" class="stall-ribbon hidden"><span>STALL</span><b id="stallRibbonText"></b></div>
+          <div id="emptyHint" class="empty-hint">
+            <div>还没有信号</div>
+            <small>在左侧勾选变量/寄存器，或点击“连接”</small>
+          </div>
+        </div>
+      </section>
+
+      <footer id="statusbar">
+        <div class="stat"><span class="k">样本</span><b id="statSamples">0</b></div>
+        <div class="stat"><span class="k">速率</span><b id="statRate">-- Hz</b></div>
+        <div class="stat"><span class="k">延迟</span><b id="statLatency">--</b></div>
+        <div class="stat"><span class="k">录制</span><b id="statRecord">关</b></div>
+        <div class="stat grow"><span class="k">状态</span><b id="statMsg" class="muted">等待连接</b></div>
+        <button id="btnLog" class="link">OpenOCD 日志</button>
+      </footer>
+    </main>
+  </div>
+</div>
+
+<!-- 首次连接 / 断开提示 -->
+<div id="overlay" class="overlay hidden">
+  <div class="overlay-card">
+    <div class="overlay-icon">
+      <svg viewBox="0 0 48 48"><path d="M6 28h9l3-13 6 22 4.5-15 3 6H42" fill="none" stroke="#22d3ee" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </div>
+    <h2>连接目标</h2>
+    <p class="muted">通过 H7-TOOL / CMSIS-DAP 活体读取 <code>motor.over.current</code>、<code>motor.over.thresholdLast</code> 等变量，不暂停电机。</p>
+    <div class="overlay-actions">
+      <button id="btnQuickConnect" class="btn primary big">连接 OpenOCD</button>
+      <button id="btnQuickSim" class="btn big">先看仿真</button>
+    </div>
+    <p id="overlayHint" class="overlay-hint">将自动寻找 <code>tools/openocd</code>，启动 tcl_port 并读 CPUID 握手。</p>
+    <button id="btnOverlayAdvanced" class="link">高级设置（路径 / 附加已有 TCL 端口）</button>
+  </div>
+</div>
+
+<!-- 设置抽屉 -->
+<div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+<aside id="drawer" class="drawer">
+  <div class="drawer-head">
+    <h2>设置</h2>
+    <button id="btnDrawerClose" class="btn icon" title="关闭">×</button>
+  </div>
+  <div class="drawer-body">
+    <section class="drawer-sec">
+      <h3>信号源</h3>
+      <div class="seg" id="srcSeg">
+        <button data-mode="openocd" class="active">OpenOCD</button>
+        <button data-mode="attach">附加 TCL</button>
+        <button data-mode="sim">仿真</button>
+      </div>
+      <div class="field" id="fieldOpenocd">
+        <label>OpenOCD 根目录（留空自动）</label>
+        <input id="inpOcd" type="text" placeholder="D:\Code\DR2159\tools\openocd">
+      </div>
+      <div class="field hidden" id="fieldAttach">
+        <label>已有 TCL 端口</label>
+        <div class="row2">
+          <input id="inpAttachHost" type="text" value="127.0.0.1">
+          <input id="inpAttachPort" type="number" value="6666">
+        </div>
+      </div>
+      <div class="row2">
+        <button id="btnDoConnect" class="btn primary">连接</button>
+        <button id="btnDisconnect" class="btn">断开</button>
+      </div>
+      <p class="hint" id="srcHint">启动 openocd.exe（tcl_port 自动选空闲端口），读 CPUID 0x410CC601 握手。</p>
+    </section>
+
+    <section class="drawer-sec">
+      <h3>采样</h3>
+      <div class="row2">
+        <div class="field"><label>频率</label>
+          <select id="rateSel">
+            <option value="20">20 Hz</option>
+            <option value="50">50 Hz</option>
+            <option value="100" selected>100 Hz</option>
+            <option value="150">150 Hz</option>
+            <option value="200">200 Hz</option>
+          </select>
+        </div>
+        <div class="field"><label>窗口</label>
+          <select id="winSel2">
+            <option value="5">5 s</option>
+            <option value="10">10 s</option>
+            <option value="20" selected>20 s</option>
+            <option value="30">30 s</option>
+            <option value="60">60 s</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint">读 1~2 个连续区域，100 Hz 在 4 MHz SWD 下通常能跑满；读不动就降到 50 Hz。</p>
+    </section>
+
+    <section class="drawer-sec">
+      <h3>堵转判定</h3>
+      <div class="field"><label>电流信号</label><select id="curSel"></select></div>
+      <div class="field"><label>阈值信号</label><select id="thrSel"></select></div>
+      <label class="check"><input type="checkbox" id="stallEnable" checked> 启用判定（current ≥ thresholdLast）</label>
+      <label class="check"><input type="checkbox" id="autoPause"> 触发时自动暂停</label>
+      <p class="hint">阈值信号建议用 <code>motor.over.thresholdLast</code>——它是固件扣除自适应 offset 后的实际判决门限。</p>
+    </section>
+
+    <section class="drawer-sec">
+      <h3>信号标定 <span class="hint-inline">值 = 原始 × 缩放 + 偏移</span></h3>
+      <div id="calibList" class="calib-list"></div>
+    </section>
+
+    <section class="drawer-sec">
+      <h3>符号与录制</h3>
+      <div class="row2">
+        <button id="btnReloadCatalog" class="btn">从 AXF 重新生成</button>
+        <button id="btnRecordCsv" class="btn">下载录制 CSV</button>
+      </div>
+      <p class="hint" id="catalogMeta"></p>
+    </section>
+  </div>
+</aside>
+
+<!-- 日志 -->
+<div id="logPanel" class="log-panel hidden">
+  <div class="log-head"><b>OpenOCD / 服务日志</b><button id="btnLogClose" class="btn icon">×</button></div>
+  <pre id="logText"></pre>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
