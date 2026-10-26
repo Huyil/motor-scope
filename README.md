@@ -1,7 +1,8 @@
 # MotorScope · DR2159
 
 > 用 OpenOCD **活体**读 CW32L011 的 RAM / 外设寄存器，在浏览器里画时间轴波形，
-> 专门用来观察 **电机电流 vs 堵转阈值**。不 halt、不写内存、不碰电机输出。
+> 专门用来观察 **电机电流 vs 堵转阈值**。默认只读：不 halt、不 reset、不烧录；
+> 写入是显式解锁后的可选动作，仅限 RAM / SFR，写后立即回读。
 
 ![总览](docs/overview.png)
 
@@ -104,6 +105,37 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 - 给每路信号填 `缩放 / 偏移 / 单位 / 左轴L或右轴R`；
 - 从 AXF 重新生成符号表、下载后端录制 CSV。
 
+### 3.1 写入（默认锁定）
+
+图表下方的“写入”卡片用于改 RAM 变量或外设寄存器，**默认锁定**：
+
+- **目标下拉**：列出当前拥有行里带地址的信号/寄存器，默认自动加入
+  `motor.over.threshold`（仅用于写入的隐藏行，不占“信号/数值表”计数，但会采样回读）；
+- **滑条 / 开关**：滑条模式显示滑条 + 数字输入；开关模式只显示一个 checkbox
+  （适合 0/1 状态位）。切换模式不会留下占位控件；
+- **范围 / 步**：最小值、最大值、步长，只影响滑条；
+- **允许写入**：必须手动勾选，**不会**跨刷新/工程切换保留；切换工程或刷新后强制回到未解锁；
+- **实时**：拖动滑条时防抖写入（仍要求已解锁）；
+- **写入按钮**：立即写当前值；成功后状态显示 `已写 X · 回读 X`，回读不一致会标红并 toast；
+- **安全边界**：只接受 1/2/4 字节、地址按宽度对齐、范围必须在
+  `0x2000_0000..0x2000_2000`（RAM）或 `0x4000_0000..0x5000_0000`（SFR）；
+  位域写入走读-改-写，保留同字其它位。未连接、未解锁、非法地址、写失败都会在
+  状态行 + toast 给出明确原因，不会抛未捕获异常。
+
+> 写入会真实改变固件行为。改 `motor.over.threshold` 前先确认电机处于安全状态；
+> 不要写读清零/读后触发类寄存器。
+
+### 3.2 工程存档（localStorage）
+
+顶栏和“设置 → 工程”共享同一份工程列表：
+
+- 自动保存到浏览器 `localStorage`（`ms.projects.v2` + 当前 `ms.cfg.v2`），
+  切换工程会恢复通道、窗口、标定、堵转判定和写入设置；
+- **新建（复制当前）**、**另存为**、**删除当前**、**导出 JSON**、**导入 JSON**；
+- 工程名支持中文；重名会弹确认；导入非法 JSON / 非 MotorScope JSON 会提示错误且不切换；
+- 切换工程会重新下发采样配置并刷新历史；SSE 保持连接；
+- 出于安全，`armed` 不跨工程恢复（见 3.1）。
+
 ---
 
 ## 4. 信号目录
@@ -117,7 +149,7 @@ python scope_server.py --attach 127.0.0.1:6666 --open
   `Libraries/inc/cw32l011.h` 的 `CW_xxx` 宏；
 - **参考**：`MDK/Objects/DR2159.map` 只用于元信息。
 
-当前生成结果：**441 个变量叶子 / 27 个外设**。
+当前生成结果：**444 个变量叶子 / 27 个外设**。
 
 固件重新编译后地址会变：
 
@@ -265,7 +297,7 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 python scope_server.py --port 8790 --rate 50
 python scope_server.py --openocd D:\Code\DR2159\tools\openocd
 python gen_signals.py                          # 重建 signals.json
-python -m unittest tests.test_core tests.test_history -v   # 区域/位域/历史游标单测
+python -m unittest tests.test_core tests.test_history -v   # 区域/位域/写入/历史游标单测（24 项）
 ```
 
 Agent / 脚本读取用的 HTTP API（`/api/history` 读之前、`/api/history/next` long-poll 读之后）见 **[API.md](API.md)**。
@@ -286,14 +318,14 @@ tools/motor_scope/
 ├─ scope_server.py      HTTP/SSE 服务、采样线程、仿真源、录制
 ├─ ocd.py               OpenOCD Tcl-RPC 客户端、进程管理、区域规划
 ├─ gen_signals.py       AXF/DWARF + cw32l011.h → signals.json
-├─ signals.json         生成的信号目录（当前 441 变量 / 27 外设）
+├─ signals.json         生成的信号目录（当前 444 变量 / 27 外设）
 ├─ start_scope.bat      一键启动（自动连 OpenOCD）
 ├─ start_scope_sim.bat  一键仿真
 ├─ regen_signals.bat    重新生成符号
 ├─ requirements.txt     pyelftools（仅重建符号时需要）
 ├─ API.md              Agent/脚本用的 HTTP API（history/next/status/catalog）
 ├─ web/                 index.html / style.css / app.js（原生 canvas，无前端依赖）
-├─ tests/               mock_tcl.py + test_core.py
+├─ tests/               mock_tcl.py + test_core.py（区域/位域/写入） + test_history.py
 └─ docs/                截图
 ```
 
@@ -315,9 +347,15 @@ tools/motor_scope/
 
 ---
 
-## 10. 只读声明与限制
+## 10. 默认只读与写入边界
 
-- 工具**只调用 `read_memory`**：不写内存、不 halt、不 reset、不发电机命令。
+- 默认只读：采样只调用 `read_memory`，不写内存、不 halt、不 reset、不烧录、不发电机命令。
+- 写入是**显式解锁后的独立接口** `POST /api/write`：只写 RAM（`0x2000_0000..0x2000_2000`）
+  或 SFR（`0x4000_0000..0x5000_0000`），1/2/4 字节且地址对齐；位域用读-改-写；
+  每次写后回读并返回 `verified`。非法地址/未连接/未解锁在前端和后端都会被拒绝。
+- 解锁状态不持久化：刷新页面、切换工程、重新连接都会强制回到未解锁。
+- 写入会改变固件行为（例如堵转阈值），必须确认电机处于安全状态；
+  不要写读清零/读后触发类寄存器。
 - 但“读”不等于绝对无副作用：个别 SFR 是读清零/读后更新，需按芯片手册判断。
 - 同一时刻只能有一个 OpenOCD 占用 H7-TOOL；烧录时不要开这个工具。
 - 采样率受 SWD/Tcl 限制，不能替代示波器/逻辑分析仪看 PWM 级细节。

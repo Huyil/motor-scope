@@ -82,7 +82,7 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | 接口 | 用途 |
 | --- | --- |
 | `GET /api/status` | 连接状态、实际采样率、`generation`、`history` 点数、`oldest_t`/`latest_t`、`config.signals` |
-| `GET /api/catalog` | 441 个变量 / 27 个外设，地址/类型/位域/默认堵转信号 |
+| `GET /api/catalog` | 444 个变量 / 27 个外设，地址/类型/位域/默认堵转信号 |
 | `GET /api/log` | 服务 + OpenOCD 尾部日志 |
 | `GET /api/record.csv` | 后端录制 CSV（需要先 POST `/api/record` 开启） |
 | `GET /api/stream` | SSE：`hello` / `status` / `s`；浏览器实时用 |
@@ -98,8 +98,51 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `POST /api/catalog/reload` | 从当前 AXF 重建 signals.json |
 | `POST /api/catalog/import` | multipart：`axf`（必填）+ `header`（可选 cw32l011.h），导入任意 AXF/ELF 并重建 |
 | `POST /api/probe` | 一次性 TCL 握手，读 CPUID |
+| `POST /api/write` | **会改目标内存**；写 RAM/SFR 并回读，见 5.1 |
 
 这些接口没有鉴权、是共享状态；Agent 只读时只使用 GET。
+
+### 5.1 写入 `POST /api/write`
+
+请求：
+
+```json
+{
+  "addr": 536871762,
+  "size": 2,
+  "value": 1500,
+  "bit": null,
+  "verify": true
+}
+```
+
+- `addr`：目标地址，按 `size` 对齐；
+- `size`：1 / 2 / 4（字节）；
+- `value`：写入值；超过位宽会被截断；
+- `bit`：可选 `[shift, width]`，走读-改-写，只改位域，保留同字其它位；
+- `verify`：保留字段；服务端始终回读。
+
+允许范围：RAM `0x2000_0000..0x2000_2000`、SFR `0x4000_0000..0x5000_0000`，
+且整个写入跨度必须在范围内。响应：
+
+```json
+{ "ok": true, "addr": 536871762, "size": 2, "value": 1500,
+  "readback": 1500, "verified": true }
+```
+
+`verified=false` 表示写入已发出但回读不一致（固件可能在改、或寄存器不接受写入）。
+未连接、未解锁、地址非法、对齐错误、宽度不支持等返回
+`{"ok":false,"error":"..."}`（HTTP 500），前端会显示状态和 toast。
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/api/write \
+  -H "Content-Type: application/json" \
+  -d '{"addr":536871762,"size":2,"value":1500}'
+```
+
+> 写入是**真实改内存**。改堵转阈值等控制变量前确认电机处于安全状态；
+> 不要写读清零/读后触发类寄存器。浏览器端必须手动勾选“允许写入”，
+> 且该解锁状态不跨刷新/工程切换保存。
 
 ## 6. Agent 轮询模板
 
