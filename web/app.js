@@ -90,11 +90,12 @@
     ],
     // 写入窗口：多个独立模块，每个有自己的类型/范围/实时/状态
     write: {
-      armed: false, seq: 1,
+      armed: false, size: 'md', seq: 1,
       mods: [{
         id: 'wm1', rowId: 'motor.over.threshold', mode: 'slider',
         min: 0, max: 4095, step: 1, live: false,
         status: '', statusKind: '', busy: false, pending: null, timer: 0,
+        liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
       }],
     },
     focusId: null,
@@ -210,6 +211,7 @@
     D.writeList = $('#writeList');
     D.writeArmed = $('#writeArmed');
     D.writeState = $('#writeState');
+    D.writeSize = $('#writeSize');
     D.projectSel = $('#projectSel');
     D.projectSel2 = $('#projectSel2');
     D.projectState = $('#projectState');
@@ -861,6 +863,7 @@
       id: 'wm' + S.write.seq, rowId: row.id, mode: 'slider',
       min: 0, max: 0, step: 1, live: false,
       status: '', statusKind: '', busy: false, pending: null, timer: 0,
+      liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
       addr: row.addr, size: row.size, signed: !!row.signed, name: row.name,
     };
     resetWriteRange(row, mod);
@@ -918,7 +921,8 @@
     const existing = writeModForRow(rowId);
     if (existing) {
       S.write.mods = S.write.mods.filter((m) => m !== existing);
-      if (existing.timer) clearTimeout(existing.timer);
+      stopLiveWrite(existing);
+      existing.liveHeld = false;
       ensureWriteMods();
       afterSignalsChanged();
       toast('已从写入窗口移除：' + (S.index.get(rowId)?.name || rowId), 'ok');
@@ -939,7 +943,17 @@
     toast('已加入写入窗口：' + (row.name || row.id), 'ok');
   }
 
+  function applyWriteSize() {
+    const size = ['sm', 'md', 'lg', 'auto'].includes(S.write.size) ? S.write.size : 'md';
+    S.write.size = size;
+    if (D.writeCard) {
+      for (const s of ['sm', 'md', 'lg', 'auto']) D.writeCard.classList.toggle('size-' + s, s === size);
+    }
+    if (D.writeSize) D.writeSize.value = size;
+  }
+
   function syncWriteUI() {
+    applyWriteSize();
     const armed = !!S.write.armed;
     if (D.writeCard) D.writeCard.classList.toggle('locked', !armed);
     if (D.writeArmed) D.writeArmed.checked = armed;
@@ -961,6 +975,7 @@
 
   function renderWriteMods() {
     if (!D.writeList) return;
+    stopAllLiveWrites();
     D.writeList.innerHTML = '';
     if (!S.write.mods.length) {
       const empty = document.createElement('div');
@@ -996,6 +1011,8 @@
         b.addEventListener('click', () => {
           mod.mode = mode;
           mod.status = '';
+          stopLiveWrite(mod);
+          mod.liveHeld = false;
           renderWriteMods();
           saveLocal();
         });
@@ -1055,21 +1072,35 @@
       slider.addEventListener('input', () => {
         const v = Number(slider.value);
         num.value = String(v);
-        scheduleWrite(mod, v);
+        mod.liveValue = v;
+        // 实时关闭时只改 UI，不发写；必须点“写入”
+      });
+      slider.addEventListener('pointerdown', () => {
+        if (!S.write.armed || !mod.live) return;
+        mod.liveHeld = true;
+        mod.liveValue = Number(slider.value);
+        startLiveWrite(mod, mod.liveValue); // 按住每 100ms 写一次
       });
       slider.addEventListener('change', () => {
-        if (S.write.armed) sendWrite(mod, Number(slider.value));
+        // 松开/键盘提交：先停掉 100ms 定时，再补发最后位置（实时开启时）
+        finishLiveWrite(mod);
+        if (mod.live && S.write.armed) {
+          const v = Number(slider.value);
+          if (v !== mod.lastSent) sendWrite(mod, v);
+        }
       });
       num.addEventListener('change', () => {
         const v = Number(num.value);
         slider.value = String(clamp(v, mod.min, mod.max));
-        if (mod.live) scheduleWrite(mod, v);
+        mod.liveValue = v;
+        if (mod.live) sendWrite(mod, v);
       });
       sw.addEventListener('change', () => {
         const v = sw.checked ? 1 : 0;
         num.value = String(v);
         slider.value = String(v);
-        if (S.write.armed) sendWrite(mod, v);
+        // 实时关闭时开关也只改 UI，点击“写入”才发
+        if (S.write.armed && mod.live) sendWrite(mod, v);
       });
       minI.addEventListener('change', () => {
         mod.min = Number(minI.value) || 0;
@@ -1091,7 +1122,7 @@
       });
       live.addEventListener('change', () => {
         mod.live = !!live.checked;
-        if (!mod.live && mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+        if (!mod.live) { stopLiveWrite(mod); mod.liveHeld = false; }
         saveLocal();
       });
       wbtn.addEventListener('click', () => {
@@ -1115,8 +1146,9 @@
       const slider = el.querySelector('.wm-slider');
       const num = el.querySelector('.wm-number');
       const sw = el.querySelector('.wm-switch-wrap input');
-      const active = document.activeElement;
-      if (raw !== null && active !== slider && active !== num && !mod.busy) {
+      // 焦点在模块内（正在输入/按按钮/按住滑条）时不要用采样值覆盖用户输入
+      const focused = el.contains(document.activeElement);
+      if (raw !== null && !focused && !mod.busy) {
         if (slider) slider.value = String(clamp(raw, mod.min, mod.max));
         if (num) num.value = String(raw);
         if (sw) sw.checked = !!raw;
@@ -1152,6 +1184,7 @@
     const bits = row.width || (row.size * 8);
     const max = Math.pow(2, bits) - 1;
     v = Math.max(0, Math.min(max, Math.trunc(v)));
+    mod.lastSent = v;
     if (mod.busy) { mod.pending = v; return; }
     mod.busy = true;
     mod.status = '写入中…'; mod.statusKind = 'muted';
@@ -1173,6 +1206,41 @@
       const pending = mod.pending;
       mod.pending = null;
       if (pending !== null && pending !== v) sendWrite(mod, pending);
+    }
+  }
+
+  // ---- 实时写入: 按住滑条每 100ms 写一次, 松开立即停 ----
+  function stopLiveWrite(mod) {
+    if (mod.liveTimer) { clearInterval(mod.liveTimer); clearTimeout(mod.liveTimer); mod.liveTimer = null; }
+    if (mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+  }
+
+  function startLiveWrite(mod, value) {
+    stopLiveWrite(mod);
+    if (!mod.live || !S.write.armed) return;
+    mod.liveValue = Number(value);
+    const tick = () => {
+      if (!mod.live || !S.write.armed) { stopLiveWrite(mod); return; }
+      sendWrite(mod, mod.liveValue);
+    };
+    tick();
+    mod.liveTimer = setInterval(tick, 100);
+  }
+
+  function finishLiveWrite(mod) {
+    if (!mod.liveHeld) return;
+    mod.liveHeld = false;
+    stopLiveWrite(mod);
+    // 松开时补发最后位置（若最后一次定时写还没覆盖到），之后不再持续写
+    if (mod.live && S.write.armed && mod.liveValue !== mod.lastSent) {
+      sendWrite(mod, mod.liveValue);
+    }
+  }
+
+  function stopAllLiveWrites() {
+    for (const mod of S.write.mods) {
+      stopLiveWrite(mod);
+      mod.liveHeld = false;
     }
   }
 
@@ -1342,6 +1410,7 @@
             step: Math.max(1, Number(m.step) || 1),
             live: !!m.live,
             status: '', statusKind: '', busy: false, pending: null, timer: 0,
+            liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
             addr: Number(m.addr) >>> 0, size: Number(m.size) || 2,
             signed: !!m.signed, name: String(m.name || ''),
           }));
@@ -1357,10 +1426,12 @@
             step: Math.max(1, Number(c.write.step) || 1),
             live: !!c.write.live,
             status: '', statusKind: '', busy: false, pending: null, timer: 0,
+            liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
           }];
           S.write.seq = 1;
         }
         // 安全: 写入解锁状态不跨工程/刷新保留
+        S.write.size = ['sm', 'md', 'lg', 'auto'].includes(c.write?.size) ? c.write.size : S.write.size;
         S.write.armed = false;
       }
     } catch (e) { console.warn(e); }
@@ -1447,6 +1518,7 @@
         })),
         write: {
           armed: false, // 解锁状态不落盘
+          size: S.write.size,
           seq: S.write.seq,
           mods: S.write.mods.map((m) => ({
             id: m.id, rowId: m.rowId, mode: m.mode,
@@ -1975,7 +2047,8 @@
   // 主动/被动断开、重连、切工程都调用：清掉在途写入并强制回到未解锁
   function disarmWrite(reason) {
     for (const mod of S.write.mods) {
-      if (mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+      stopLiveWrite(mod);
+      mod.liveHeld = false;
       mod.busy = false;
       mod.pending = null;
       mod.status = reason || '';
@@ -3480,15 +3553,21 @@
     $('#stallEnable').addEventListener('change', (e) => { S.stall.enabled = e.target.checked; resetStall(); saveLocal(); S.dirty = true; });
 
     // 写入：全局解锁 + 每个模块自己的类型/范围/实时
+    D.writeSize?.addEventListener('change', () => {
+      S.write.size = D.writeSize.value;
+      applyWriteSize();
+      saveLocal();
+    });
+    const finishPointerLive = () => {
+      for (const mod of S.write.mods) finishLiveWrite(mod);
+    };
+    window.addEventListener('pointerup', finishPointerLive);
+    window.addEventListener('pointercancel', finishPointerLive);
+    window.addEventListener('blur', finishPointerLive);
     D.writeArmed?.addEventListener('change', () => {
       S.write.armed = !!D.writeArmed.checked;
-      if (!S.write.armed) {
-        for (const mod of S.write.mods) {
-          if (mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
-          mod.pending = null;
-        }
-      }
-      for (const mod of S.write.mods) { mod.status = ''; mod.statusKind = ''; }
+      if (!S.write.armed) stopAllLiveWrites();
+      for (const mod of S.write.mods) { mod.pending = null; mod.status = ''; mod.statusKind = ''; }
       syncWriteUI();
       refreshWriteUI();
       saveLocal();

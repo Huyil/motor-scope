@@ -200,6 +200,15 @@
         <div class="write-head">
           <span class="side-title">写入</span>
           <span class="write-hint">在左侧信号行点“写”加入 / 移除</span>
+          <label class="tool write-size-pick" title="写入窗口尺寸；自动=拉伸填满剩余高度">
+            <span>尺寸</span>
+            <select id="writeSize">
+              <option value="sm">紧凑</option>
+              <option value="md" selected>标准</option>
+              <option value="lg">大</option>
+              <option value="auto">自动拉伸</option>
+            </select>
+          </label>
           <label class="check"><input id="writeArmed" type="checkbox"> 允许写入</label>
           <span id="writeState" class="muted">未解锁</span>
         </div>
