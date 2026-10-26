@@ -193,6 +193,9 @@
     D.curSel = $('#curSel');
     D.thrSel = $('#thrSel');
     D.catalogMeta = $('#catalogMeta');
+    D.axfFile = $('#axfFile');
+    D.hdrFile = $('#hdrFile');
+    D.btnImportAxf = $('#btnImportAxf');
     D.toasts = $('#toasts');
     D.logPanel = $('#logPanel');
     D.logText = $('#logText');
@@ -2565,6 +2568,7 @@
     $('#stallEnable').addEventListener('change', (e) => { S.stall.enabled = e.target.checked; resetStall(); saveLocal(); S.dirty = true; });
     $('#autoPause').addEventListener('change', (e) => { S.stall.autoPause = e.target.checked; saveLocal(); });
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
+    $('#btnImportAxf').addEventListener('click', importAxf);
     $('#btnRecordCsv').addEventListener('click', () => {
       if (!S.record.active && !(S.record.count > 0)) { toast('先点录制，再下载', 'err'); return; }
       window.location.href = '/api/record.csv';
@@ -2780,29 +2784,73 @@
     return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '_' + pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
   }
 
+  function applyCatalog(catalog, note = '') {
+    S.catalog = catalog;
+    buildIndex();
+    S.samples = [];
+    S.lastT = 0;
+    resetStall();
+    let missing = 0;
+    // 按 id 重新解析地址；新 AXF 里不存在的旧行删掉，避免拿旧地址继续采样
+    for (const [id, row] of Array.from(S.rows.entries())) {
+      const e = S.index.get(id);
+      if (e) {
+        row.addr = e.addr; row.size = e.size; row.signed = e.signed;
+        row.bit = e.bit; row.type = e.type; row.name = e.name || row.name;
+      } else {
+        S.rows.delete(id);
+        missing++;
+      }
+    }
+    S.virtuals = S.virtuals.filter((v) => (v.sourceIds || []).some((id) => S.index.has(id)));
+    syncChannels();
+    renderCatalog(); renderSelected(); renderLegend(); renderValueTable();
+    renderStallSelects(); renderCalib();
+    sendConfig(true);
+    if (D.catalogMeta && catalog.meta) {
+      D.catalogMeta.textContent = 'AXF ' + (catalog.meta.generated_at || '?') + ' · ' +
+        (catalog.variables ? catalog.variables.length : 0) + ' 变量 / ' +
+        (catalog.peripherals ? catalog.peripherals.length : 0) + ' 外设 · ' +
+        (catalog.meta.axf || '');
+    }
+    if (missing) toast(missing + ' 个旧信号在新 AXF 里找不到，已移除', 'err');
+    if (note) toast(note, 'ok');
+  }
+
   async function reloadCatalog() {
     toast('正在从 AXF 重建符号表…');
     try {
       const res = await post('/api/catalog/reload', {});
       if (!res.ok) throw new Error(res.error || '失败');
-      S.catalog = res.catalog;
-      buildIndex();
-      S.samples = [];
-      S.lastT = 0;
-      resetStall();
-      // 按 id 重新解析地址（固件重编译后地址会变）
-      for (const row of S.rows.values()) {
-        const e = S.index.get(row.id);
-        if (e) {
-          row.addr = e.addr; row.size = e.size; row.signed = e.signed;
-          row.bit = e.bit; row.type = e.type;
-        }
-      }
-      syncChannels();
-      renderCatalog(); renderSelected(); renderLegend(); renderValueTable(); renderStallSelects(); renderCalib(); sendConfig(true);
-      toast('符号表已更新', 'ok');
+      applyCatalog(res.catalog, '符号表已更新');
     } catch (e) {
       toast('重建失败: ' + e.message, 'err');
+    }
+  }
+
+  async function importAxf() {
+    const axf = D.axfFile?.files?.[0];
+    if (!axf) { toast('先选择 .axf / .elf 文件', 'err'); return; }
+    const hdr = D.hdrFile?.files?.[0];
+    const fd = new FormData();
+    fd.append('axf', axf, axf.name || 'firmware.axf');
+    if (hdr) fd.append('header', hdr, hdr.name || 'cw32l011.h');
+    const btn = D.btnImportAxf;
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
+    toast('正在解析 AXF…');
+    try {
+      const res = await fetch('/api/catalog/import', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
+      if (!res.ok || !data.ok) throw new Error(data.error || '导入失败');
+      applyCatalog(data.catalog);
+      toast('AXF 已导入：' + data.counts.variables + ' 变量 / ' +
+        data.counts.peripherals + ' 外设', 'ok');
+      if (data.warning) toast(data.warning, 'err');
+    } catch (e) {
+      toast('导入失败: ' + e.message, 'err');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = old || '导入并重建符号'; }
     }
   }
 

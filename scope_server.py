@@ -433,6 +433,31 @@ def _csv_cell(v: Any) -> str:
     return s
 
 
+def parse_multipart(body: bytes, content_type: str) -> Dict[str, Tuple[str, bytes]]:
+    """极简 multipart/form-data 解析 (只用于 AXF/头文件导入)."""
+    m = re.search(r'boundary="?([^";]+)"?', content_type or "")
+    if not m:
+        return {}
+    boundary = ("--" + m.group(1)).encode()
+    out: Dict[str, Tuple[str, bytes]] = {}
+    for raw in body.split(boundary):
+        raw = raw.lstrip(b"\r\n")
+        if not raw or raw.startswith(b"--"):
+            continue
+        if b"\r\n\r\n" not in raw:
+            continue
+        head, data = raw.split(b"\r\n\r\n", 1)
+        if data.endswith(b"\r\n"):
+            data = data[:-2]
+        text = head.decode("utf-8", "replace")
+        name_m = re.search(r'name="([^"]+)"', text)
+        if not name_m:
+            continue
+        file_m = re.search(r'filename="([^"]*)"', text)
+        out[name_m.group(1)] = (file_m.group(1) if file_m else "", data)
+    return out
+
+
 class Sampler(threading.Thread):
     def __init__(self, hub: Hub):
         super().__init__(name="motor-scope-sampler", daemon=True)
@@ -670,6 +695,7 @@ class App:
         self.axf = os.path.abspath(args.axf or os.path.join(self.project, "MDK", "Objects", "DR2159.axf"))
         self.header = os.path.abspath(args.header or os.path.join(self.project, "Libraries", "inc", "cw32l011.h"))
         self.signals_path = os.path.abspath(args.signals or SIGNALS_JSON)
+        self.import_dir = os.path.join(HERE, "imports")
         self.hub = Hub()
         self.sampler = Sampler(self.hub)
         self.source: Optional[Source] = None
@@ -742,14 +768,72 @@ class App:
             import gen_signals  # 同目录, 依赖 pyelftools
         except Exception as exc:
             raise RuntimeError("需要 pyelftools 才能从 AXF 生成信号表: %s" % exc)
-        data = gen_signals.build(self.axf, self.header,
-                                 os.path.join(os.path.dirname(self.axf), "DR2159.map"))
+        header = self.header if os.path.isfile(self.header) else ""
+        map_path = os.path.join(os.path.dirname(self.axf), "DR2159.map")
+        data = gen_signals.build(self.axf, header, map_path if os.path.isfile(map_path) else None)
         tmp = self.signals_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
         os.replace(tmp, self.signals_path)
         self.add_log("已从 AXF 重建信号表 (%s)" % data.get("meta", {}).get("generated_at"))
         return data
+
+    def import_catalog(self, axf_bytes: bytes, axf_name: str,
+                       header_bytes: Optional[bytes] = None,
+                       header_name: str = "") -> Dict[str, Any]:
+        """导入一个 AXF/ELF（可选 cw32l011.h），重建 signals.json.
+
+        不依赖项目目录: 文件会存到 tools/motor_scope/imports/ 后再解析。
+        """
+        if not axf_bytes:
+            raise RuntimeError("AXF 文件为空")
+        if not axf_bytes.startswith(b"\x7fELF"):
+            raise RuntimeError("不是 ELF/AXF 文件（缺少 \x7fELF 头）")
+        if len(axf_bytes) > 32 * 1024 * 1024:
+            raise RuntimeError("AXF 太大（>32MB）")
+        try:
+            import gen_signals
+        except Exception as exc:
+            raise RuntimeError("需要 pyelftools 才能解析 AXF: %s" % exc)
+        os.makedirs(self.import_dir, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S") + "_%d" % (time.time_ns() % 1000000)
+
+        def safe(name: str, default: str) -> str:
+            base = os.path.basename(name or default)
+            base = re.sub(r"[^A-Za-z0-9_.-]+", "_", base)[:96]
+            return base or default
+
+        axf_path = os.path.join(self.import_dir, stamp + "_" + safe(axf_name, "import.axf"))
+        with open(axf_path, "wb") as f:
+            f.write(axf_bytes)
+        header_path = self.header if os.path.isfile(self.header) else ""
+        if header_bytes:
+            header_path = os.path.join(self.import_dir, stamp + "_" + safe(header_name, "cw32l011.h"))
+            with open(header_path, "wb") as f:
+                f.write(header_bytes)
+        map_path = os.path.join(os.path.dirname(axf_path), "DR2159.map")
+        data = gen_signals.build(axf_path, header_path, map_path if os.path.isfile(map_path) else None)
+        tmp = self.signals_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, self.signals_path)
+        with self.catalog_lock:
+            self.catalog = data
+            self.axf = axf_path
+            if header_path:
+                self.header = header_path
+        warning = ""
+        if not data.get("peripherals"):
+            warning = "未解析到外设寄存器：请在导入时同时选择 cw32l011.h（当前头文件缺失或没有 CW_* 宏）"
+            self.add_log(warning)
+        self.add_log("已导入 AXF: %s (%d 变量 / %d 外设)"
+                     % (safe(axf_name, "axf"), len(data.get("variables", [])),
+                        len(data.get("peripherals", []))))
+        return {"ok": True, "catalog": data,
+                "counts": {"variables": len(data.get("variables", [])),
+                           "peripherals": len(data.get("peripherals", []))},
+                "header_used": os.path.basename(header_path) if header_path else "",
+                "warning": warning}
 
     def default_config(self) -> Dict[str, Any]:
         variables = {v["name"]: v for v in self.catalog.get("variables", [])}
@@ -993,6 +1077,32 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
+    def _import_catalog(self) -> None:
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype:
+            return self._json({"ok": False, "error": "需要 multipart/form-data"}, 400)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 32 * 1024 * 1024:
+            return self._json({"ok": False, "error": "文件为空或超过 32MB"}, 400)
+        body = self.rfile.read(length)
+        files = parse_multipart(body, ctype)
+        axf = files.get("axf")
+        if not axf or not axf[1]:
+            return self._json({"ok": False, "error": "缺少 axf 文件"}, 400)
+        header = files.get("header")
+        try:
+            res = self.app.import_catalog(
+                axf[1], axf[0],
+                header[1] if header and header[1] else None,
+                header[0] if header else "",
+            )
+            return self._json(res)
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)}, 500)
+
     # ---- routes ----
     def do_OPTIONS(self) -> None:
         self.send_response(204)
@@ -1075,8 +1185,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        payload = self._read_json()
+        payload = {} if path == "/api/catalog/import" else self._read_json()
         try:
+            if path == "/api/catalog/import":
+                return self._import_catalog()
             if path == "/api/connect":
                 return self._json(self.app.connect(payload))
             if path == "/api/disconnect":

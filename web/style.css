@@ -475,6 +475,9 @@ input[type="checkbox"]:checked::before { transform: rotate(-45deg) scale(1); }
 .seg { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: rgba(6,11,21,.6); margin-bottom: 10px; }
 .seg button { flex: 1; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 11px; }
 .seg button.active { background: rgba(34,211,238,.12); color: var(--cyan); }
+.axf-import { margin: 2px 0 4px; }
+.axf-import input[type="file"] { width: 100%; font-size: 10px; color: var(--muted); padding: 3px 0; }
+.axf-import .btn { width: 100%; margin-top: 3px; }
 .calib-list { display: flex; flex-direction: column; gap: 7px; }
 .calib-row { display: grid; grid-template-columns: minmax(0,1fr) 50px 50px 44px 38px; gap: 4px; align-items: center; }
 .calib-row .cname { font-family: var(--mono); font-size: 10px; color: #b9cbe0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -276,8 +276,14 @@
 
     <section class="drawer-sec">
       <h3>符号与录制</h3>
-      <div class="row2">
-        <button id="btnReloadCatalog" class="btn">从 AXF 重新生成</button>
+      <div class="axf-import">
+        <div class="field"><label>导入 AXF / ELF</label><input id="axfFile" type="file" accept=".axf,.elf"></div>
+        <div class="field"><label>同时导入 cw32l011.h（可选）</label><input id="hdrFile" type="file" accept=".h,.hpp"></div>
+        <button id="btnImportAxf" class="btn primary">导入并重建符号</button>
+        <p class="hint">AXF 提供变量/地址；头文件提供外设寄存器基址。导入后当前通道按名字重新解析地址。</p>
+      </div>
+      <div class="row2" style="margin-top:8px">
+        <button id="btnReloadCatalog" class="btn">从当前 AXF 重新生成</button>
         <button id="btnRecordCsv" class="btn">下载录制 CSV</button>
       </div>
       <p class="hint" id="catalogMeta"></p>

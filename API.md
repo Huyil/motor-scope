@@ -95,7 +95,8 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `POST /api/record` | `{"active":true}` 开始后端录制 |
 | `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach"}` 重新连 |
 | `POST /api/disconnect` | 断开并释放 OpenOCD/H7-TOOL |
-| `POST /api/catalog/reload` | 从 AXF 重建 signals.json |
+| `POST /api/catalog/reload` | 从当前 AXF 重建 signals.json |
+| `POST /api/catalog/import` | multipart：`axf`（必填）+ `header`（可选 cw32l011.h），导入任意 AXF/ELF 并重建 |
 | `POST /api/probe` | 一次性 TCL 握手，读 CPUID |
 
 这些接口没有鉴权、是共享状态；Agent 只读时只使用 GET。
