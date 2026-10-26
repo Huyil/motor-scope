@@ -93,6 +93,7 @@
       armed: false, size: 'md', seq: 1,
       mods: [{
         id: 'wm1', rowId: 'motor.over.threshold', mode: 'slider',
+        width: 0.5, widthTouched: false,
         min: 0, max: 4095, step: 1, live: false,
         status: '', statusKind: '', busy: false, pending: null, timer: 0,
         liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
@@ -857,10 +858,30 @@
     mod.step = 1;
   }
 
+  const WRITE_WIDTH_STEPS = [0.25, 1 / 3, 0.5, 1];
+  function defaultWriteWidth(mode) { return mode === 'switch' ? 0.25 : 0.5; }
+  function widthLabel(w) {
+    if (Math.abs(w - 0.25) < 0.01) return '1/4';
+    if (Math.abs(w - 1 / 3) < 0.01) return '1/3';
+    if (Math.abs(w - 0.5) < 0.01) return '1/2';
+    return '1';
+  }
+  function widthSpan(w) {
+    if (Math.abs(w - 0.25) < 0.01) return 3;
+    if (Math.abs(w - 1 / 3) < 0.01) return 4;
+    if (Math.abs(w - 0.5) < 0.01) return 6;
+    return 12;
+  }
+  function nextWriteWidth(w) {
+    const i = WRITE_WIDTH_STEPS.findIndex((x) => Math.abs(x - w) < 0.01);
+    return WRITE_WIDTH_STEPS[(i < 0 ? 0 : i + 1) % WRITE_WIDTH_STEPS.length];
+  }
+
   function makeWriteMod(row) {
     S.write.seq = (S.write.seq || 0) + 1;
     const mod = {
       id: 'wm' + S.write.seq, rowId: row.id, mode: 'slider',
+      width: 0.5, widthTouched: false,
       min: 0, max: 0, step: 1, live: false,
       status: '', statusKind: '', busy: false, pending: null, timer: 0,
       liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
@@ -902,6 +923,10 @@
       if (!row) continue;
       if (mods.some((m) => m.rowId === mod.rowId)) continue;
       if (!(mod.max > mod.min)) resetWriteRange(row, mod);
+      if (!WRITE_WIDTH_STEPS.some((w) => Math.abs(w - mod.width) < 0.01)) {
+        mod.width = defaultWriteWidth(mod.mode);
+      }
+      if (mod.widthTouched === undefined) mod.widthTouched = false;
       mod.addr = row.addr;
       mod.size = row.size;
       mod.signed = !!row.signed;
@@ -989,8 +1014,9 @@
       const row = S.rows.get(mod.rowId);
       if (!row) continue;
       const el = document.createElement('div');
-      el.className = 'write-mod';
+      el.className = 'write-mod' + (Math.abs(mod.width - 0.25) < 0.01 ? ' wm-quarter' : '');
       el.dataset.mod = mod.id;
+      el.style.gridColumn = 'span ' + widthSpan(mod.width);
 
       const head = document.createElement('div');
       head.className = 'wm-head';
@@ -1011,6 +1037,7 @@
         b.addEventListener('click', () => {
           mod.mode = mode;
           mod.status = '';
+          if (!mod.widthTouched) mod.width = defaultWriteWidth(mode);
           stopLiveWrite(mod);
           mod.liveHeld = false;
           renderWriteMods();
@@ -1018,12 +1045,22 @@
         });
         seg.appendChild(b);
       }
+      const widthBtn = document.createElement('button');
+      widthBtn.className = 'wm-width';
+      widthBtn.textContent = widthLabel(mod.width);
+      widthBtn.title = '模块宽度：1/4 → 1/3 → 1/2 → 整行（当前 ' + widthLabel(mod.width) + '）';
+      widthBtn.addEventListener('click', () => {
+        mod.width = nextWriteWidth(mod.width);
+        mod.widthTouched = true;
+        renderWriteMods();
+        saveLocal();
+      });
       const del = document.createElement('button');
       del.className = 'wm-del';
       del.textContent = '×';
       del.title = '从写入窗口移除';
       del.addEventListener('click', () => toggleWriteRow(mod.rowId));
-      head.append(name, addr, seg, del);
+      head.append(name, addr, seg, widthBtn, del);
 
       const body = document.createElement('div');
       body.className = 'wm-body';
@@ -1405,6 +1442,8 @@
             id: String(m.id || ('wm' + (i + 1))),
             rowId: String(m.rowId || ''),
             mode: m.mode === 'switch' ? 'switch' : 'slider',
+            width: Number(m.width) || (m.mode === 'switch' ? 0.25 : 0.5),
+            widthTouched: !!m.widthTouched,
             min: Number(m.min) || 0,
             max: Number(m.max) || 0,
             step: Math.max(1, Number(m.step) || 1),
@@ -1421,6 +1460,8 @@
           S.write.mods = [{
             id: 'wm1', rowId: c.write.targetId,
             mode: c.write.mode === 'switch' ? 'switch' : 'slider',
+            width: c.write.mode === 'switch' ? 0.25 : 0.5,
+            widthTouched: false,
             min: Number(c.write.min) || 0,
             max: Number(c.write.max) || 4095,
             step: Math.max(1, Number(c.write.step) || 1),
@@ -1522,6 +1563,7 @@
           seq: S.write.seq,
           mods: S.write.mods.map((m) => ({
             id: m.id, rowId: m.rowId, mode: m.mode,
+            width: m.width, widthTouched: !!m.widthTouched,
             min: m.min, max: m.max, step: m.step, live: !!m.live,
             addr: m.addr, size: m.size, signed: !!m.signed, name: m.name || '',
           })),
@@ -1889,6 +1931,26 @@
     return (Math.round(v * 10) / 10).toLocaleString('en-US');
   }
 
+  // 数值表专用：始终带千分位逗号；列宽只按约 6 位数字预留，更长时在格内换行
+  function fmtTableNum(v) {
+    if (v === null || v === undefined || !isFinite(v)) return '--';
+    const r = Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 100) / 100;
+    return r.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  }
+
+  function rowTableText(row, vals) {
+    return fmtTableNum(rowValue(row, vals));
+  }
+
+  function isLongTableNum(text) {
+    return String(text).replace(/[^0-9]/g, '').length > 6;
+  }
+
+  function setTableNum(el, text, baseClass) {
+    el.textContent = text;
+    el.className = baseClass + (isLongTableNum(text) ? ' vt-long' : '');
+  }
+
   function rowValueText(row, vals) {
     const v = rowValue(row, vals);
     return fmtPhysical(row, v);
@@ -1909,7 +1971,7 @@
       const live = S.liveRows.get(row.id);
       if (live) live.textContent = txt;
       const vt = S.vtRows.get(row.id);
-      if (vt) { vt.cur.textContent = txt; vt.cur.title = row.name + ' · ' + hex(row.addr); }
+      if (vt) { setTableNum(vt.cur, rowTableText(row, vals), 'num vt-cur'); vt.cur.title = row.name + ' · ' + hex(row.addr); }
     }
     for (const v of S.virtuals) {
       const txt = rowValueText(v, vals);
@@ -1920,7 +1982,7 @@
       const avg = S.avgCells.get(v.id);
       if (avg) avg.textContent = txt;
       const vt = S.vtRows.get(v.id);
-      if (vt) vt.cur.textContent = txt;
+      if (vt) setTableNum(vt.cur, rowTableText(v, vals), 'num vt-cur');
     }
     updateStallUI(last[0]);
     refreshWriteUI();
@@ -1953,9 +2015,9 @@
         if (v > mx) mx = v;
         sum += v; n++;
       }
-      vt.min.textContent = n ? fmtStat(mn) : '--';
-      vt.max.textContent = n ? fmtStat(mx) : '--';
-      vt.avg.textContent = n ? fmtStat(sum / n) : '--';
+      setTableNum(vt.min, n ? fmtTableNum(mn) : '--', 'num vt-stat');
+      setTableNum(vt.max, n ? fmtTableNum(mx) : '--', 'num vt-stat');
+      setTableNum(vt.avg, n ? fmtTableNum(sum / n) : '--', 'num vt-stat');
     }
     if (D.tableSum) {
       const span = Math.max(0, (end - start) / 1000);
