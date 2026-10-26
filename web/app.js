@@ -3022,6 +3022,9 @@
     D.writeTarget?.addEventListener('change', () => {
       S.write.targetId = D.writeTarget.value;
       S.write.status = '';
+      // 目标变了，取消尚未发出的实时写入，避免旧值写到新目标
+      if (S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
+      S.write.pending = null;
       const row = currentWriteRow();
       if (row) resetWriteRange(row);
       // 切走的目标若是仅用于写入的隐藏行，立即回收；下拉同步重建
