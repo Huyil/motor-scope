@@ -740,15 +740,10 @@ class App:
                         data = json.load(f)
             except Exception as exc:
                 self.catalog_error = "读取 signals.json 失败: %s" % exc
-            need = False
-            if data is None:
-                need = True
-            elif os.path.isfile(self.axf):
-                try:
-                    if os.path.getmtime(self.axf) > float(data.get("meta", {}).get("axf_mtime", 0)) + 0.5:
-                        need = True
-                except Exception:
-                    need = True
+            # 只有在 signals.json 完全缺失时才自动生成。不能因为 AXF 比 JSON 新
+            # 就在启动时静默重建：板子里跑的可能是旧固件，地址会整体错位。
+            # 固件更新后用“导入 AXF”或“从当前 AXF 重新生成”显式操作。
+            need = data is None
             if need and auto_regen and os.path.isfile(self.axf):
                 try:
                     data = self.regenerate_catalog()
