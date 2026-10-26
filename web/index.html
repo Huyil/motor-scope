@@ -21,12 +21,6 @@
       </div>
     </div>
 
-    <div id="connPill" class="conn-pill">
-      <span class="dot"></span>
-      <span id="connText">未连接</span>
-      <span id="connRate" class="sep">-- Hz</span>
-    </div>
-
     <div class="project-pick" title="工程存档（自动保存到浏览器）">
       <span>工程</span>
       <select id="projectSel"></select>
@@ -65,6 +59,12 @@
       <button id="btnSidebar" class="btn only-mobile" title="信号列表" aria-label="信号列表">
         <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
       </button>
+    </div>
+
+    <div id="connPill" class="conn-pill" title="SWD 总线占用：调试器正在使用 SWD 读取目标内存">
+      <span class="dot"></span>
+      <span id="connText">未连接</span>
+      <span id="connRate" class="sep">-- Hz</span>
     </div>
   </header>
 
@@ -105,20 +105,59 @@
 
     <main id="main">
       <section id="hero">
-        <div class="metric" id="mCurrent">
-          <label>电机电流</label>
-          <div class="metric-value"><strong id="curVal">--</strong><span id="curUnit">counts</span></div>
-          <small id="curRaw">motor.over.current</small>
+        <div class="metric watch-card" id="mCurrent" data-watch="w1">
+          <button class="metric-edit" data-watch-edit="w1" title="编辑监视卡片：名称 / 寄存器地址" aria-label="编辑监视卡片">⋯</button>
+          <label class="watch-title">电机电流</label>
+          <div class="metric-value"><strong class="watch-val">--</strong><span class="watch-unit">counts</span></div>
+          <small class="watch-src">motor.over.current</small>
+          <div class="bar watch-bar"><i></i></div>
+          <div class="watch-editor hidden">
+            <div class="we-title">监视卡片</div>
+            <label class="we-field"><span>名称</span><input class="we-name" maxlength="24" placeholder="显示名称"></label>
+            <label class="we-field"><span>目标</span><input class="we-target" list="watchSignals" placeholder="信号名 / 0x20000352"></label>
+            <div class="we-line">
+              <label class="we-field we-size-field"><span>宽度</span><select class="we-size"><option value="1">1 B</option><option value="2" selected>2 B</option><option value="4">4 B</option></select></label>
+              <label class="check"><input type="checkbox" class="we-signed"> 有符号</label>
+              <label class="check"><input type="checkbox" class="we-margin"> 余量</label>
+            </div>
+            <div class="we-actions"><button class="btn primary we-apply">应用</button><button class="btn we-cancel">取消</button></div>
+          </div>
         </div>
-        <div class="metric" id="mThreshold">
-          <label>堵转阈值</label>
-          <div class="metric-value"><strong id="thrVal">--</strong><span id="thrUnit">counts</span></div>
-          <small id="thrRaw">motor.over.thresholdLast</small>
+        <div class="metric watch-card" id="mThreshold" data-watch="w2">
+          <button class="metric-edit" data-watch-edit="w2" title="编辑监视卡片：名称 / 寄存器地址" aria-label="编辑监视卡片">⋯</button>
+          <label class="watch-title">堵转阈值</label>
+          <div class="metric-value"><strong class="watch-val">--</strong><span class="watch-unit">counts</span></div>
+          <small class="watch-src">motor.over.thresholdLast</small>
+          <div class="bar watch-bar"><i></i></div>
+          <div class="watch-editor hidden">
+            <div class="we-title">监视卡片</div>
+            <label class="we-field"><span>名称</span><input class="we-name" maxlength="24" placeholder="显示名称"></label>
+            <label class="we-field"><span>目标</span><input class="we-target" list="watchSignals" placeholder="信号名 / 0x20000352"></label>
+            <div class="we-line">
+              <label class="we-field we-size-field"><span>宽度</span><select class="we-size"><option value="1">1 B</option><option value="2" selected>2 B</option><option value="4">4 B</option></select></label>
+              <label class="check"><input type="checkbox" class="we-signed"> 有符号</label>
+              <label class="check"><input type="checkbox" class="we-margin"> 余量</label>
+            </div>
+            <div class="we-actions"><button class="btn primary we-apply">应用</button><button class="btn we-cancel">取消</button></div>
+          </div>
         </div>
-        <div class="metric" id="mMargin">
-          <label>余量</label>
-          <div class="metric-value"><strong id="marginVal">--</strong><span id="marginUnit">counts</span></div>
-          <div class="bar"><i id="marginBar"></i></div>
+        <div class="metric watch-card" id="mMargin" data-watch="w3">
+          <button class="metric-edit" data-watch-edit="w3" title="编辑监视卡片：名称 / 寄存器地址" aria-label="编辑监视卡片">⋯</button>
+          <label class="watch-title">余量</label>
+          <div class="metric-value"><strong class="watch-val">--</strong><span class="watch-unit">counts</span></div>
+          <small class="watch-src">阈值 − 电流（内置）</small>
+          <div class="bar watch-bar"><i></i></div>
+          <div class="watch-editor hidden">
+            <div class="we-title">监视卡片</div>
+            <label class="we-field"><span>名称</span><input class="we-name" maxlength="24" placeholder="显示名称"></label>
+            <label class="we-field"><span>目标</span><input class="we-target" list="watchSignals" placeholder="信号名 / 0x20000352"></label>
+            <div class="we-line">
+              <label class="we-field we-size-field"><span>宽度</span><select class="we-size"><option value="1">1 B</option><option value="2" selected>2 B</option><option value="4">4 B</option></select></label>
+              <label class="check"><input type="checkbox" class="we-signed"> 有符号</label>
+              <label class="check"><input type="checkbox" class="we-margin"> 余量</label>
+            </div>
+            <div class="we-actions"><button class="btn primary we-apply">应用</button><button class="btn we-cancel">取消</button></div>
+          </div>
         </div>
         <div class="stall-card" id="stallCard">
           <div class="stall-top"><span class="stall-dot"></span><b id="stallText">安全</b><span id="stallCount" class="stall-count">0 次</span></div>
@@ -160,27 +199,12 @@
       <section id="writeCard" class="write-card">
         <div class="write-head">
           <span class="side-title">写入</span>
-          <select id="writeTarget" title="写入目标（RAM / 外设寄存器）"></select>
-          <span class="write-range">范围
-            <input id="writeMin" type="number" title="最小值">
-            <span>…</span>
-            <input id="writeMax" type="number" title="最大值">
-            <span>步</span>
-            <input id="writeStep" type="number" title="步长">
-          </span>
+          <span class="write-hint">在左侧信号行点“写”加入 / 移除</span>
           <label class="check"><input id="writeArmed" type="checkbox"> 允许写入</label>
           <span id="writeState" class="muted">未解锁</span>
         </div>
-        <div class="write-row">
-          <div class="seg small" id="writeModeSeg">
-            <button data-mode="slider" class="active">滑条</button>
-            <button data-mode="switch">开关</button>
-          </div>
-          <input id="writeSlider" type="range" min="0" max="4095" step="1">
-          <input id="writeNumber" type="number">
-          <label class="check switch-only hidden"><input id="writeSwitch" type="checkbox"> 1</label>
-          <label class="check"><input id="writeLive" type="checkbox"> 实时</label>
-          <button id="btnWriteNow" class="btn primary">写入</button>
+        <div id="writeList" class="write-list">
+          <div class="write-empty muted">还没有写入模块。左侧每个信号的“写”键可把该寄存器加入这里。</div>
         </div>
       </section>
 
@@ -347,6 +371,7 @@
   <pre id="logText"></pre>
 </div>
 
+<datalist id="watchSignals"></datalist>
 <div id="toasts" class="toasts"></div>
 
 <script src="/app.js"></script>

@@ -82,9 +82,20 @@
     gridOn: true,
     zeroLine: true,
     glow: false,
+    // 顶部 3 张可配置监视卡片；mode='margin' 时是内置“阈值-电流”
+    watch: [
+      { key: 'w1', title: '电机电流', mode: 'value', signal: 'motor.over.current', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: 'motor.over.current' },
+      { key: 'w2', title: '堵转阈值', mode: 'value', signal: 'motor.over.thresholdLast', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: 'motor.over.thresholdLast' },
+      { key: 'w3', title: '余量', mode: 'margin', signal: '', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: '' },
+    ],
+    // 写入窗口：多个独立模块，每个有自己的类型/范围/实时/状态
     write: {
-      targetId: '', mode: 'slider', min: 0, max: 4095, step: 1,
-      live: false, armed: false, timer: 0, busy: false, pending: null,
+      armed: false, seq: 1,
+      mods: [{
+        id: 'wm1', rowId: 'motor.over.threshold', mode: 'slider',
+        min: 0, max: 4095, step: 1, live: false,
+        status: '', statusKind: '', busy: false, pending: null, timer: 0,
+      }],
     },
     focusId: null,
     focusPinned: false,
@@ -174,16 +185,9 @@
     D.empty = $('#emptyHint');
     D.ribbon = $('#stallRibbon');
     D.ribbonText = $('#stallRibbonText');
-    D.curVal = $('#curVal');
-    D.thrVal = $('#thrVal');
-    D.marginVal = $('#marginVal');
-    D.curUnit = $('#curUnit');
-    D.thrUnit = $('#thrUnit');
-    D.marginUnit = $('#marginUnit');
-    D.marginBar = $('#marginBar');
-    D.curRaw = $('#curRaw');
-    D.thrRaw = $('#thrRaw');
     D.mCurrent = $('#mCurrent');
+    D.watchCards = { w1: $('#mCurrent'), w2: $('#mThreshold'), w3: $('#mMargin') };
+    D.watchSignals = $('#watchSignals');
     D.stallCard = $('#stallCard');
     D.stallText = $('#stallText');
     D.stallSub = $('#stallSub');
@@ -203,18 +207,9 @@
     D.hdrFile = $('#hdrFile');
     D.btnImportAxf = $('#btnImportAxf');
     D.writeCard = $('#writeCard');
-    D.writeTarget = $('#writeTarget');
-    D.writeMin = $('#writeMin');
-    D.writeMax = $('#writeMax');
-    D.writeStep = $('#writeStep');
+    D.writeList = $('#writeList');
     D.writeArmed = $('#writeArmed');
     D.writeState = $('#writeState');
-    D.writeModeSeg = $('#writeModeSeg');
-    D.writeSlider = $('#writeSlider');
-    D.writeNumber = $('#writeNumber');
-    D.writeSwitch = $('#writeSwitch');
-    D.writeLive = $('#writeLive');
-    D.btnWriteNow = $('#btnWriteNow');
     D.projectSel = $('#projectSel');
     D.projectSel2 = $('#projectSel2');
     D.projectState = $('#projectState');
@@ -268,6 +263,7 @@
         }
       }
     }
+    renderWatchDatalist();
   }
 
   // ---------------------------------------------------------------- rows / channels
@@ -504,6 +500,7 @@
       return;
     }
     if (row.support && on) row.support = false;
+    if (on) row.writeOnly = false;
     row[flag] = !!on;
     if (!row.table && !row.plot) {
       const used = S.virtuals.some((v) => v.sourceIds.indexOf(row.id) >= 0);
@@ -520,6 +517,7 @@
       return;
     }
     row.table = row.plot = !!on;
+    if (on) row.writeOnly = false;
     afterSignalsChanged();
   }
 
@@ -540,12 +538,14 @@
   }
 
   function syncChannels() {
-    const before = S.signals.map((s) => s.id).join('|');
+    const beforeIds = S.signals.map((s) => s.id);
+    const before = beforeIds.join('|');
     const need = new Set();
     for (const r of S.rows.values()) if (r.table || r.plot) need.add(r.id);
     for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
-    // 写入目标即使不在表/波形里，也要采样，才能显示当前值和回读
-    if (S.write && S.write.targetId && S.rows.has(S.write.targetId)) need.add(S.write.targetId);
+    // 写入模块 / 监视卡片即使不在表/波形里，也要采样，才能显示当前值和回读
+    for (const m of S.write.mods) if (m.rowId && S.rows.has(m.rowId)) need.add(m.rowId);
+    for (const c of S.watch) if (c.mode === 'value' && c.rowId && S.rows.has(c.rowId)) need.add(c.rowId);
     const next = [];
     for (const r of S.rows.values()) if (need.has(r.id)) next.push(r);
     S.signals = next;
@@ -558,59 +558,286 @@
     }
     const after = S.signals.map((s) => s.id).join('|');
     if (before !== after) {
-      // 服务端在通道构成变化时会清历史；本地也清，否则旧列会和新列错位。
-      S.samples = [];
-      S.lastT = 0;
-      S.hoverT = null;
-      S.paused = false;
-      S.pauseAt = 0;
-      resetStall();
-      updatePauseUI();
-      updateStallUI(0);
+      // 服务端会在通道构成变化时清历史；但前端保留已有样本，按 id 重映射列。
+      // 新增通道在旧样本里填 null，波形从当前时刻接着画，不整屏清空。
+      if (!beforeIds.length && S.samples.length) S.samples = [];
+      if (beforeIds.length && S.samples.length) {
+        const oldPos = new Map(beforeIds.map((id, i) => [id, i]));
+        for (const s of S.samples) {
+          const oldVals = s[1] || [];
+          const nv = new Array(next.length).fill(null);
+          for (let j = 0; j < next.length; j++) {
+            const oi = oldPos.get(next[j].id);
+            if (oi !== undefined && oi < oldVals.length) nv[j] = oldVals[oi];
+          }
+          s[1] = nv;
+        }
+      }
       S.lastChannelKey = after;
       scheduleHistoryReload();
       S.dirty = true;
+      if (!byId(S.stall.currentId) || !byId(S.stall.thresholdId)) {
+        S.stall.active = false;
+        updateStallUI(S.lastT);
+      }
     }
   }
 
-  // ---------------------------------------------------------------- 写入
-  function writeRows() {
-    return Array.from(S.rows.values()).filter((r) => r.addr > 0 && r.kind !== 'virtual');
+  // ---------------------------------------------------------------- 监视卡片
+  function watchCard(key) { return S.watch.find((c) => c.key === key) || null; }
+  function watchRow(card) { return card && card.rowId ? S.rows.get(card.rowId) : null; }
+  function watchSourceText(row) {
+    if (!row) return '';
+    const bit = Array.isArray(row.bit)
+      ? '[' + (row.bit[1] > 1 ? (row.bit[0] + ':' + (row.bit[0] + row.bit[1] - 1)) : row.bit[0]) + ']'
+      : '';
+    return row.name + bit + ' @ ' + hex(row.addr, 6);
   }
 
-  function currentWriteRow() {
-    return S.rows.get(S.write.targetId) || null;
+  function watchDom(key) {
+    D.watchEls = D.watchEls || {};
+    if (D.watchEls[key]) return D.watchEls[key];
+    const root = D.watchCards[key];
+    if (!root) return null;
+    const els = {
+      root,
+      title: root.querySelector('.watch-title'),
+      val: root.querySelector('.watch-val'),
+      unit: root.querySelector('.watch-unit'),
+      src: root.querySelector('.watch-src'),
+      bar: root.querySelector('.watch-bar i'),
+      editor: root.querySelector('.watch-editor'),
+    };
+    D.watchEls[key] = els;
+    return els;
   }
 
-  function ensureWriteTarget() {
-    let row = currentWriteRow();
-    if (row && row.addr) return row;
-    for (const id of ['motor.over.threshold', 'motor.over.thresholdLast', 'motor.over.stopThreshold']) {
-      const e = S.index.get(id);
-      if (!e) continue;
-      row = S.rows.get(id);
+  function findTarget(text, size, signed) {
+    const t = String(text || '').trim();
+    if (!t) return null;
+    if (/^0x[0-9a-f]+$/i.test(t) || /^\d+$/.test(t)) {
+      const addr = parseInt(t, /^0x/i.test(t) ? 16 : 10);
+      if (!isFinite(addr) || addr < 0) return null;
+      return { id: '', name: '@' + hex(addr, 4), addr: addr >>> 0, size, signed, bit: null, unit: '' };
+    }
+    let e = S.index.get(t);
+    if (!e) {
+      const low = t.toLowerCase();
+      for (const x of S.index.values()) {
+        if ((x.name || '').toLowerCase() === low || (x.id || '').toLowerCase() === low) { e = x; break; }
+      }
+    }
+    if (!e || !e.addr) return null;
+    return {
+      id: e.id || e.name, name: e.name || e.id, addr: e.addr >>> 0,
+      size: e.size || size, signed: !!e.signed,
+      bit: Array.isArray(e.bit) ? [Number(e.bit[0]), Number(e.bit[1])] : null,
+      unit: e.unit || inferUnit(e.name) || '',
+    };
+  }
+
+  function ensureWatchRows() {
+    const used = new Set();
+    for (const card of S.watch) {
+      if (card.mode !== 'value') { card.rowId = ''; continue; }
+      if (card.signal && S.index.has(card.signal)) {
+        const e = S.index.get(card.signal);
+        card.addr = e.addr >>> 0;
+        card.size = e.size || card.size || 2;
+        card.signed = !!e.signed;
+        card.bit = Array.isArray(e.bit) ? [Number(e.bit[0]), Number(e.bit[1])] : null;
+        card.unit = e.unit || inferUnit(e.name) || '';
+      }
+      let row = card.rowId ? S.rows.get(card.rowId) : null;
+      if (!row && card.signal && S.rows.has(card.signal)) {
+        row = S.rows.get(card.signal);
+        card.rowId = card.signal;
+      }
       if (!row) {
-        row = newRow(e, { table: false, plot: false, support: false });
-        S.rows.set(id, row);
+        if (!card.addr) continue;
+        const id = 'watch:' + card.key;
+        row = S.rows.get(id);
+        if (!row) {
+          row = newRow({
+            id, name: card.title || ('@' + hex(card.addr, 4)),
+            addr: card.addr >>> 0, size: card.size || 2, signed: !!card.signed,
+            bit: Array.isArray(card.bit) ? card.bit : null,
+            kind: 'watch', group: '监视', type: ((card.size || 2) * 8) + 'b',
+          }, { table: false, plot: false, support: false });
+          S.rows.set(id, row);
+        }
+        row.addr = card.addr >>> 0;
+        row.size = card.size || 2;
+        row.signed = !!card.signed;
+        row.bit = Array.isArray(card.bit) ? card.bit : null;
+        row.name = card.title;
+        row.unit = card.unit || '';
+        row.watchOnly = true;
+        card.rowId = id;
       }
-      // 从服务端配置恢复出来的隐藏行不会带 writeOnly，这里按“当前写入目标”补回标记
-      if (!row.table && !row.plot && !row.support) row.writeOnly = true;
-      S.write.targetId = id;
-      return row;
+      if (row && row.watchOnly) {
+        row.addr = card.addr >>> 0;
+        row.size = card.size || 2;
+        row.signed = !!card.signed;
+        row.bit = Array.isArray(card.bit) ? card.bit : null;
+        row.name = card.title;
+        row.unit = card.unit || '';
+      }
+      used.add(card.rowId);
     }
-    const any = writeRows()[0] || null;
-    S.write.targetId = any ? any.id : '';
-    return any;
-  }
-
-  function releaseWriteOnly() {
     for (const [id, row] of Array.from(S.rows.entries())) {
-      if (row.writeOnly && id !== S.write.targetId && !row.table && !row.plot && !row.support) {
-        S.rows.delete(id);
-      }
+      if (row.watchOnly && !used.has(id) && !row.table && !row.plot && !row.support) S.rows.delete(id);
     }
   }
 
+  function renderWatchDatalist() {
+    if (!D.watchSignals) return;
+    const frag = document.createDocumentFragment();
+    for (const e of S.index.values()) {
+      if (!e || !e.addr) continue;
+      const o = document.createElement('option');
+      o.value = e.id || e.name;
+      if (e.name && e.name !== o.value) o.label = e.name;
+      frag.appendChild(o);
+    }
+    D.watchSignals.innerHTML = '';
+    D.watchSignals.appendChild(frag);
+  }
+
+  function renderWatchLabels() {
+    for (const card of S.watch) {
+      const els = watchDom(card.key);
+      if (!els) continue;
+      els.title.textContent = card.title;
+      els.root.classList.toggle('custom-value', card.mode !== 'margin');
+      const row = watchRow(card);
+      els.src.textContent = card.mode === 'margin'
+        ? '阈值 − 电流（内置）'
+        : (row ? watchSourceText(row) : '未绑定');
+      els.root.dataset.mode = card.mode;
+    }
+  }
+
+  function refreshWatchValues(vals) {
+    const last = Array.isArray(vals) ? vals : (latestSample() ? latestSample()[1] : null);
+    for (const card of S.watch) {
+      const els = watchDom(card.key);
+      if (!els) continue;
+      if (card.mode === 'margin') {
+        const cur = byId(S.stall.currentId);
+        const thr = byId(S.stall.thresholdId);
+        const ci = cur ? cur.ci : -1;
+        const ti = thr ? thr.ci : -1;
+        if (last && ci >= 0 && ti >= 0 && ci < last.length && ti < last.length) {
+          const cv = last[ci] * cur.scale + cur.offset;
+          const tv = last[ti] * thr.scale + thr.offset;
+          els.val.textContent = fmtInt(tv - cv);
+          els.unit.textContent = cur.unit || '';
+          const pct = tv > 0 ? clamp((cv / tv) * 100, 0, 100) : 0;
+          if (els.bar) els.bar.style.width = pct.toFixed(1) + '%';
+        } else {
+          els.val.textContent = '--';
+          els.unit.textContent = 'counts';
+          if (els.bar) els.bar.style.width = '0%';
+        }
+        continue;
+      }
+      const row = watchRow(card);
+      if (!row || row.ci < 0 || !last) {
+        els.val.textContent = '--';
+        els.unit.textContent = '';
+        continue;
+      }
+      const raw = last[row.ci];
+      if (raw === undefined || raw === null) {
+        els.val.textContent = '--';
+        els.unit.textContent = row.unit || '';
+        continue;
+      }
+      els.val.textContent = fmtValue(row, raw);
+      els.unit.textContent = row.unit || '';
+      els.src.textContent = watchSourceText(row);
+    }
+  }
+
+  function renderWatchAll() {
+    renderWatchLabels();
+    const last = latestSample();
+    refreshWatchValues(last ? last[1] : null);
+  }
+
+  function closeWatchEditor() {
+    for (const card of S.watch) {
+      const els = watchDom(card.key);
+      if (!els) continue;
+      els.root.classList.remove('editing');
+      if (els.editor) els.editor.classList.add('hidden');
+    }
+  }
+
+  function openWatchEditor(key) {
+    closeWatchEditor();
+    const card = watchCard(key);
+    const els = watchDom(key);
+    if (!card || !els || !els.editor) return;
+    const name = els.editor.querySelector('.we-name');
+    const target = els.editor.querySelector('.we-target');
+    const size = els.editor.querySelector('.we-size');
+    const signed = els.editor.querySelector('.we-signed');
+    const margin = els.editor.querySelector('.we-margin');
+    if (name) name.value = card.title || '';
+    if (target) {
+      target.value = card.mode === 'margin' ? '' : (card.signal || (card.addr ? hex(card.addr, 4) : ''));
+      target.disabled = card.mode === 'margin';
+    }
+    if (size) size.value = String(card.size || 2);
+    if (signed) signed.checked = !!card.signed;
+    if (margin) margin.checked = card.mode === 'margin';
+    els.root.classList.add('editing');
+    els.editor.classList.remove('hidden');
+    if (name) setTimeout(() => { name.focus(); name.select(); }, 20);
+  }
+
+  function applyWatchEditor(key) {
+    const card = watchCard(key);
+    const els = watchDom(key);
+    if (!card || !els || !els.editor) return;
+    const name = (els.editor.querySelector('.we-name')?.value || '').trim();
+    const targetText = (els.editor.querySelector('.we-target')?.value || '').trim();
+    const size = Number(els.editor.querySelector('.we-size')?.value) || 2;
+    const signed = !!els.editor.querySelector('.we-signed')?.checked;
+    const margin = !!els.editor.querySelector('.we-margin')?.checked;
+    if (margin) {
+      card.mode = 'margin';
+      card.signal = '';
+      card.addr = 0;
+      card.rowId = '';
+      card.title = name || '余量';
+    } else {
+      if (!targetText) { toast('请填写信号名或 0x 地址', 'err'); return; }
+      const t = findTarget(targetText, size, signed);
+      if (!t) { toast('找不到信号或地址: ' + targetText, 'err'); return; }
+      card.mode = 'value';
+      card.signal = t.id;
+      card.addr = t.addr;
+      card.size = t.size;
+      card.signed = t.signed;
+      card.bit = t.bit || null;
+      card.unit = t.unit || '';
+      card.title = name || t.name || ('@' + hex(t.addr, 4));
+      card.rowId = (t.id && S.rows.has(t.id)) ? t.id : ('watch:' + card.key);
+    }
+    ensureWatchRows();
+    syncChannels();
+    closeWatchEditor();
+    renderWatchLabels();
+    renderWatchAll();
+    saveLocal();
+    sendConfig();
+    S.dirty = true;
+  }
+
+  // ---------------------------------------------------------------- 写入模块
   function latestRawOf(row) {
     const last = latestSample();
     if (!last || !row || row.ci === undefined || row.ci < 0) return null;
@@ -618,159 +845,341 @@
     return v === undefined ? null : v;
   }
 
-  function resetWriteRange(row) {
-    if (!row) return;
+  function resetWriteRange(row, mod) {
+    if (!row || !mod) return;
     const bits = row.width || (row.size * 8);
     let max = bits >= 32 ? 1000000 : ((1 << bits) - 1);
     if (/threshold/i.test(row.name)) max = Math.min(max, 4095);
-    S.write.min = 0;
-    S.write.max = max;
-    S.write.step = 1;
-    S.write._rangeFor = row.id;
+    mod.min = 0;
+    mod.max = max;
+    mod.step = 1;
   }
 
-  function renderWriteTargets() {
-    if (!D.writeTarget) return;
-    const row = ensureWriteTarget();
-    // 先回收旧的 write-only 行，再生成下拉，避免删除后 option 还留在列表里
-    releaseWriteOnly();
-    const list = writeRows().slice().sort((a, b) => {
-      const pa = /threshold/i.test(a.name) ? 0 : 1;
-      const pb = /threshold/i.test(b.name) ? 0 : 1;
-      return pa - pb || a.name.localeCompare(b.name);
-    });
-    D.writeTarget.innerHTML = '';
-    for (const r of list) {
-      const o = document.createElement('option');
-      o.value = r.id;
-      o.textContent = r.name + ' @' + hex(r.addr, 6);
-      D.writeTarget.appendChild(o);
-    }
-    if (row) D.writeTarget.value = row.id;
-    if (row && S.write._rangeFor !== row.id) resetWriteRange(row);
-    syncWriteTargetUI();
+  function makeWriteMod(row) {
+    S.write.seq = (S.write.seq || 0) + 1;
+    const mod = {
+      id: 'wm' + S.write.seq, rowId: row.id, mode: 'slider',
+      min: 0, max: 0, step: 1, live: false,
+      status: '', statusKind: '', busy: false, pending: null, timer: 0,
+      addr: row.addr, size: row.size, signed: !!row.signed, name: row.name,
+    };
+    resetWriteRange(row, mod);
+    return mod;
   }
 
-  function syncWriteTargetUI() {
-    const row = currentWriteRow();
-    if (!row || !D.writeCard) return;
-    if (D.writeMin) D.writeMin.value = String(S.write.min);
-    if (D.writeMax) D.writeMax.value = String(S.write.max);
-    if (D.writeStep) D.writeStep.value = String(S.write.step);
-    const isSwitch = S.write.mode === 'switch';
-    if (D.writeModeSeg) {
-      D.writeModeSeg.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.mode === S.write.mode));
+  function releaseWriteRows() {
+    const used = new Set(S.write.mods.map((m) => m.rowId));
+    for (const c of S.watch) if (c.rowId) used.add(c.rowId);
+    for (const [id, row] of Array.from(S.rows.entries())) {
+      if (row.writeOnly && !used.has(id) && !row.table && !row.plot && !row.support) S.rows.delete(id);
     }
-    if (D.writeSlider) {
-      D.writeSlider.classList.toggle('hidden', isSwitch);
-      D.writeSlider.min = String(S.write.min);
-      D.writeSlider.max = String(S.write.max);
-      D.writeSlider.step = String(S.write.step);
+  }
+
+  function ensureWriteMods() {
+    const mods = [];
+    for (const mod of S.write.mods || []) {
+      if (!mod || !mod.rowId) continue;
+      let row = S.rows.get(mod.rowId);
+      if (!row) {
+        const e = S.index.get(mod.rowId);
+        if (e) {
+          row = newRow(e, { table: false, plot: false, support: false });
+          row.writeOnly = true;
+          S.rows.set(mod.rowId, row);
+        } else if (mod.addr) {
+          row = newRow({
+            id: mod.rowId, name: mod.name || mod.rowId, addr: mod.addr,
+            size: mod.size || 2, signed: !!mod.signed, bit: null,
+            kind: 'write', group: '写入', type: ((mod.size || 2) * 8) + 'b',
+          }, { table: false, plot: false, support: false });
+          row.writeOnly = true;
+          S.rows.set(mod.rowId, row);
+        }
+      }
+      if (!row) continue;
+      if (mods.some((m) => m.rowId === mod.rowId)) continue;
+      if (!(mod.max > mod.min)) resetWriteRange(row, mod);
+      mod.addr = row.addr;
+      mod.size = row.size;
+      mod.signed = !!row.signed;
+      mod.name = row.name;
+      row.writeOnly = !row.table && !row.plot && !row.support;
+      mods.push(mod);
     }
-    if (D.writeNumber) D.writeNumber.classList.toggle('hidden', isSwitch);
-    if (D.writeSwitch) {
-      D.writeSwitch.closest('label')?.classList.toggle('hidden', !isSwitch);
+    S.write.mods = mods;
+    releaseWriteRows();
+  }
+
+  function writeModForRow(rowId) {
+    return S.write.mods.find((m) => m.rowId === rowId) || null;
+  }
+
+  function toggleWriteRow(rowId) {
+    const existing = writeModForRow(rowId);
+    if (existing) {
+      S.write.mods = S.write.mods.filter((m) => m !== existing);
+      if (existing.timer) clearTimeout(existing.timer);
+      ensureWriteMods();
+      afterSignalsChanged();
+      toast('已从写入窗口移除：' + (S.index.get(rowId)?.name || rowId), 'ok');
+      return;
     }
-    const raw = latestRawOf(row);
-    const active = document.activeElement;
-    if (raw !== null && active !== D.writeSlider && active !== D.writeNumber && !S.write.busy) {
-      if (D.writeSlider) D.writeSlider.value = String(raw);
-      if (D.writeNumber) D.writeNumber.value = String(raw);
-      if (D.writeSwitch) D.writeSwitch.checked = !!raw;
+    let row = S.rows.get(rowId);
+    const entry = S.index.get(rowId);
+    if (!row) {
+      if (!entry || !entry.addr) { toast('该信号没有可写地址', 'err'); return; }
+      row = newRow(entry, { table: false, plot: false, support: false });
+      row.writeOnly = true;
+      S.rows.set(rowId, row);
     }
-    D.writeCard.classList.toggle('locked', !S.write.armed);
-    if (D.btnWriteNow) {
-      D.btnWriteNow.disabled = !S.write.armed;
-      D.btnWriteNow.title = S.write.armed ? '写入当前值并回读' : '先勾选“允许写入”';
-    }
-    if (D.writeArmed) D.writeArmed.checked = !!S.write.armed;
-    if (D.writeLive) D.writeLive.checked = !!S.write.live;
+    if (!row.addr) { toast('该信号没有可写地址', 'err'); return; }
+    S.write.mods.push(makeWriteMod(row));
+    ensureWriteMods();
+    afterSignalsChanged();
+    toast('已加入写入窗口：' + (row.name || row.id), 'ok');
+  }
+
+  function syncWriteUI() {
+    const armed = !!S.write.armed;
+    if (D.writeCard) D.writeCard.classList.toggle('locked', !armed);
+    if (D.writeArmed) D.writeArmed.checked = armed;
     if (D.writeState) {
-      if (S.write.status) {
-        D.writeState.textContent = S.write.status;
-        D.writeState.className = S.write.statusKind || 'muted';
-      } else {
-        D.writeState.textContent = S.write.armed
-          ? (raw === null ? '等待样本' : '当前 ' + raw)
-          : '未解锁';
-        D.writeState.className = 'muted';
+      D.writeState.textContent = armed ? ('已解锁 · ' + S.write.mods.length + ' 个模块') : '未解锁';
+      D.writeState.className = armed ? 'ok' : 'muted';
+    }
+    if (!D.writeList) return;
+    for (const mod of S.write.mods) {
+      const el = D.writeList.querySelector('[data-mod="' + mod.id + '"]');
+      if (!el) continue;
+      const btn = el.querySelector('.wm-write');
+      if (btn) {
+        btn.disabled = !armed;
+        btn.title = armed ? '写入当前值并回读' : '先勾选“允许写入”';
       }
     }
   }
 
-  function refreshWriteUI() {
-    if (S.write.busy) return;
-    const row = currentWriteRow();
-    if (!row) return;
-    const raw = latestRawOf(row);
-    if (raw === null) return;
-    if (document.activeElement === D.writeSlider || document.activeElement === D.writeNumber) return;
-    if (D.writeSlider) D.writeSlider.value = String(raw);
-    if (D.writeNumber) D.writeNumber.value = String(raw);
-    if (D.writeSwitch) D.writeSwitch.checked = !!raw;
-    if (!S.write.status) syncWriteTargetUI();
-  }
-
-  async function sendWrite(value) {
-    const row = currentWriteRow();
-    if (!row || !row.addr) {
-      S.write.status = '没有可写的目标';
-      S.write.statusKind = 'err';
-      syncWriteTargetUI();
-      toast(S.write.status, 'err');
+  function renderWriteMods() {
+    if (!D.writeList) return;
+    D.writeList.innerHTML = '';
+    if (!S.write.mods.length) {
+      const empty = document.createElement('div');
+      empty.className = 'write-empty muted';
+      empty.textContent = '还没有写入模块。左侧每个信号的“写”键可把该寄存器加入这里。';
+      D.writeList.appendChild(empty);
+      syncWriteUI();
       return;
     }
+    for (const mod of S.write.mods) {
+      const row = S.rows.get(mod.rowId);
+      if (!row) continue;
+      const el = document.createElement('div');
+      el.className = 'write-mod';
+      el.dataset.mod = mod.id;
+
+      const head = document.createElement('div');
+      head.className = 'wm-head';
+      const name = document.createElement('span');
+      name.className = 'wm-name';
+      name.textContent = row.name;
+      name.title = row.name + '\n' + hex(row.addr) + ' · ' + row.size + 'B';
+      const addr = document.createElement('span');
+      addr.className = 'wm-addr';
+      addr.textContent = '@' + hex(row.addr, 6);
+      const seg = document.createElement('div');
+      seg.className = 'seg small';
+      for (const [mode, label] of [['slider', '滑条'], ['switch', '开关']]) {
+        const b = document.createElement('button');
+        b.dataset.mode = mode;
+        b.textContent = label;
+        b.classList.toggle('active', mod.mode === mode);
+        b.addEventListener('click', () => {
+          mod.mode = mode;
+          mod.status = '';
+          renderWriteMods();
+          saveLocal();
+        });
+        seg.appendChild(b);
+      }
+      const del = document.createElement('button');
+      del.className = 'wm-del';
+      del.textContent = '×';
+      del.title = '从写入窗口移除';
+      del.addEventListener('click', () => toggleWriteRow(mod.rowId));
+      head.append(name, addr, seg, del);
+
+      const body = document.createElement('div');
+      body.className = 'wm-body';
+      const isSwitch = mod.mode === 'switch';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.className = 'wm-slider' + (isSwitch ? ' hidden' : '');
+      slider.min = String(mod.min);
+      slider.max = String(mod.max);
+      slider.step = String(mod.step);
+      const num = document.createElement('input');
+      num.type = 'number';
+      num.className = 'wm-number' + (isSwitch ? ' hidden' : '');
+      const swWrap = document.createElement('label');
+      swWrap.className = 'check wm-switch-wrap' + (isSwitch ? '' : ' hidden');
+      const sw = document.createElement('input');
+      sw.type = 'checkbox';
+      swWrap.append(sw, document.createTextNode(' 1'));
+      const range = document.createElement('span');
+      range.className = 'wm-range' + (isSwitch ? ' hidden' : '');
+      const minI = document.createElement('input'); minI.type = 'number'; minI.value = String(mod.min); minI.title = '最小值';
+      const maxI = document.createElement('input'); maxI.type = 'number'; maxI.value = String(mod.max); maxI.title = '最大值';
+      const stepI = document.createElement('input'); stepI.type = 'number'; stepI.value = String(mod.step); stepI.title = '步长';
+      range.append(document.createTextNode('范围 '), minI, document.createTextNode(' … '), maxI, document.createTextNode(' 步 '), stepI);
+      const liveLab = document.createElement('label');
+      liveLab.className = 'check wm-live';
+      const live = document.createElement('input');
+      live.type = 'checkbox';
+      live.checked = !!mod.live;
+      liveLab.append(live, document.createTextNode(' 实时'));
+      const wbtn = document.createElement('button');
+      wbtn.className = 'btn primary wm-write';
+      wbtn.textContent = '写入';
+      const status = document.createElement('span');
+      status.className = 'wm-status ' + (mod.statusKind || '');
+      status.textContent = mod.status || (S.write.armed ? (latestRawOf(row) === null ? '等待样本' : '当前 ' + latestRawOf(row)) : '未解锁');
+      body.append(slider, num, swWrap, range, liveLab, wbtn, status);
+
+      const raw = latestRawOf(row);
+      if (raw !== null) {
+        slider.value = String(clamp(raw, mod.min, mod.max));
+        num.value = String(raw);
+        sw.checked = !!raw;
+      }
+
+      slider.addEventListener('input', () => {
+        const v = Number(slider.value);
+        num.value = String(v);
+        scheduleWrite(mod, v);
+      });
+      slider.addEventListener('change', () => {
+        if (S.write.armed) sendWrite(mod, Number(slider.value));
+      });
+      num.addEventListener('change', () => {
+        const v = Number(num.value);
+        slider.value = String(clamp(v, mod.min, mod.max));
+        if (mod.live) scheduleWrite(mod, v);
+      });
+      sw.addEventListener('change', () => {
+        const v = sw.checked ? 1 : 0;
+        num.value = String(v);
+        slider.value = String(v);
+        if (S.write.armed) sendWrite(mod, v);
+      });
+      minI.addEventListener('change', () => {
+        mod.min = Number(minI.value) || 0;
+        if (mod.max <= mod.min) { mod.max = mod.min + 1; maxI.value = String(mod.max); }
+        slider.min = String(mod.min);
+        saveLocal();
+      });
+      maxI.addEventListener('change', () => {
+        mod.max = Number(maxI.value) || 0;
+        if (mod.max <= mod.min) { mod.min = Math.max(0, mod.max - 1); minI.value = String(mod.min); }
+        slider.max = String(mod.max);
+        saveLocal();
+      });
+      stepI.addEventListener('change', () => {
+        mod.step = Math.max(1, Number(stepI.value) || 1);
+        stepI.value = String(mod.step);
+        slider.step = String(mod.step);
+        saveLocal();
+      });
+      live.addEventListener('change', () => {
+        mod.live = !!live.checked;
+        if (!mod.live && mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+        saveLocal();
+      });
+      wbtn.addEventListener('click', () => {
+        const v = Number(num.value);
+        sendWrite(mod, v);
+      });
+
+      el.append(head, body);
+      D.writeList.appendChild(el);
+    }
+    syncWriteUI();
+  }
+
+  function refreshWriteUI() {
+    if (!D.writeList) return;
+    for (const mod of S.write.mods) {
+      const el = D.writeList.querySelector('[data-mod="' + mod.id + '"]');
+      if (!el) continue;
+      const row = S.rows.get(mod.rowId);
+      const raw = latestRawOf(row);
+      const slider = el.querySelector('.wm-slider');
+      const num = el.querySelector('.wm-number');
+      const sw = el.querySelector('.wm-switch-wrap input');
+      const active = document.activeElement;
+      if (raw !== null && active !== slider && active !== num && !mod.busy) {
+        if (slider) slider.value = String(clamp(raw, mod.min, mod.max));
+        if (num) num.value = String(raw);
+        if (sw) sw.checked = !!raw;
+      }
+      const st = el.querySelector('.wm-status');
+      if (st) {
+        if (mod.status) {
+          st.textContent = mod.status;
+          st.className = 'wm-status ' + (mod.statusKind || '');
+        } else {
+          st.textContent = S.write.armed ? (raw === null ? '等待样本' : '当前 ' + raw) : '未解锁';
+          st.className = 'wm-status';
+        }
+      }
+    }
+  }
+
+  async function sendWrite(mod, value) {
+    const row = S.rows.get(mod.rowId);
+    if (!row || !row.addr) {
+      mod.status = '没有可写的目标'; mod.statusKind = 'err';
+      refreshWriteUI(); toast(mod.status, 'err'); return;
+    }
     if (!S.write.armed) {
-      S.write.status = '未解锁：先勾选“允许写入”';
-      S.write.statusKind = 'err';
-      syncWriteTargetUI();
-      toast(S.write.status, 'err');
-      return;
+      mod.status = '未解锁：先勾选“允许写入”'; mod.statusKind = 'err';
+      refreshWriteUI(); toast(mod.status, 'err'); return;
     }
     let v = Number(value);
     if (!isFinite(v)) {
-      S.write.status = '写入值无效';
-      S.write.statusKind = 'err';
-      syncWriteTargetUI();
-      toast(S.write.status, 'err');
-      return;
+      mod.status = '写入值无效'; mod.statusKind = 'err';
+      refreshWriteUI(); toast(mod.status, 'err'); return;
     }
     const bits = row.width || (row.size * 8);
     const max = Math.pow(2, bits) - 1;
     v = Math.max(0, Math.min(max, Math.trunc(v)));
-    if (S.write.busy) { S.write.pending = v; return; }
-    S.write.busy = true;
-    S.write.status = '写入中…';
-    S.write.statusKind = 'muted';
-    syncWriteTargetUI();
+    if (mod.busy) { mod.pending = v; return; }
+    mod.busy = true;
+    mod.status = '写入中…'; mod.statusKind = 'muted';
+    refreshWriteUI();
     try {
       const res = await post('/api/write', {
         addr: row.addr, size: row.size, value: v, bit: row.bit || null, verify: true,
       });
-      S.write.status = '已写 ' + fmtInt(v) + ' · 回读 ' + fmtInt(res.readback) + (res.verified ? '' : '（不一致）');
-      S.write.statusKind = res.verified ? 'ok' : 'err';
-      if (D.writeSlider) D.writeSlider.value = String(v);
-      if (D.writeNumber) D.writeNumber.value = String(v);
-      if (D.writeSwitch) D.writeSwitch.checked = !!v;
+      mod.status = '已写 ' + fmtInt(v) + ' · 回读 ' + fmtInt(res.readback) + (res.verified ? '' : '（不一致）');
+      mod.statusKind = res.verified ? 'ok' : 'err';
       if (!res.verified) toast('写入已发出，但回读不一致（固件可能正在改它）', 'err');
     } catch (e) {
-      S.write.status = '写入失败: ' + e.message;
-      S.write.statusKind = 'err';
-      toast(S.write.status, 'err');
+      mod.status = '写入失败: ' + e.message; mod.statusKind = 'err';
+      toast(mod.status, 'err');
     } finally {
-      S.write.busy = false;
-      syncWriteTargetUI();
+      mod.busy = false;
+      refreshWriteUI();
       saveLocal();
-      const pending = S.write.pending;
-      S.write.pending = null;
-      if (pending !== null && pending !== v) sendWrite(pending);
+      const pending = mod.pending;
+      mod.pending = null;
+      if (pending !== null && pending !== v) sendWrite(mod, pending);
     }
   }
 
-  function scheduleWrite(value) {
-    if (!S.write.live || !S.write.armed) return;
-    if (S.write.timer) clearTimeout(S.write.timer);
-    S.write.timer = setTimeout(() => { S.write.timer = 0; sendWrite(value); }, 120);
+  function scheduleWrite(mod, value) {
+    if (!mod.live || !S.write.armed) return;
+    if (mod.timer) clearTimeout(mod.timer);
+    mod.timer = setTimeout(() => { mod.timer = 0; sendWrite(mod, value); }, 120);
   }
 
   function scheduleHistoryReload() {
@@ -782,7 +1191,8 @@
   }
 
   function afterSignalsChanged() {
-    ensureWriteTarget();
+    ensureWatchRows();
+    ensureWriteMods();
     syncChannels();
     renderCatalog();
     renderSelected();
@@ -790,7 +1200,8 @@
     renderValueTable();
     renderStallSelects();
     renderCalib();
-    renderWriteTargets();
+    renderWatchLabels();
+    renderWriteMods();
     updateEmptyHint();
     saveLocal();
     sendConfig();
@@ -810,7 +1221,8 @@
     renderValueTable();
     renderStallSelects();
     renderCalib();
-    renderWriteTargets();
+    renderWatchAll();
+    renderWriteMods();
     syncTablePanel();
     saveLocal();
     updateProjectUI();
@@ -871,6 +1283,7 @@
               plot: item.plot !== undefined ? item.plot : item.visible !== false,
               support: !!item.support,
               writeOnly: !!item.writeOnly,
+              watchOnly: !!item.watchOnly,
             });
             S.rows.set(row.id, row);
           }
@@ -901,17 +1314,54 @@
           S.stall.currentId = c.stall.currentId || '';
           S.stall.thresholdId = c.stall.thresholdId || '';
         }
-        if (c.write) {
-          S.write.targetId = c.write.targetId || '';
-          S.write.mode = c.write.mode === 'switch' ? 'switch' : 'slider';
-          S.write.min = Number(c.write.min) || 0;
-          S.write.max = Number(c.write.max) || 4095;
-          S.write.step = Math.max(1, Number(c.write.step) || 1);
-          S.write.live = !!c.write.live;
-          // 安全: 写入解锁状态不跨工程/刷新保留
-          S.write.armed = false;
-          S.write._rangeFor = S.write.targetId;
+        if (Array.isArray(c.watch)) {
+          const base = S.watch.slice();
+          S.watch = [0, 1, 2].map((i) => {
+            const w = c.watch[i] || base[i] || {};
+            return {
+              key: 'w' + (i + 1),
+              title: String(w.title || base[i]?.title || ('监视 ' + (i + 1))).slice(0, 24),
+              mode: w.mode === 'margin' ? 'margin' : 'value',
+              signal: String(w.signal || ''),
+              addr: Number(w.addr) >>> 0,
+              size: Number(w.size) || 2,
+              signed: !!w.signed,
+              bit: Array.isArray(w.bit) ? [Number(w.bit[0]), Number(w.bit[1])] : null,
+              unit: String(w.unit || ''),
+              rowId: String(w.rowId || ''),
+            };
+          });
         }
+        if (Array.isArray(c.write?.mods)) {
+          S.write.mods = c.write.mods.slice(0, 8).map((m, i) => ({
+            id: String(m.id || ('wm' + (i + 1))),
+            rowId: String(m.rowId || ''),
+            mode: m.mode === 'switch' ? 'switch' : 'slider',
+            min: Number(m.min) || 0,
+            max: Number(m.max) || 0,
+            step: Math.max(1, Number(m.step) || 1),
+            live: !!m.live,
+            status: '', statusKind: '', busy: false, pending: null, timer: 0,
+            addr: Number(m.addr) >>> 0, size: Number(m.size) || 2,
+            signed: !!m.signed, name: String(m.name || ''),
+          }));
+          S.write.seq = Math.max(1, S.write.mods.length,
+            ...S.write.mods.map((m) => Number(String(m.id).replace(/\D/g, '')) || 0));
+        } else if (c.write && c.write.targetId) {
+          // 兼容旧版单目标存档
+          S.write.mods = [{
+            id: 'wm1', rowId: c.write.targetId,
+            mode: c.write.mode === 'switch' ? 'switch' : 'slider',
+            min: Number(c.write.min) || 0,
+            max: Number(c.write.max) || 4095,
+            step: Math.max(1, Number(c.write.step) || 1),
+            live: !!c.write.live,
+            status: '', statusKind: '', busy: false, pending: null, timer: 0,
+          }];
+          S.write.seq = 1;
+        }
+        // 安全: 写入解锁状态不跨工程/刷新保留
+        S.write.armed = false;
       }
     } catch (e) { console.warn(e); }
 
@@ -927,8 +1377,8 @@
         }));
       }
     }
-    ensureWriteTarget();
-    releaseWriteOnly();
+    ensureWatchRows();
+    ensureWriteMods();
     syncChannels();
     const st = S.catalog.stall || {};
     const sampled = S.signals.filter((s) => !isHidden(s));
@@ -969,7 +1419,8 @@
           id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
           scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
           step: s.step, axis: s.axis, type: s.type,
-          table: !!s.table, plot: !!s.plot, support: !!s.support, writeOnly: !!s.writeOnly,
+          table: !!s.table, plot: !!s.plot, support: !!s.support,
+          writeOnly: !!s.writeOnly, watchOnly: !!s.watchOnly,
         })),
         virtuals: S.virtuals.map((v) => ({
           id: v.id, arrayId: v.arrayId, name: v.name, sourceIds: v.sourceIds.slice(),
@@ -990,10 +1441,18 @@
           currentId: S.stall.currentId,
           thresholdId: S.stall.thresholdId,
         },
+        watch: S.watch.map((c) => ({
+          title: c.title, mode: c.mode, signal: c.signal, addr: c.addr,
+          size: c.size, signed: !!c.signed, bit: c.bit || null, unit: c.unit, rowId: c.rowId,
+        })),
         write: {
-          targetId: S.write.targetId, mode: S.write.mode,
-          min: S.write.min, max: S.write.max, step: S.write.step,
-          live: !!S.write.live, armed: false, // 解锁状态不落盘
+          armed: false, // 解锁状态不落盘
+          seq: S.write.seq,
+          mods: S.write.mods.map((m) => ({
+            id: m.id, rowId: m.rowId, mode: m.mode,
+            min: m.min, max: m.max, step: m.step, live: !!m.live,
+            addr: m.addr, size: m.size, signed: !!m.signed, name: m.name || '',
+          })),
         },
       }));
       // 多工程自动保存
@@ -1063,7 +1522,8 @@
     renderValueTable();
     renderStallSelects();
     renderCalib();
-    renderWriteTargets();
+    renderWatchAll();
+    renderWriteMods();
     syncTablePanel();
     updateProjectUI();
     S.dirty = true;
@@ -1179,7 +1639,11 @@
       const row = normalizeSignal(x);
       S.rows.set(row.id, row);
     }
+    ensureWatchRows();
+    ensureWriteMods();
     syncChannels();
+    renderWatchLabels();
+    renderWriteMods();
     if (rate) S.rate = Number(rate) || S.rate;
     const st = S.catalog.stall || {};
     const sampled = S.signals.filter((s) => !isHidden(s));
@@ -1362,31 +1826,7 @@
     const last = latestSample();
     if (!last) return;
     const vals = last[1];
-    const cur = byId(S.stall.currentId);
-    const thr = byId(S.stall.thresholdId);
-    const ci = cur ? cur.ci : -1;
-    const ti = thr ? thr.ci : -1;
-    if (cur && ci >= 0 && ci < vals.length) {
-      D.curVal.textContent = fmtValue(cur, vals[ci]);
-      D.curUnit.textContent = cur.unit || '';
-      D.curRaw.textContent = cur.name;
-      D.curRaw.title = hex(cur.addr) + ' · ' + cur.name;
-    }
-    if (thr && ti >= 0 && ti < vals.length) {
-      D.thrVal.textContent = fmtValue(thr, vals[ti]);
-      D.thrUnit.textContent = thr.unit || '';
-      D.thrRaw.textContent = thr.name;
-      D.thrRaw.title = hex(thr.addr) + ' · ' + thr.name;
-    }
-    if (cur && thr && ci >= 0 && ti >= 0 && ci < vals.length && ti < vals.length) {
-      const cv = vals[ci] * cur.scale + cur.offset;
-      const tv = vals[ti] * thr.scale + thr.offset;
-      const margin = tv - cv;
-      D.marginVal.textContent = fmtInt(margin);
-      D.marginUnit.textContent = cur.unit || '';
-      const pct = tv > 0 ? clamp((cv / tv) * 100, 0, 100) : 0;
-      D.marginBar.style.width = pct.toFixed(1) + '%';
-    }
+    refreshWatchValues(vals);
     // 目录/波形列表/图例/数值表里的实时值
     for (const row of S.rows.values()) {
       const txt = rowValueText(row, vals);
@@ -1455,7 +1895,11 @@
     const st = S.stall;
     const active = st.enabled && st.active;
     D.stallCard.classList.toggle('danger', active);
-    D.mCurrent.classList.toggle('danger', active);
+    for (const c of S.watch) {
+      const els = watchDom(c.key);
+      if (!els) continue;
+      els.root.classList.toggle('danger', active && (c.rowId === st.currentId || c.mode === 'margin'));
+    }
     D.ribbon.classList.toggle('hidden', !active);
     if (active) {
       const dur = Math.max(0, t - st.since) / 1000;
@@ -1530,13 +1974,16 @@
 
   // 主动/被动断开、重连、切工程都调用：清掉在途写入并强制回到未解锁
   function disarmWrite(reason) {
-    if (S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
+    for (const mod of S.write.mods) {
+      if (mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+      mod.busy = false;
+      mod.pending = null;
+      mod.status = reason || '';
+      mod.statusKind = reason ? 'err' : '';
+    }
     S.write.armed = false;
-    S.write.busy = false;
-    S.write.pending = null;
-    S.write.status = reason || '';
-    S.write.statusKind = reason ? 'err' : '';
-    syncWriteTargetUI();
+    syncWriteUI();
+    refreshWriteUI();
   }
 
   function applyStatus(st) {
@@ -1720,6 +2167,20 @@
       b.setAttribute('aria-pressed', row && row[flag] ? 'true' : 'false');
       wrap.appendChild(b);
     }
+    const inWrite = !!writeModForRow(id);
+    const wb = document.createElement('button');
+    wb.className = 'tgl tgl-write' + (inWrite ? ' on' : '');
+    wb.textContent = '写';
+    wb.title = inWrite ? '从写入窗口移除' : '加入写入窗口';
+    wb.dataset.rowWrite = id;
+    wb.setAttribute('aria-label', wb.title);
+    wb.setAttribute('aria-pressed', inWrite ? 'true' : 'false');
+    wrap.appendChild(wb);
+    // 十字分区右下角保留：先占位，后续可放“曲线设置”等
+    const reserved = document.createElement('span');
+    reserved.className = 'tgl-reserved';
+    reserved.setAttribute('aria-hidden', 'true');
+    wrap.appendChild(reserved);
     return wrap;
   }
 
@@ -1752,7 +2213,7 @@
       name.textContent = entry.name;
     }
     name.title = entry.name + '\n' + hex(entry.addr) + ' · ' + (entry.size * 8) + ' bit ' + (entry.signed ? 'signed' : 'unsigned') +
-      '\n点击数：切换“表/波”；两个小按钮可分别开关';
+      '\n表：加入数值表；波：加入波形；写：加入下方写入窗口（可再做开关/滑条）';
     main.appendChild(name);
     const meta = document.createElement('div');
     meta.className = 'sig-meta';
@@ -3018,72 +3479,40 @@
     });
     $('#stallEnable').addEventListener('change', (e) => { S.stall.enabled = e.target.checked; resetStall(); saveLocal(); S.dirty = true; });
 
-    // 写入
-    D.writeTarget?.addEventListener('change', () => {
-      S.write.targetId = D.writeTarget.value;
-      S.write.status = '';
-      // 目标变了，取消尚未发出的实时写入，避免旧值写到新目标
-      if (S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
-      S.write.pending = null;
-      const row = currentWriteRow();
-      if (row) resetWriteRange(row);
-      // 切走的目标若是仅用于写入的隐藏行，立即回收；下拉同步重建
-      releaseWriteOnly();
-      renderWriteTargets();
-      syncChannels();
-      sendConfig();
-      saveLocal();
-    });
-    const rangeCommit = () => {
-      S.write.min = Number(D.writeMin?.value) || 0;
-      S.write.max = Number(D.writeMax?.value) || 0;
-      S.write.step = Math.max(1, Number(D.writeStep?.value) || 1);
-      if (S.write.max <= S.write.min) S.write.max = S.write.min + 1;
-      syncWriteTargetUI();
-      saveLocal();
-    };
-    D.writeMin?.addEventListener('change', rangeCommit);
-    D.writeMax?.addEventListener('change', rangeCommit);
-    D.writeStep?.addEventListener('change', rangeCommit);
-    D.writeSlider?.addEventListener('input', () => {
-      const v = Number(D.writeSlider.value);
-      if (D.writeNumber) D.writeNumber.value = String(v);
-      scheduleWrite(v);
-    });
-    D.writeSlider?.addEventListener('change', () => {
-      if (S.write.armed) sendWrite(Number(D.writeSlider.value));
-    });
-    D.writeNumber?.addEventListener('change', () => {
-      const v = Number(D.writeNumber.value);
-      if (D.writeSlider) D.writeSlider.value = String(v);
-      if (S.write.live) scheduleWrite(v);
-    });
-    D.writeSwitch?.addEventListener('change', () => {
-      const v = D.writeSwitch.checked ? 1 : 0;
-      if (D.writeNumber) D.writeNumber.value = String(v);
-      if (D.writeSlider) D.writeSlider.value = String(v);
-      if (S.write.armed) sendWrite(v);
-    });
+    // 写入：全局解锁 + 每个模块自己的类型/范围/实时
     D.writeArmed?.addEventListener('change', () => {
       S.write.armed = !!D.writeArmed.checked;
-      if (!S.write.armed && S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
-      syncWriteTargetUI();
+      if (!S.write.armed) {
+        for (const mod of S.write.mods) {
+          if (mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+          mod.pending = null;
+        }
+      }
+      for (const mod of S.write.mods) { mod.status = ''; mod.statusKind = ''; }
+      syncWriteUI();
+      refreshWriteUI();
       saveLocal();
     });
-    D.writeLive?.addEventListener('change', () => {
-      S.write.live = !!D.writeLive.checked;
-      if (!S.write.live && S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
-      saveLocal();
-    });
-    D.writeModeSeg?.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
-      S.write.mode = b.dataset.mode === 'switch' ? 'switch' : 'slider';
-      S.write.status = '';
-      syncWriteTargetUI();
-      saveLocal();
-    }));
-    D.btnWriteNow?.addEventListener('click', () => {
-      const v = Number(D.writeNumber?.value ?? D.writeSlider?.value ?? 0);
-      sendWrite(v);
+
+    // 监视卡片编辑
+    for (const btn of $$('[data-watch-edit]')) {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openWatchEditor(btn.dataset.watchEdit);
+      });
+    }
+    for (const card of S.watch) {
+      const els = watchDom(card.key);
+      if (!els || !els.editor) continue;
+      els.editor.querySelector('.we-apply')?.addEventListener('click', () => applyWatchEditor(card.key));
+      els.editor.querySelector('.we-cancel')?.addEventListener('click', () => closeWatchEditor());
+      els.editor.querySelector('.we-margin')?.addEventListener('change', (e) => {
+        const target = els.editor.querySelector('.we-target');
+        if (target) target.disabled = !!e.target.checked;
+      });
+    }
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.watch-card')) closeWatchEditor();
     });
 
     // 工程
@@ -3125,6 +3554,13 @@
   }
 
   function onCatalogClick(e) {
+    const wtgl = e.target.closest('[data-row-write]');
+    if (wtgl) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleWriteRow(wtgl.dataset.rowWrite);
+      return;
+    }
     const tgl = e.target.closest('[data-row-toggle]');
     if (tgl) {
       e.preventDefault();
@@ -3239,10 +3675,8 @@
     resetStall();
     updatePauseUI();
     updateStallUI(0);
-    D.curVal.textContent = '--';
-    D.thrVal.textContent = '--';
-    D.marginVal.textContent = '--';
-    D.marginBar.style.width = '0%';
+    renderWatchAll();
+    renderWriteMods();
     for (const row of S.selRows.values()) {
       const v = row.querySelector('.sel-val'); if (v) v.textContent = '—';
     }
@@ -3336,10 +3770,11 @@
       }
     }
     S.virtuals = S.virtuals.filter((v) => (v.sourceIds || []).some((id) => S.index.has(id)));
-    ensureWriteTarget();
+    ensureWatchRows();
+    ensureWriteMods();
     syncChannels();
     renderCatalog(); renderSelected(); renderLegend(); renderValueTable();
-    renderStallSelects(); renderCalib(); renderWriteTargets();
+    renderStallSelects(); renderCalib(); renderWatchAll(); renderWriteMods();
     sendConfig(true);
     if (D.catalogMeta && catalog.meta) {
       D.catalogMeta.textContent = 'AXF ' + (catalog.meta.generated_at || '?') + ' · ' +
