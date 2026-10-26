@@ -639,6 +639,21 @@
     };
   }
 
+  // 按 id 找符号；找不到时按显示名兜底（应对 AXF 里 id/name 轻微差异）
+  function catalogEntryFor(id, name) {
+    let e = id ? S.index.get(id) : null;
+    if (e) return e;
+    const n = String(name || '').trim();
+    if (!n) return null;
+    e = S.index.get(n);
+    if (e) return e;
+    const low = n.toLowerCase();
+    for (const x of S.index.values()) {
+      if ((x.name || '').toLowerCase() === low || (x.id || '').toLowerCase() === low) return x;
+    }
+    return null;
+  }
+
   function ensureWatchRows() {
     const used = new Set();
     for (const card of S.watch) {
@@ -904,13 +919,24 @@
     for (const mod of S.write.mods || []) {
       if (!mod || !mod.rowId) continue;
       let row = S.rows.get(mod.rowId);
-      if (!row) {
-        const e = S.index.get(mod.rowId);
-        if (e) {
+      const e = catalogEntryFor(mod.rowId, mod.name);
+      if (e) {
+        if (!row) {
           row = newRow(e, { table: false, plot: false, support: false });
-          row.writeOnly = true;
+          mod.rowId = e.id || mod.rowId;
           S.rows.set(mod.rowId, row);
-        } else if (mod.addr) {
+        } else {
+          // AXF 重新导入后，写入模块必须跟着新符号表更新地址/宽度/符号性
+          row.addr = e.addr >>> 0;
+          row.size = e.size || row.size || 2;
+          row.signed = !!e.signed;
+          row.bit = Array.isArray(e.bit) ? [Number(e.bit[0]), Number(e.bit[1])] : null;
+          row.type = e.type || row.type;
+          row.name = e.name || row.name;
+        }
+        row.writeOnly = !row.table && !row.plot && !row.support;
+      } else if (!row) {
+        if (mod.addr) {
           row = newRow({
             id: mod.rowId, name: mod.name || mod.rowId, addr: mod.addr,
             size: mod.size || 2, signed: !!mod.signed, bit: null,
@@ -3901,10 +3927,12 @@
     let missing = 0;
     // 按 id 重新解析地址；新 AXF 里不存在的旧行删掉，避免拿旧地址继续采样
     for (const [id, row] of Array.from(S.rows.entries())) {
-      const e = S.index.get(id);
+      if (row.watchOnly) continue; // 监视卡由 ensureWatchRows 按自身绑定重解析
+      const e = catalogEntryFor(id, row.name);
       if (e) {
-        row.addr = e.addr; row.size = e.size; row.signed = e.signed;
-        row.bit = e.bit; row.type = e.type; row.name = e.name || row.name;
+        row.addr = e.addr >>> 0; row.size = e.size || row.size; row.signed = !!e.signed;
+        row.bit = Array.isArray(e.bit) ? [Number(e.bit[0]), Number(e.bit[1])] : null;
+        row.type = e.type || row.type; row.name = e.name || row.name;
       } else {
         S.rows.delete(id);
         missing++;
