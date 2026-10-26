@@ -151,6 +151,13 @@ class Source:
     def read(self, signals: Sequence[Signal]) -> List[int]:
         raise NotImplementedError
 
+    def read_word(self, addr: int) -> int:
+        """读 addr 所在对齐 32bit 字 (写入回读/位域 RMW 用)."""
+        return 0
+
+    def write(self, addr: int, size: int, value: int) -> None:
+        raise RuntimeError("当前信号源不支持写入")
+
     def close(self) -> None:
         pass
 
@@ -205,6 +212,12 @@ class OpenOcdSource(Source):
             out.append(s.decode(raw))
         return out
 
+    def read_word(self, addr: int) -> int:
+        return self.client.read_words(int(addr) & ~0x3, 1)[0]
+
+    def write(self, addr: int, size: int, value: int) -> None:
+        self.client.write_mem(int(addr), int(size), int(value))
+
     def close(self) -> None:
         self.proc.stop()
 
@@ -240,6 +253,12 @@ class AttachedSource(Source):
     def read(self, signals: Sequence[Signal]) -> List[int]:
         return OpenOcdSource.read(self._inner, signals)
 
+    def read_word(self, addr: int) -> int:
+        return self.client.read_words(int(addr) & ~0x3, 1)[0]
+
+    def write(self, addr: int, size: int, value: int) -> None:
+        self.client.write_mem(int(addr), int(size), int(value))
+
     def close(self) -> None:
         self.client.close()
 
@@ -255,6 +274,17 @@ class SimSource(Source):
         self.start = time.monotonic()
         self.rand = random.Random(2159)
         self.over_ticks = 0
+        self.mem: Dict[int, int] = {}
+
+    def read_word(self, addr: int) -> int:
+        base = int(addr) & ~0x3
+        return sum(self.mem.get(base + i, 0) << (8 * i) for i in range(4))
+
+    def write(self, addr: int, size: int, value: int) -> None:
+        mask = (1 << (int(size) * 8)) - 1
+        value = int(value) & mask
+        for i in range(int(size)):
+            self.mem[int(addr) + i] = (value >> (8 * i)) & 0xFF
 
     def read(self, signals: Sequence[Signal]) -> List[int]:
         t = time.monotonic() - self.start
@@ -323,6 +353,17 @@ class SimSource(Source):
                 # 未建模的信号给一个缓慢的正弦, 便于区分
                 h = sum(ord(c) for c in name) or 1
                 v = 128 + 60 * math.sin(t * 0.7 + (h % 97) * 0.13)
+            # 被 /api/write 写过的地址, 用写入值覆盖仿真值
+            if any((s.addr + i) in self.mem for i in range(int(s.size or 1))):
+                raw = sum(self.mem.get(s.addr + i, 0) << (8 * i) for i in range(int(s.size or 1)))
+                if s.width:
+                    v = (raw >> s.shift) & ((1 << s.width) - 1)
+                else:
+                    v = raw
+                    if s.signed:
+                        sign = 1 << (s.size * 8 - 1)
+                        if v & sign:
+                            v -= sign << 1
             values.append(self._fit(s, int(round(v))))
         return values
 
@@ -1000,6 +1041,54 @@ class App:
         self.add_log("采样配置: %d 路, %.0f Hz" % (len(signals), rate))
         return {"ok": True, "signals": [s.to_dict() for s in signals], "rate": rate}
 
+    def write_value(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        src = self.source
+        if src is None:
+            raise RuntimeError("未连接，不能写入")
+        try:
+            addr = int(payload.get("addr"))
+            size = int(payload.get("size") or 2)
+            value = int(payload.get("value"))
+        except (TypeError, ValueError):
+            raise RuntimeError("addr/size/value 无效")
+        if size not in (1, 2, 4):
+            raise RuntimeError("只支持 1/2/4 字节写入")
+        if addr % size != 0:
+            raise RuntimeError("地址未按写入宽度对齐")
+        bit = payload.get("bit")
+        is_bitfield = isinstance(bit, (list, tuple)) and len(bit) >= 2
+        if is_bitfield:
+            shift, width = int(bit[0]), int(bit[1])
+            if width <= 0 or width > 32 or shift < 0 or shift + width > 32:
+                raise RuntimeError("位域范围无效")
+            span_addr, span_size = addr & ~0x3, 4
+        else:
+            span_addr, span_size = addr, size
+        span_end = span_addr + span_size
+        if not ((0x20000000 <= span_addr and span_end <= 0x20002000) or
+                (0x40000000 <= span_addr and span_end <= 0x50000000)):
+            raise RuntimeError("只允许写 RAM / 外设寄存器（0x2000_0000 或 0x4000_0000）")
+        if is_bitfield:
+            value &= (1 << width) - 1
+            word_addr = span_addr
+            base = src.read_word(word_addr)
+            mask = ((1 << width) - 1) << shift
+            base = (base & ~mask) | ((value & ((1 << width) - 1)) << shift)
+            src.write(word_addr, 4, base)
+            readback = src.read_word(word_addr)
+            actual = (readback >> shift) & ((1 << width) - 1)
+        else:
+            mask = (1 << (size * 8)) - 1
+            value &= mask
+            src.write(addr, size, value)
+            readback = src.read_word(addr)
+            actual = (readback >> ((addr & 0x3) * 8)) & mask
+        verified = int(actual) == int(value)
+        self.add_log("写入 0x%08x = 0x%x (回读 0x%x%s)"
+                     % (addr, value, actual, "" if verified else ", 不一致"))
+        return {"ok": True, "addr": addr, "size": size, "value": value,
+                "readback": actual, "verified": verified}
+
     def record(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         active = bool(payload.get("active"))
         if active:
@@ -1191,6 +1280,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "status": self.app.status_payload()})
             if path == "/api/config":
                 return self._json(self.app.apply_config(payload))
+            if path == "/api/write":
+                return self._json(self.app.write_value(payload))
             if path == "/api/record":
                 return self._json(self.app.record(payload))
             if path == "/api/catalog/reload":

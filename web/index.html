@@ -27,6 +27,11 @@
       <span id="connRate" class="sep">-- Hz</span>
     </div>
 
+    <div class="project-pick" title="工程存档（自动保存到浏览器）">
+      <span>工程</span>
+      <select id="projectSel"></select>
+    </div>
+
     <div class="top-actions" id="topActions">
       <button id="btnConnect" class="btn primary" title="连接 / 切换信号源" aria-label="连接 / 切换信号源">
         <svg viewBox="0 0 24 24"><path d="M9 7V3m6 4V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v4"/></svg>
@@ -152,6 +157,33 @@
         </div>
       </section>
 
+      <section id="writeCard" class="write-card">
+        <div class="write-head">
+          <span class="side-title">写入</span>
+          <select id="writeTarget" title="写入目标（RAM / 外设寄存器）"></select>
+          <span class="write-range">范围
+            <input id="writeMin" type="number" title="最小值">
+            <span>…</span>
+            <input id="writeMax" type="number" title="最大值">
+            <span>步</span>
+            <input id="writeStep" type="number" title="步长">
+          </span>
+          <label class="check"><input id="writeArmed" type="checkbox"> 允许写入</label>
+          <span id="writeState" class="muted">未解锁</span>
+        </div>
+        <div class="write-row">
+          <div class="seg small" id="writeModeSeg">
+            <button data-mode="slider" class="active">滑条</button>
+            <button data-mode="switch">开关</button>
+          </div>
+          <input id="writeSlider" type="range" min="0" max="4095" step="1">
+          <input id="writeNumber" type="number">
+          <label class="check switch-only hidden"><input id="writeSwitch" type="checkbox"> 1</label>
+          <label class="check"><input id="writeLive" type="checkbox"> 实时</label>
+          <button id="btnWriteNow" class="btn primary">写入</button>
+        </div>
+      </section>
+
       <section id="tableCard" class="value-card">
         <div class="value-head" id="tableHead">
           <button id="btnTableToggle" class="collapse-btn" title="折叠 / 展开数值表" aria-expanded="true">▾</button>
@@ -210,6 +242,24 @@
     <button id="btnDrawerClose" class="btn icon" title="关闭">×</button>
   </div>
   <div class="drawer-body">
+    <section class="drawer-sec">
+      <h3>工程</h3>
+      <div class="row2">
+        <select id="projectSel2"></select>
+        <button id="btnProjectNew" class="btn">新建（复制当前）</button>
+      </div>
+      <div class="row2" style="margin-top:6px">
+        <button id="btnProjectSaveAs" class="btn">另存为</button>
+        <button id="btnProjectDelete" class="btn">删除当前</button>
+      </div>
+      <div class="row2" style="margin-top:6px">
+        <button id="btnProjectExport" class="btn">导出 JSON</button>
+        <button id="btnProjectImport" class="btn">导入 JSON</button>
+      </div>
+      <input id="projectFile" type="file" accept=".json,application/json" hidden>
+      <p class="hint" id="projectState">自动保存到浏览器 localStorage</p>
+    </section>
+
     <section class="drawer-sec">
       <h3>信号源</h3>
       <div class="seg" id="srcSeg">

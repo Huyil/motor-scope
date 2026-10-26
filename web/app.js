@@ -82,6 +82,10 @@
     gridOn: true,
     zeroLine: true,
     glow: false,
+    write: {
+      targetId: '', mode: 'slider', min: 0, max: 4095, step: 1,
+      live: false, armed: false, timer: 0, busy: false, pending: null,
+    },
     focusId: null,
     focusPinned: false,
     paused: false,
@@ -136,6 +140,8 @@
     errors: new Set(),
     sampleCountSeen: 0,
   };
+
+  const PROJECTS_KEY = 'ms.projects.v2';
 
   // ---------------------------------------------------------------- dom
   const D = {};
@@ -196,6 +202,23 @@
     D.axfFile = $('#axfFile');
     D.hdrFile = $('#hdrFile');
     D.btnImportAxf = $('#btnImportAxf');
+    D.writeCard = $('#writeCard');
+    D.writeTarget = $('#writeTarget');
+    D.writeMin = $('#writeMin');
+    D.writeMax = $('#writeMax');
+    D.writeStep = $('#writeStep');
+    D.writeArmed = $('#writeArmed');
+    D.writeState = $('#writeState');
+    D.writeModeSeg = $('#writeModeSeg');
+    D.writeSlider = $('#writeSlider');
+    D.writeNumber = $('#writeNumber');
+    D.writeSwitch = $('#writeSwitch');
+    D.writeLive = $('#writeLive');
+    D.btnWriteNow = $('#btnWriteNow');
+    D.projectSel = $('#projectSel');
+    D.projectSel2 = $('#projectSel2');
+    D.projectState = $('#projectState');
+    D.projectFile = $('#projectFile');
     D.toasts = $('#toasts');
     D.logPanel = $('#logPanel');
     D.logText = $('#logText');
@@ -258,7 +281,9 @@
     return S.virtuals.find((v) => v.id === id) || null;
   }
   function signalIndex(id) { return S.signals.findIndex((s) => s.id === id); }
-  function isHidden(row) { return !!row.support && !row.table && !row.plot; }
+  // 只要行不在表/波形里，就不算可见。S.signals 里的隐藏行只有两种来源：
+  // 数组 AVG 的支撑通道，或作为写入目标的 write-only 行。
+  function isHidden(row) { return !row.table && !row.plot; }
   function plotRows() {
     const out = [];
     for (const r of S.rows.values()) if (r.plot) out.push(r);
@@ -301,6 +326,7 @@
       table,
       plot,
       support: !!d.support,
+      writeOnly: !!d.writeOnly,
       visible,
       axis: d.axis === 'right' ? 'right' : d.axis === 'left' ? 'left' : inferAxis(d.name),
       type: String(d.type || ''),
@@ -518,6 +544,8 @@
     const need = new Set();
     for (const r of S.rows.values()) if (r.table || r.plot) need.add(r.id);
     for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
+    // 写入目标即使不在表/波形里，也要采样，才能显示当前值和回读
+    if (S.write && S.write.targetId && S.rows.has(S.write.targetId)) need.add(S.write.targetId);
     const next = [];
     for (const r of S.rows.values()) if (need.has(r.id)) next.push(r);
     S.signals = next;
@@ -545,6 +573,206 @@
     }
   }
 
+  // ---------------------------------------------------------------- 写入
+  function writeRows() {
+    return Array.from(S.rows.values()).filter((r) => r.addr > 0 && r.kind !== 'virtual');
+  }
+
+  function currentWriteRow() {
+    return S.rows.get(S.write.targetId) || null;
+  }
+
+  function ensureWriteTarget() {
+    let row = currentWriteRow();
+    if (row && row.addr) return row;
+    for (const id of ['motor.over.threshold', 'motor.over.thresholdLast', 'motor.over.stopThreshold']) {
+      const e = S.index.get(id);
+      if (!e) continue;
+      row = S.rows.get(id);
+      if (!row) {
+        row = newRow(e, { table: false, plot: false, support: false });
+        S.rows.set(id, row);
+      }
+      // 从服务端配置恢复出来的隐藏行不会带 writeOnly，这里按“当前写入目标”补回标记
+      if (!row.table && !row.plot && !row.support) row.writeOnly = true;
+      S.write.targetId = id;
+      return row;
+    }
+    const any = writeRows()[0] || null;
+    S.write.targetId = any ? any.id : '';
+    return any;
+  }
+
+  function releaseWriteOnly() {
+    for (const [id, row] of Array.from(S.rows.entries())) {
+      if (row.writeOnly && id !== S.write.targetId && !row.table && !row.plot && !row.support) {
+        S.rows.delete(id);
+      }
+    }
+  }
+
+  function latestRawOf(row) {
+    const last = latestSample();
+    if (!last || !row || row.ci === undefined || row.ci < 0) return null;
+    const v = last[1][row.ci];
+    return v === undefined ? null : v;
+  }
+
+  function resetWriteRange(row) {
+    if (!row) return;
+    const bits = row.width || (row.size * 8);
+    let max = bits >= 32 ? 1000000 : ((1 << bits) - 1);
+    if (/threshold/i.test(row.name)) max = Math.min(max, 4095);
+    S.write.min = 0;
+    S.write.max = max;
+    S.write.step = 1;
+    S.write._rangeFor = row.id;
+  }
+
+  function renderWriteTargets() {
+    if (!D.writeTarget) return;
+    const row = ensureWriteTarget();
+    // 先回收旧的 write-only 行，再生成下拉，避免删除后 option 还留在列表里
+    releaseWriteOnly();
+    const list = writeRows().slice().sort((a, b) => {
+      const pa = /threshold/i.test(a.name) ? 0 : 1;
+      const pb = /threshold/i.test(b.name) ? 0 : 1;
+      return pa - pb || a.name.localeCompare(b.name);
+    });
+    D.writeTarget.innerHTML = '';
+    for (const r of list) {
+      const o = document.createElement('option');
+      o.value = r.id;
+      o.textContent = r.name + ' @' + hex(r.addr, 6);
+      D.writeTarget.appendChild(o);
+    }
+    if (row) D.writeTarget.value = row.id;
+    if (row && S.write._rangeFor !== row.id) resetWriteRange(row);
+    syncWriteTargetUI();
+  }
+
+  function syncWriteTargetUI() {
+    const row = currentWriteRow();
+    if (!row || !D.writeCard) return;
+    if (D.writeMin) D.writeMin.value = String(S.write.min);
+    if (D.writeMax) D.writeMax.value = String(S.write.max);
+    if (D.writeStep) D.writeStep.value = String(S.write.step);
+    const isSwitch = S.write.mode === 'switch';
+    if (D.writeModeSeg) {
+      D.writeModeSeg.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.mode === S.write.mode));
+    }
+    if (D.writeSlider) {
+      D.writeSlider.classList.toggle('hidden', isSwitch);
+      D.writeSlider.min = String(S.write.min);
+      D.writeSlider.max = String(S.write.max);
+      D.writeSlider.step = String(S.write.step);
+    }
+    if (D.writeNumber) D.writeNumber.classList.toggle('hidden', isSwitch);
+    if (D.writeSwitch) {
+      D.writeSwitch.closest('label')?.classList.toggle('hidden', !isSwitch);
+    }
+    const raw = latestRawOf(row);
+    const active = document.activeElement;
+    if (raw !== null && active !== D.writeSlider && active !== D.writeNumber && !S.write.busy) {
+      if (D.writeSlider) D.writeSlider.value = String(raw);
+      if (D.writeNumber) D.writeNumber.value = String(raw);
+      if (D.writeSwitch) D.writeSwitch.checked = !!raw;
+    }
+    D.writeCard.classList.toggle('locked', !S.write.armed);
+    if (D.btnWriteNow) {
+      D.btnWriteNow.disabled = !S.write.armed;
+      D.btnWriteNow.title = S.write.armed ? '写入当前值并回读' : '先勾选“允许写入”';
+    }
+    if (D.writeArmed) D.writeArmed.checked = !!S.write.armed;
+    if (D.writeLive) D.writeLive.checked = !!S.write.live;
+    if (D.writeState) {
+      if (S.write.status) {
+        D.writeState.textContent = S.write.status;
+        D.writeState.className = S.write.statusKind || 'muted';
+      } else {
+        D.writeState.textContent = S.write.armed
+          ? (raw === null ? '等待样本' : '当前 ' + raw)
+          : '未解锁';
+        D.writeState.className = 'muted';
+      }
+    }
+  }
+
+  function refreshWriteUI() {
+    if (S.write.busy) return;
+    const row = currentWriteRow();
+    if (!row) return;
+    const raw = latestRawOf(row);
+    if (raw === null) return;
+    if (document.activeElement === D.writeSlider || document.activeElement === D.writeNumber) return;
+    if (D.writeSlider) D.writeSlider.value = String(raw);
+    if (D.writeNumber) D.writeNumber.value = String(raw);
+    if (D.writeSwitch) D.writeSwitch.checked = !!raw;
+    if (!S.write.status) syncWriteTargetUI();
+  }
+
+  async function sendWrite(value) {
+    const row = currentWriteRow();
+    if (!row || !row.addr) {
+      S.write.status = '没有可写的目标';
+      S.write.statusKind = 'err';
+      syncWriteTargetUI();
+      toast(S.write.status, 'err');
+      return;
+    }
+    if (!S.write.armed) {
+      S.write.status = '未解锁：先勾选“允许写入”';
+      S.write.statusKind = 'err';
+      syncWriteTargetUI();
+      toast(S.write.status, 'err');
+      return;
+    }
+    let v = Number(value);
+    if (!isFinite(v)) {
+      S.write.status = '写入值无效';
+      S.write.statusKind = 'err';
+      syncWriteTargetUI();
+      toast(S.write.status, 'err');
+      return;
+    }
+    const bits = row.width || (row.size * 8);
+    const max = Math.pow(2, bits) - 1;
+    v = Math.max(0, Math.min(max, Math.trunc(v)));
+    if (S.write.busy) { S.write.pending = v; return; }
+    S.write.busy = true;
+    S.write.status = '写入中…';
+    S.write.statusKind = 'muted';
+    syncWriteTargetUI();
+    try {
+      const res = await post('/api/write', {
+        addr: row.addr, size: row.size, value: v, bit: row.bit || null, verify: true,
+      });
+      S.write.status = '已写 ' + fmtInt(v) + ' · 回读 ' + fmtInt(res.readback) + (res.verified ? '' : '（不一致）');
+      S.write.statusKind = res.verified ? 'ok' : 'err';
+      if (D.writeSlider) D.writeSlider.value = String(v);
+      if (D.writeNumber) D.writeNumber.value = String(v);
+      if (D.writeSwitch) D.writeSwitch.checked = !!v;
+      if (!res.verified) toast('写入已发出，但回读不一致（固件可能正在改它）', 'err');
+    } catch (e) {
+      S.write.status = '写入失败: ' + e.message;
+      S.write.statusKind = 'err';
+      toast(S.write.status, 'err');
+    } finally {
+      S.write.busy = false;
+      syncWriteTargetUI();
+      saveLocal();
+      const pending = S.write.pending;
+      S.write.pending = null;
+      if (pending !== null && pending !== v) sendWrite(pending);
+    }
+  }
+
+  function scheduleWrite(value) {
+    if (!S.write.live || !S.write.armed) return;
+    if (S.write.timer) clearTimeout(S.write.timer);
+    S.write.timer = setTimeout(() => { S.write.timer = 0; sendWrite(value); }, 120);
+  }
+
   function scheduleHistoryReload() {
     if (S.historyTimer) clearTimeout(S.historyTimer);
     S.historyTimer = setTimeout(() => {
@@ -554,6 +782,7 @@
   }
 
   function afterSignalsChanged() {
+    ensureWriteTarget();
     syncChannels();
     renderCatalog();
     renderSelected();
@@ -561,6 +790,7 @@
     renderValueTable();
     renderStallSelects();
     renderCalib();
+    renderWriteTargets();
     updateEmptyHint();
     saveLocal();
     sendConfig();
@@ -580,7 +810,10 @@
     renderValueTable();
     renderStallSelects();
     renderCalib();
+    renderWriteTargets();
     syncTablePanel();
+    saveLocal();
+    updateProjectUI();
     resizeChart();
     updateOverlay();
     connectSSE();
@@ -604,6 +837,14 @@
 
   function restoreConfig() {
     let restored = false;
+    // 安全: 解锁状态绝不跨工程/刷新保留，任何在途写入也一并取消
+    disarmWrite('');
+    try {
+      const proj = readProjects();
+      if (proj.active && proj.items[proj.active]) {
+        localStorage.setItem('ms.cfg.v2', JSON.stringify(proj.items[proj.active]));
+      }
+    } catch {}
     try {
       const raw = localStorage.getItem('ms.cfg.v2') || localStorage.getItem('ms.cfg.v1');
       if (raw) {
@@ -629,6 +870,7 @@
               table: item.table !== undefined ? item.table : item.visible !== false,
               plot: item.plot !== undefined ? item.plot : item.visible !== false,
               support: !!item.support,
+              writeOnly: !!item.writeOnly,
             });
             S.rows.set(row.id, row);
           }
@@ -659,6 +901,17 @@
           S.stall.currentId = c.stall.currentId || '';
           S.stall.thresholdId = c.stall.thresholdId || '';
         }
+        if (c.write) {
+          S.write.targetId = c.write.targetId || '';
+          S.write.mode = c.write.mode === 'switch' ? 'switch' : 'slider';
+          S.write.min = Number(c.write.min) || 0;
+          S.write.max = Number(c.write.max) || 4095;
+          S.write.step = Math.max(1, Number(c.write.step) || 1);
+          S.write.live = !!c.write.live;
+          // 安全: 写入解锁状态不跨工程/刷新保留
+          S.write.armed = false;
+          S.write._rangeFor = S.write.targetId;
+        }
       }
     } catch (e) { console.warn(e); }
 
@@ -674,6 +927,8 @@
         }));
       }
     }
+    ensureWriteTarget();
+    releaseWriteOnly();
     syncChannels();
     const st = S.catalog.stall || {};
     const sampled = S.signals.filter((s) => !isHidden(s));
@@ -714,7 +969,7 @@
           id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
           scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
           step: s.step, axis: s.axis, type: s.type,
-          table: !!s.table, plot: !!s.plot, support: !!s.support,
+          table: !!s.table, plot: !!s.plot, support: !!s.support, writeOnly: !!s.writeOnly,
         })),
         virtuals: S.virtuals.map((v) => ({
           id: v.id, arrayId: v.arrayId, name: v.name, sourceIds: v.sourceIds.slice(),
@@ -735,8 +990,185 @@
           currentId: S.stall.currentId,
           thresholdId: S.stall.thresholdId,
         },
+        write: {
+          targetId: S.write.targetId, mode: S.write.mode,
+          min: S.write.min, max: S.write.max, step: S.write.step,
+          live: !!S.write.live, armed: false, // 解锁状态不落盘
+        },
       }));
+      // 多工程自动保存
+      try {
+        const p = readProjects();
+        if (!p.active) p.active = '默认';
+        p.items[p.active] = Object.assign(JSON.parse(localStorage.getItem('ms.cfg.v2') || '{}'), {
+          name: p.active, savedAt: new Date().toISOString(),
+        });
+        localStorage.setItem(PROJECTS_KEY, JSON.stringify(p));
+        S.projectSavedAt = Date.now();
+        updateProjectUI();
+      } catch {}
     } catch {}
+  }
+
+  // ---------------------------------------------------------------- 工程存档
+  function readProjects() {
+    try {
+      const raw = localStorage.getItem(PROJECTS_KEY);
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && typeof p === 'object' && p.items && typeof p.items === 'object') {
+          return { active: p.active || '默认', items: p.items };
+        }
+      }
+    } catch {}
+    return { active: '默认', items: {} };
+  }
+
+  function writeProjects(p) {
+    try { localStorage.setItem(PROJECTS_KEY, JSON.stringify(p)); } catch {}
+  }
+
+  function currentSnapshot() {
+    try { return JSON.parse(localStorage.getItem('ms.cfg.v2') || '{}'); } catch { return {}; }
+  }
+
+  function updateProjectUI() {
+    const p = readProjects();
+    const names = Object.keys(p.items).sort((a, b) => a.localeCompare(b));
+    if (!names.length) names.push('默认');
+    const active = names.indexOf(p.active) >= 0 ? p.active : names[0];
+    for (const el of [D.projectSel, D.projectSel2]) {
+      if (!el) continue;
+      el.innerHTML = '';
+      for (const n of names) {
+        const o = document.createElement('option');
+        o.value = n;
+        o.textContent = n;
+        el.appendChild(o);
+      }
+      el.value = active;
+    }
+    if (D.projectState) {
+      const t = S.projectSavedAt
+        ? '已自动保存 ' + new Date(S.projectSavedAt).toLocaleTimeString('zh-CN', { hour12: false })
+        : '自动保存到浏览器 localStorage';
+      D.projectState.textContent = t + ' · 当前：' + active;
+    }
+  }
+
+  function renderAfterProjectLoad() {
+    renderCatalog();
+    renderSelected();
+    renderLegend();
+    renderValueTable();
+    renderStallSelects();
+    renderCalib();
+    renderWriteTargets();
+    syncTablePanel();
+    updateProjectUI();
+    S.dirty = true;
+    scheduleHistoryReload();
+  }
+
+  function switchProject(name) {
+    if (!name) return;
+    saveLocal(); // 先把当前状态写回旧工程
+    const p = readProjects();
+    if (!p.items[name]) p.items[name] = currentSnapshot();
+    p.active = name;
+    writeProjects(p);
+    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name] || {}));
+    S.samples = [];
+    S.lastT = 0;
+    resetStall();
+    S.paused = false;
+    updatePauseUI();
+    restoreConfig();
+    renderAfterProjectLoad();
+    toast('已切换工程：' + name, 'ok');
+  }
+
+  function newProject() {
+    const p = readProjects();
+    const def = '工程 ' + (Object.keys(p.items).length + 1);
+    const name = (prompt('新工程名（会复制当前配置）', def) || '').trim();
+    if (!name) return;
+    if (p.items[name] && !confirm('工程“' + name + '”已存在，覆盖？')) return;
+    saveLocal();
+    p.items[name] = Object.assign(currentSnapshot(), { name, savedAt: new Date().toISOString() });
+    p.active = name;
+    writeProjects(p);
+    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
+    updateProjectUI();
+    toast('已创建工程：' + name, 'ok');
+  }
+
+  function saveProjectAs() {
+    const p = readProjects();
+    const name = (prompt('另存为工程名', p.active + ' 副本') || '').trim();
+    if (!name) return;
+    if (p.items[name] && !confirm('工程“' + name + '”已存在，覆盖？')) return;
+    saveLocal();
+    p.items[name] = Object.assign(currentSnapshot(), { name, savedAt: new Date().toISOString() });
+    p.active = name;
+    writeProjects(p);
+    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
+    updateProjectUI();
+    toast('已另存为：' + name, 'ok');
+  }
+
+  function deleteProject() {
+    const p = readProjects();
+    const names = Object.keys(p.items);
+    if (names.length <= 1) { toast('至少保留一个工程', 'err'); return; }
+    if (!confirm('删除当前工程“' + p.active + '”？')) return;
+    delete p.items[p.active];
+    const next = Object.keys(p.items)[0];
+    p.active = next;
+    writeProjects(p);
+    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[next] || {}));
+    S.samples = [];
+    S.lastT = 0;
+    resetStall();
+    restoreConfig();
+    renderAfterProjectLoad();
+    toast('已删除，切换到：' + next, 'ok');
+  }
+
+  function exportProject() {
+    const p = readProjects();
+    const data = Object.assign(currentSnapshot(), { name: p.active, savedAt: new Date().toISOString() });
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'motorscope-' + p.active.replace(/[^\w\u4e00-\u9fa5.-]+/g, '_') + '.json';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+  }
+
+  async function importProjectFile(file) {
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!data || (!Array.isArray(data.rows) && !Array.isArray(data.signals))) {
+        throw new Error('不是 MotorScope 工程 JSON');
+      }
+      const p = readProjects();
+      let name = (data.name || file.name.replace(/\.json$/i, '') || '导入工程').trim();
+      if (p.items[name] && !confirm('工程“' + name + '”已存在，覆盖？')) return;
+      p.items[name] = data;
+      p.active = name;
+      writeProjects(p);
+      localStorage.setItem('ms.cfg.v2', JSON.stringify(data));
+      S.samples = [];
+      S.lastT = 0;
+      resetStall();
+      restoreConfig();
+      renderAfterProjectLoad();
+      toast('已导入工程：' + name, 'ok');
+    } catch (e) {
+      toast('导入工程失败: ' + e.message, 'err');
+    }
   }
 
   function adoptSignals(list, rate) {
@@ -979,6 +1411,7 @@
       if (vt) vt.cur.textContent = txt;
     }
     updateStallUI(last[0]);
+    refreshWriteUI();
     const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     if (now - S.lastStatsAt > 240) {
       S.lastStatsAt = now;
@@ -1095,6 +1528,17 @@
     S.stall.events = [];
   }
 
+  // 主动/被动断开、重连、切工程都调用：清掉在途写入并强制回到未解锁
+  function disarmWrite(reason) {
+    if (S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
+    S.write.armed = false;
+    S.write.busy = false;
+    S.write.pending = null;
+    S.write.status = reason || '';
+    S.write.statusKind = reason ? 'err' : '';
+    syncWriteTargetUI();
+  }
+
   function applyStatus(st) {
     if (!st) return;
     S.status = st;
@@ -1118,6 +1562,10 @@
     S.lastStatusAt = Date.now();
     const kind = S.source.kind || 'none';
     const connected = sourceConnected(S.source) && !S.sampler.error;
+    if (!connected && S.write.armed) {
+      disarmWrite('连接断开，写入已锁定');
+      saveLocal();
+    }
     const label = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '未连接';
     D.connText.textContent = label;
     D.connRate.textContent = (S.sampler.rate_actual || S.sampler.rate || 0).toFixed(0) + ' Hz';
@@ -1200,6 +1648,8 @@
     try {
       const res = await post('/api/connect', payload, { timeout: 30000 });
       if (!res.ok) throw new Error(res.error || '连接失败');
+      // 换源/重连后写入必须重新解锁
+      disarmWrite('');
       toast('已连接: ' + (mode === 'sim' ? '仿真' : mode === 'attach' ? 'TCL' : 'OpenOCD'), 'ok');
       await sendConfig(true);
       await refreshStatus();
@@ -2553,6 +3003,7 @@
     $('#btnDisconnect').addEventListener('click', async () => {
       try {
         await post('/api/disconnect', {});
+        disarmWrite('已断开，写入已锁定');
         S.ui.overlayDismissed = false;
         toast('已断开', 'ok');
         await refreshStatus();
@@ -2566,6 +3017,85 @@
       S.stall.thresholdId = D.thrSel.value; resetStall(); saveLocal(); S.dirty = true;
     });
     $('#stallEnable').addEventListener('change', (e) => { S.stall.enabled = e.target.checked; resetStall(); saveLocal(); S.dirty = true; });
+
+    // 写入
+    D.writeTarget?.addEventListener('change', () => {
+      S.write.targetId = D.writeTarget.value;
+      S.write.status = '';
+      const row = currentWriteRow();
+      if (row) resetWriteRange(row);
+      // 切走的目标若是仅用于写入的隐藏行，立即回收；下拉同步重建
+      releaseWriteOnly();
+      renderWriteTargets();
+      syncChannels();
+      sendConfig();
+      saveLocal();
+    });
+    const rangeCommit = () => {
+      S.write.min = Number(D.writeMin?.value) || 0;
+      S.write.max = Number(D.writeMax?.value) || 0;
+      S.write.step = Math.max(1, Number(D.writeStep?.value) || 1);
+      if (S.write.max <= S.write.min) S.write.max = S.write.min + 1;
+      syncWriteTargetUI();
+      saveLocal();
+    };
+    D.writeMin?.addEventListener('change', rangeCommit);
+    D.writeMax?.addEventListener('change', rangeCommit);
+    D.writeStep?.addEventListener('change', rangeCommit);
+    D.writeSlider?.addEventListener('input', () => {
+      const v = Number(D.writeSlider.value);
+      if (D.writeNumber) D.writeNumber.value = String(v);
+      scheduleWrite(v);
+    });
+    D.writeSlider?.addEventListener('change', () => {
+      if (S.write.armed) sendWrite(Number(D.writeSlider.value));
+    });
+    D.writeNumber?.addEventListener('change', () => {
+      const v = Number(D.writeNumber.value);
+      if (D.writeSlider) D.writeSlider.value = String(v);
+      if (S.write.live) scheduleWrite(v);
+    });
+    D.writeSwitch?.addEventListener('change', () => {
+      const v = D.writeSwitch.checked ? 1 : 0;
+      if (D.writeNumber) D.writeNumber.value = String(v);
+      if (D.writeSlider) D.writeSlider.value = String(v);
+      if (S.write.armed) sendWrite(v);
+    });
+    D.writeArmed?.addEventListener('change', () => {
+      S.write.armed = !!D.writeArmed.checked;
+      if (!S.write.armed && S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
+      syncWriteTargetUI();
+      saveLocal();
+    });
+    D.writeLive?.addEventListener('change', () => {
+      S.write.live = !!D.writeLive.checked;
+      if (!S.write.live && S.write.timer) { clearTimeout(S.write.timer); S.write.timer = 0; }
+      saveLocal();
+    });
+    D.writeModeSeg?.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+      S.write.mode = b.dataset.mode === 'switch' ? 'switch' : 'slider';
+      S.write.status = '';
+      syncWriteTargetUI();
+      saveLocal();
+    }));
+    D.btnWriteNow?.addEventListener('click', () => {
+      const v = Number(D.writeNumber?.value ?? D.writeSlider?.value ?? 0);
+      sendWrite(v);
+    });
+
+    // 工程
+    D.projectSel?.addEventListener('change', () => switchProject(D.projectSel.value));
+    D.projectSel2?.addEventListener('change', () => switchProject(D.projectSel2.value));
+    $('#btnProjectNew')?.addEventListener('click', newProject);
+    $('#btnProjectSaveAs')?.addEventListener('click', saveProjectAs);
+    $('#btnProjectDelete')?.addEventListener('click', deleteProject);
+    $('#btnProjectExport')?.addEventListener('click', exportProject);
+    $('#btnProjectImport')?.addEventListener('click', () => D.projectFile?.click());
+    D.projectFile?.addEventListener('change', () => {
+      const f = D.projectFile.files && D.projectFile.files[0];
+      if (f) importProjectFile(f);
+      D.projectFile.value = '';
+    });
     $('#autoPause').addEventListener('change', (e) => { S.stall.autoPause = e.target.checked; saveLocal(); });
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
     $('#btnImportAxf').addEventListener('click', importAxf);
@@ -2803,9 +3333,10 @@
       }
     }
     S.virtuals = S.virtuals.filter((v) => (v.sourceIds || []).some((id) => S.index.has(id)));
+    ensureWriteTarget();
     syncChannels();
     renderCatalog(); renderSelected(); renderLegend(); renderValueTable();
-    renderStallSelects(); renderCalib();
+    renderStallSelects(); renderCalib(); renderWriteTargets();
     sendConfig(true);
     if (D.catalogMeta && catalog.meta) {
       D.catalogMeta.textContent = 'AXF ' + (catalog.meta.generated_at || '?') + ' · ' +

@@ -119,6 +119,14 @@ class TclClient:
         total = sum(int(n) for _, n in regions)
         return _parse_int_list(resp, expect=total)
 
+    def write_mem(self, addr: int, size: int, value: int) -> None:
+        """写 1/2/4 字节. 调用方保证地址/值合法; 这是唯一会改目标内存的入口."""
+        cmd = {1: "mwb", 2: "mwh", 4: "mww"}.get(int(size))
+        if cmd is None:
+            raise OcdError("不支持写入宽度: %s" % size)
+        mask = (1 << (int(size) * 8)) - 1
+        self.command("%s 0x%08x 0x%x" % (cmd, int(addr), int(value) & mask))
+
 
 def _parse_int_list(text: str, expect: Optional[int] = None) -> List[int]:
     raw = text.strip()
