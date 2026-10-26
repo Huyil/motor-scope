@@ -88,6 +88,11 @@
       { key: 'w2', title: '堵转阈值', mode: 'value', signal: 'motor.over.thresholdLast', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: 'motor.over.thresholdLast' },
       { key: 'w3', title: '余量', mode: 'margin', signal: '', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: '' },
     ],
+    // 波形分组：默认分组内每路独立轴；拖入自定义组则共享轴
+    wave: {
+      groups: [{ id: 'default', name: '默认分组', visible: true, auto: true }],
+      seq: 1,
+    },
     // 写入窗口：多个独立模块，每个有自己的类型/范围/实时/状态
     write: {
       armed: false, size: 'md', seq: 1,
@@ -289,6 +294,82 @@
     for (const v of S.virtuals) if (v.plot) out.push(v);
     return out;
   }
+
+  function ensureWaveGroups() {
+    if (!S.wave || !Array.isArray(S.wave.groups) || !S.wave.groups.length) {
+      S.wave = { groups: [{ id: 'default', name: '默认分组', visible: true, auto: true }], seq: 1 };
+    }
+    if (!S.wave.groups.some((g) => g.id === 'default')) {
+      S.wave.groups.unshift({ id: 'default', name: '默认分组', visible: true, auto: true });
+    }
+    const ids = new Set(S.wave.groups.map((g) => g.id));
+    for (const row of plotRows()) {
+      if (!row.groupId || !ids.has(row.groupId)) row.groupId = 'default';
+    }
+  }
+
+  function waveGroupFor(row) {
+    const gid = (row && row.groupId) || 'default';
+    return S.wave.groups.find((g) => g.id === gid) || S.wave.groups[0];
+  }
+
+  function visiblePlotRows() {
+    return plotRows().filter((row) => {
+      const g = waveGroupFor(row);
+      return !g || g.visible !== false;
+    });
+  }
+
+  function assignWaveGroup(rowId, groupId) {
+    const row = rowById(rowId);
+    const g = S.wave.groups.find((x) => x.id === groupId);
+    if (!row || !g) return;
+    row.groupId = groupId;
+    if (g.visible === false) g.visible = true;
+    renderCatalog();
+    renderSelected();
+    renderLegend();
+    updateEmptyHint();
+    S.dirty = true;
+    saveLocal();
+  }
+
+  function toggleWaveGroup(groupId) {
+    const g = S.wave.groups.find((x) => x.id === groupId);
+    if (!g) return;
+    g.visible = g.visible === false;
+    renderCatalog();
+    renderSelected();
+    renderLegend();
+    updateEmptyHint();
+    S.dirty = true;
+    saveLocal();
+  }
+
+  function addWaveGroup() {
+    const name = (prompt('新分组名称（拖入同一组的波形共享坐标轴）', '分组 ' + (S.wave.seq + 1)) || '').trim();
+    if (!name) return;
+    S.wave.seq += 1;
+    S.wave.groups.push({ id: 'wg' + S.wave.seq, name, visible: true, auto: false });
+    renderCatalog();
+    saveLocal();
+    toast('已新建波形分组：' + name, 'ok');
+  }
+
+  function deleteWaveGroup(groupId) {
+    const g = S.wave.groups.find((x) => x.id === groupId);
+    if (!g) return;
+    if (g.id === 'default') { toast('默认分组不能删除，可以隐藏', 'err'); return; }
+    if (!confirm('删除分组“' + g.name + '”？组内波形会回到默认分组。')) return;
+    for (const row of plotRows()) if (row.groupId === groupId) row.groupId = 'default';
+    S.wave.groups = S.wave.groups.filter((x) => x.id !== groupId);
+    renderCatalog();
+    renderSelected();
+    renderLegend();
+    updateEmptyHint();
+    S.dirty = true;
+    saveLocal();
+  }
   function tableRows() {
     const out = [];
     for (const r of S.rows.values()) if (r.table) out.push(r);
@@ -325,6 +406,7 @@
       table,
       plot,
       support: !!d.support,
+      groupId: String(d.groupId || ''),
       writeOnly: !!d.writeOnly,
       visible,
       axis: d.axis === 'right' ? 'right' : d.axis === 'left' ? 'left' : inferAxis(d.name),
@@ -391,6 +473,11 @@
       return null;
     }
     const row = newRow(entry, opts);
+    if (row.plot) {
+      row.groupId = row.groupId || 'default';
+      const g = waveGroupFor(row);
+      if (g) g.visible = true;
+    }
     S.rows.set(id, row);
     afterSignalsChanged();
     return row;
@@ -498,6 +585,8 @@
       const src = entry || S.index.get(id);
       if (!src) { toast('找不到信号: ' + id, 'err'); return; }
       row = newRow(src, { table: flag === 'table', plot: flag === 'plot', support: false });
+      row.groupId = 'default';
+      if (row.plot) { const g = waveGroupFor(row); if (g) g.visible = true; }
       S.rows.set(id, row);
       afterSignalsChanged();
       return;
@@ -505,6 +594,7 @@
     if (row.support && on) row.support = false;
     if (on) row.writeOnly = false;
     row[flag] = !!on;
+    if (on && row.plot) { const g = waveGroupFor(row); if (g) g.visible = true; }
     if (!row.table && !row.plot) {
       const used = S.virtuals.some((v) => v.sourceIds.indexOf(row.id) >= 0);
       row.support = used;
@@ -521,6 +611,7 @@
     }
     row.table = row.plot = !!on;
     if (on) row.writeOnly = false;
+    if (on && row.plot) { const g = waveGroupFor(row); if (g) g.visible = true; }
     afterSignalsChanged();
   }
 
@@ -536,6 +627,7 @@
       v.sourceIds = entries.map((e) => e.id);
     }
     v[flag] = !!on;
+    if (on && v.plot) { const g = waveGroupFor(v); if (g) g.visible = true; }
     if (!v.table && !v.plot) removeVirtual(v);
     afterSignalsChanged();
   }
@@ -1081,12 +1173,17 @@
         renderWriteMods();
         saveLocal();
       });
+      const wbtn = document.createElement('button');
+      wbtn.className = 'btn primary wm-write';
+      wbtn.textContent = '写入';
+      wbtn.title = '写入当前值并回读';
+      wbtn.addEventListener('click', () => sendWrite(mod, Number(num.value)));
       const del = document.createElement('button');
       del.className = 'wm-del';
       del.textContent = '×';
       del.title = '从写入窗口移除';
       del.addEventListener('click', () => toggleWriteRow(mod.rowId));
-      head.append(name, addr, seg, widthBtn, del);
+      head.append(addr, seg, widthBtn, wbtn, del);
 
       const body = document.createElement('div');
       body.className = 'wm-body';
@@ -1117,13 +1214,10 @@
       live.type = 'checkbox';
       live.checked = !!mod.live;
       liveLab.append(live, document.createTextNode(' 实时'));
-      const wbtn = document.createElement('button');
-      wbtn.className = 'btn primary wm-write';
-      wbtn.textContent = '写入';
       const status = document.createElement('span');
       status.className = 'wm-status ' + (mod.statusKind || '');
       status.textContent = mod.status || (S.write.armed ? (latestRawOf(row) === null ? '等待样本' : '当前 ' + latestRawOf(row)) : '未解锁');
-      body.append(slider, num, swWrap, range, liveLab, wbtn, status);
+      body.append(slider, num, swWrap, range, liveLab, status);
 
       const raw = latestRawOf(row);
       if (raw !== null) {
@@ -1193,7 +1287,7 @@
         sendWrite(mod, v);
       });
 
-      el.append(head, body);
+      el.append(head, name, body);
       D.writeList.appendChild(el);
     }
     syncWriteUI();
@@ -1324,6 +1418,7 @@
   function afterSignalsChanged() {
     ensureWatchRows();
     ensureWriteMods();
+    ensureWaveGroups();
     syncChannels();
     renderCatalog();
     renderSelected();
@@ -1354,6 +1449,7 @@
     renderCalib();
     renderWatchAll();
     renderWriteMods();
+    ensureWaveGroups();
     syncTablePanel();
     saveLocal();
     updateProjectUI();
@@ -1413,6 +1509,7 @@
               table: item.table !== undefined ? item.table : item.visible !== false,
               plot: item.plot !== undefined ? item.plot : item.visible !== false,
               support: !!item.support,
+              groupId: item.groupId || '',
               writeOnly: !!item.writeOnly,
               watchOnly: !!item.watchOnly,
             });
@@ -1424,6 +1521,7 @@
             S.virtuals.push({
               ...v, kind: 'virtual', sourceIds,
               table: !!v.table, plot: !!v.plot, support: false,
+              groupId: v.groupId || 'default',
               scale: 1, offset: 0, step: false, _src: [],
             });
           }
@@ -1497,6 +1595,17 @@
           }];
           S.write.seq = 1;
         }
+        if (c.wave && Array.isArray(c.wave.groups)) {
+          const groups = c.wave.groups
+            .filter((g) => g && g.id)
+            .map((g) => ({
+              id: String(g.id), name: String(g.name || g.id).slice(0, 24),
+              visible: g.visible !== false, auto: !!g.auto,
+            }));
+          if (groups.length) S.wave.groups = groups;
+          S.wave.seq = Math.max(1, Number(c.wave.seq) || 1,
+            ...groups.map((g) => Number(String(g.id).replace(/\D/g, '')) || 0));
+        }
         // 安全: 写入解锁状态不跨工程/刷新保留
         S.write.size = ['sm', 'md', 'lg', 'auto'].includes(c.write?.size) ? c.write.size : S.write.size;
         S.write.armed = false;
@@ -1517,6 +1626,7 @@
     }
     ensureWatchRows();
     ensureWriteMods();
+    ensureWaveGroups();
     syncChannels();
     const st = S.catalog.stall || {};
     const sampled = S.signals.filter((s) => !isHidden(s));
@@ -1557,12 +1667,13 @@
           id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
           scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
           step: s.step, axis: s.axis, type: s.type,
-          table: !!s.table, plot: !!s.plot, support: !!s.support,
+          table: !!s.table, plot: !!s.plot, support: !!s.support, groupId: s.groupId || '',
           writeOnly: !!s.writeOnly, watchOnly: !!s.watchOnly,
         })),
         virtuals: S.virtuals.map((v) => ({
           id: v.id, arrayId: v.arrayId, name: v.name, sourceIds: v.sourceIds.slice(),
           color: v.color, axis: v.axis, unit: v.unit, table: !!v.table, plot: !!v.plot,
+          groupId: v.groupId || '',
         })),
         rate: S.rate,
         windowSec: S.windowSec,
@@ -1583,6 +1694,12 @@
           title: c.title, mode: c.mode, signal: c.signal, addr: c.addr,
           size: c.size, signed: !!c.signed, bit: c.bit || null, unit: c.unit, rowId: c.rowId,
         })),
+        wave: {
+          seq: S.wave.seq,
+          groups: S.wave.groups.map((g) => ({
+            id: g.id, name: g.name, visible: g.visible !== false, auto: !!g.auto,
+          })),
+        },
         write: {
           armed: false, // 解锁状态不落盘
           size: S.write.size,
@@ -1779,6 +1896,7 @@
       const row = normalizeSignal(x);
       S.rows.set(row.id, row);
     }
+    ensureWaveGroups();
     ensureWatchRows();
     ensureWriteMods();
     syncChannels();
@@ -2285,6 +2403,7 @@
   function renderCatalog() {
     const body = D.catalogBody;
     if (!body) return;
+    ensureWaveGroups();
     S.liveRows.clear();
     S.avgCells.clear();
     S.arrayEntries = S.arrayEntries || new Map();
@@ -2293,19 +2412,148 @@
     const q = S.ui.search.trim().toLowerCase();
     D.sigCount.textContent = String(visibleRowCount());
     D.selCount.textContent = String(plotRows().length);
-    D.search.placeholder = tab === 'periph' ? '搜索外设 / 寄存器 / 位' : tab === 'custom' ? '自定义地址' : '搜索变量 / 寄存器 / 地址';
+    D.search.placeholder = tab === 'periph' ? '搜索外设 / 寄存器 / 位' : tab === 'custom' ? '自定义地址'
+      : tab === 'waves' ? '搜索波形 / 分组' : '搜索变量 / 寄存器 / 地址';
+    const viewRow = document.querySelector('.view-row');
+    if (viewRow) viewRow.classList.toggle('hidden', tab === 'waves');
     if (D.viewNote) {
-      D.viewNote.textContent = S.ui.view === 'tree'
-        ? '对象 · 结构体 · 数组 · 位域'
-        : (tab === 'periph' ? '按外设分组' : tab === 'vars' ? '按对象分组' : '任意地址');
+      D.viewNote.textContent = tab === 'waves'
+        ? '分组 · 独立轴 / 共享轴 · 拖动合并'
+        : (S.ui.view === 'tree'
+          ? '对象 · 结构体 · 数组 · 位域'
+          : (tab === 'periph' ? '按外设分组' : tab === 'vars' ? '按对象分组' : '任意地址'));
     }
     if (tab === 'vars') {
       if (S.ui.view === 'tree') renderVarsTree(body, q); else renderVars(body, q);
     } else if (tab === 'periph') {
       if (S.ui.view === 'tree') renderPeriphTree(body, q); else renderPeriph(body, q);
+    } else if (tab === 'waves') {
+      renderWaveList(body, q);
     } else {
       renderCustom(body);
     }
+  }
+
+  function renderWaveList(body, q) {
+    body.innerHTML = '';
+    const top = document.createElement('div');
+    top.className = 'wave-top';
+    const add = document.createElement('button');
+    add.className = 'mini';
+    add.textContent = '+ 新建分组';
+    add.title = '新建共享坐标轴分组，再把波形拖进去';
+    add.addEventListener('click', addWaveGroup);
+    const hint = document.createElement('span');
+    hint.className = 'wave-hint';
+    hint.textContent = '拖动行到分组 = 共享轴';
+    top.append(add, hint);
+    body.appendChild(top);
+
+    let shown = 0;
+    for (const g of S.wave.groups) {
+      const all = plotRows().filter((row) => (row.groupId || 'default') === g.id);
+      const rows = q
+        ? all.filter((row) => matchText([row.name, shortName(row.name), g.name], q))
+        : all;
+      if (q && !rows.length && !String(g.name).toLowerCase().includes(q)) continue;
+      shown++;
+      const box = document.createElement('div');
+      box.className = 'wave-group' + (g.visible === false ? ' off' : '');
+      box.dataset.group = g.id;
+
+      const head = document.createElement('div');
+      head.className = 'wg-head';
+      const eye = document.createElement('button');
+      eye.className = 'wg-eye';
+      eye.textContent = g.visible === false ? '○' : '◉';
+      eye.title = g.visible === false ? '显示该分组' : '隐藏该分组';
+      eye.setAttribute('aria-label', eye.title);
+      eye.addEventListener('click', (e) => { e.stopPropagation(); toggleWaveGroup(g.id); });
+      const name = document.createElement('span');
+      name.className = 'wg-name';
+      name.textContent = g.name;
+      const meta = document.createElement('span');
+      meta.className = 'wg-meta';
+      meta.textContent = (g.auto ? '独立轴' : '共享轴') + ' · ' + all.length;
+      head.append(eye, name, meta);
+      if (g.id !== 'default') {
+        const del = document.createElement('button');
+        del.className = 'wg-del';
+        del.textContent = '×';
+        del.title = '删除分组（组内波形回到默认分组）';
+        del.addEventListener('click', (e) => { e.stopPropagation(); deleteWaveGroup(g.id); });
+        head.appendChild(del);
+      }
+
+      const inner = document.createElement('div');
+      inner.className = 'wg-body';
+      if (!rows.length) {
+        const empty = document.createElement('div');
+        empty.className = 'wg-empty';
+        empty.textContent = '拖动波形到这里' + (g.auto ? '（默认分组内每路独立轴）' : '（共享一个坐标轴）');
+        inner.appendChild(empty);
+      }
+      for (const row of rows) {
+        const el = document.createElement('div');
+        el.className = 'wave-row';
+        el.dataset.id = row.id;
+        el.draggable = true;
+        el.title = (row.kind === 'virtual' ? row.name : hex(row.addr) + ' · ' + row.name) +
+          '\n拖动到别的分组可共享坐标轴';
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.style.background = row.color;
+        dot.style.color = row.color;
+        const nm = document.createElement('span');
+        nm.className = 'wave-name';
+        nm.textContent = shortName(row.name);
+        const val = document.createElement('span');
+        val.className = 'wave-val';
+        val.textContent = '—';
+        const tag = document.createElement('span');
+        tag.className = 'wave-axis-tag';
+        tag.textContent = g.auto ? '独立' : '共享';
+        const rm = document.createElement('button');
+        rm.className = 'sel-x';
+        rm.textContent = '×';
+        rm.title = '从波形移除';
+        rm.addEventListener('click', (e) => { e.stopPropagation(); removeSignal(row.id); });
+        el.addEventListener('click', (e) => {
+          if (e.target.closest('.sel-x')) return;
+          setFocus(row.id, true);
+        });
+        el.addEventListener('dragstart', (e) => {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', row.id);
+          el.classList.add('dragging');
+        });
+        el.addEventListener('dragend', () => el.classList.remove('dragging'));
+        el.append(dot, nm, val, tag, rm);
+        inner.appendChild(el);
+        S.liveRows.set(row.id, val);
+      }
+
+      const markOver = (on) => { box.classList.toggle('drop-over', on); };
+      for (const zone of [head, inner]) {
+        zone.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; markOver(true); });
+        zone.addEventListener('dragleave', (e) => { if (!zone.contains(e.relatedTarget)) markOver(false); });
+        zone.addEventListener('drop', (e) => {
+          e.preventDefault();
+          markOver(false);
+          const id = e.dataTransfer.getData('text/plain');
+          if (id) assignWaveGroup(id, g.id);
+        });
+      }
+      box.append(head, inner);
+      body.appendChild(box);
+    }
+    if (!shown) {
+      const empty = document.createElement('div');
+      empty.className = 'cat-empty muted';
+      empty.textContent = q ? '没有匹配的波形' : '还没有波形；在变量/外设行点“波”加入';
+      body.appendChild(empty);
+    }
+    if (S.samples.length) refreshLiveValues();
   }
 
   function matchText(parts, q) {
@@ -2820,7 +3068,8 @@
     }
     for (const row of rows) {
       const el = document.createElement('div');
-      el.className = 'sel-row';
+      const wg = waveGroupFor(row);
+      el.className = 'sel-row' + (wg && wg.visible === false ? ' group-hidden' : '');
       el.dataset.id = row.id;
       el.innerHTML = '<span class="dot"></span><span class="sel-name"></span><span class="sel-tgls"></span><span class="sel-val">—</span><button class="sel-x" title="移除">×</button>';
       const dot = el.querySelector('.dot');
@@ -2874,7 +3123,7 @@
     if (!box) return;
     box.innerHTML = '';
     S.legendEls.clear();
-    for (const row of plotRows()) {
+    for (const row of visiblePlotRows()) {
       const chip = document.createElement('div');
       chip.className = 'legend-chip' + (S.focusId === row.id ? ' focus' : '');
       if (S.focusPinned && S.focusId === row.id) chip.classList.add('pinned');
@@ -2888,8 +3137,7 @@
       dot.style.background = row.color;
       dot.style.color = row.color;
       chip.querySelector('.lname').textContent = shortName(row.name);
-      if (row.axis === 'right') chip.querySelector('.lax').textContent = 'R';
-      if (row.kind === 'virtual') chip.querySelector('.lax').textContent = '';
+      chip.querySelector('.lax').textContent = row.axis === 'right' ? 'R' : '';
       chip.addEventListener('pointerenter', () => setFocus(row.id, false));
       chip.addEventListener('pointerleave', () => { if (!S.focusPinned) setFocus(null, false); });
       chip.addEventListener('click', () => {
@@ -2982,15 +3230,21 @@
 
   function updateEmptyHint() {
     const hasPlot = plotRows().length > 0;
+    const hasVisible = visiblePlotRows().length > 0;
     const hasTable = tableRows().length > 0;
-    D.empty.classList.toggle('hidden', hasPlot);
+    D.empty.classList.toggle('hidden', hasVisible);
     const div = D.empty.querySelector('div');
     const small = D.empty.querySelector('small');
-    if (div) div.textContent = '还没有波形';
-    if (small) {
-      small.textContent = hasTable
-        ? '数值表里有信号；把对应行的“波”打开就会画出来'
-        : '在左侧把“波”打开，或点击“连接”';
+    if (hasPlot && !hasVisible) {
+      if (div) div.textContent = '波形分组已隐藏';
+      if (small) small.textContent = '在左侧“波形”标签里点分组左侧的 ◉ 恢复显示';
+    } else {
+      if (div) div.textContent = '还没有波形';
+      if (small) {
+        small.textContent = hasTable
+          ? '数值表里有信号；把对应行的“波”打开就会画出来'
+          : '在左侧把“波”打开，或点击“连接”';
+      }
     }
   }
 
@@ -3155,6 +3409,21 @@
     ctx.restore();
   }
 
+  function wavePanes() {
+    const panes = [];
+    for (const g of S.wave.groups) {
+      if (g.visible === false) continue;
+      const rows = plotRows().filter((r) => (r.groupId || 'default') === g.id);
+      if (!rows.length) continue;
+      if (g.auto) {
+        for (const r of rows) panes.push({ group: g, rows: [r], title: shortName(r.name), unit: r.unit || '' });
+      } else {
+        panes.push({ group: g, rows, title: g.name, unit: '' });
+      }
+    }
+    return panes;
+  }
+
   function draw() {
     const cv = D.chart;
     const ctx = cv.getContext('2d');
@@ -3162,20 +3431,30 @@
     if (!W || !H) return;
     ctx.clearRect(0, 0, W, H);
 
-    const rows = plotRows();
-    const anyRight = rows.some((s) => s.axis === 'right');
-    const pad = { l: 58, r: anyRight ? 56 : 16, t: 16, b: 36 };
+    const rows = visiblePlotRows();
+    const panes = wavePanes();
+    const anyRight = rows.some((r) => r.axis === 'right');
+    const pad = { l: 62, r: anyRight ? 54 : 14, t: 14, b: 34 };
     const x0 = pad.l, y0 = pad.t;
     const pw = Math.max(10, W - pad.l - pad.r);
     const ph = Math.max(10, H - pad.t - pad.b);
     const end = S.paused ? (S.pauseAt || S.lastT) : S.lastT;
     const start = end - S.windowSec * 1000;
-
     const range = sampleRange(start, end);
     const i0 = range[0], i1 = range[1];
+    S.view = { x0, y0, pw, ph, start, end, panes };
 
-    const leftSigs = rows.filter((s) => s.axis !== 'right');
-    const rightSigs = rows.filter((s) => s.axis === 'right');
+    if (!panes.length) {
+      const bg = ctx.createLinearGradient(0, y0, 0, y0 + ph);
+      bg.addColorStop(0, 'rgba(14,24,42,.38)');
+      bg.addColorStop(1, 'rgba(7,12,23,.18)');
+      ctx.fillStyle = bg;
+      ctx.fillRect(x0, y0, pw, ph);
+      return;
+    }
+
+    const gap = 6;
+    const each = Math.max(10, (ph - gap * (panes.length - 1)) / panes.length);
     const axisRange = (list) => {
       let mn = Infinity, mx = -Infinity, dmin = Infinity;
       for (const row of list) {
@@ -3197,81 +3476,93 @@
       else if (dmin >= 0 && mn < 0) mn = Math.max(0, mn);
       return { min: mn, max: mx };
     };
-    const left = axisRange(leftSigs) || { min: 0, max: 1 };
-    const right = axisRange(rightSigs) || { min: 0, max: 1 };
-    const labelLeft = leftSigs.length ? left : right;
-    S.view = { x0, y0, pw, ph, start, end, left, right, anyRight };
 
-    const X = (t) => x0 + ((t - start) / Math.max(1, end - start)) * pw;
-    const YL = (v) => y0 + ph - ((v - labelLeft.min) / Math.max(1e-9, labelLeft.max - labelLeft.min)) * ph;
-    const YR = (v) => y0 + ph - ((v - right.min) / Math.max(1e-9, right.max - right.min)) * ph;
-    const yFor = (row, v) => (row.axis === 'right' ? YR(v) : YL(v));
+    for (let pi = 0; pi < panes.length; pi++) {
+      const pane = panes[pi];
+      pane.top = y0 + pi * (each + gap);
+      pane.h = each;
+      pane.range = axisRange(pane.rows) || { min: 0, max: 1 };
+      pane.Y = (v) => pane.top + pane.h - ((v - pane.range.min) / Math.max(1e-9, pane.range.max - pane.range.min)) * pane.h;
+      pane.primary = (byId(S.stall.currentId) && pane.rows.some((r) => r.id === S.stall.currentId))
+        ? byId(S.stall.currentId)
+        : (pane.rows.find((r) => /current/i.test(r.name)) || pane.rows[0] || null);
+    }
 
-    // background
-    const bg = ctx.createLinearGradient(0, y0, 0, y0 + ph);
-    bg.addColorStop(0, 'rgba(14,24,42,.45)');
-    bg.addColorStop(1, 'rgba(7,12,23,.2)');
-    ctx.fillStyle = bg;
-    ctx.fillRect(x0, y0, pw, ph);
+    // pane backgrounds
+    for (const pane of panes) {
+      const bg = ctx.createLinearGradient(0, pane.top, 0, pane.top + pane.h);
+      bg.addColorStop(0, 'rgba(14,24,42,.42)');
+      bg.addColorStop(1, 'rgba(7,12,23,.18)');
+      ctx.fillStyle = bg;
+      ctx.fillRect(x0, pane.top, pw, pane.h);
+    }
 
-    // grid lines (labels always on, grid optional)
-    {
-      ctx.strokeStyle = 'rgba(120,150,190,.10)';
-      ctx.lineWidth = 1;
-      ctx.font = '9.5px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+    // vertical time grid across panes
+    const xt = 5;
+    ctx.strokeStyle = 'rgba(120,150,190,.10)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= xt; i++) {
+      const x = Math.round(x0 + pw * i / xt) + 0.5;
+      if (S.gridOn) {
+        for (const pane of panes) {
+          ctx.beginPath(); ctx.moveTo(x, pane.top); ctx.lineTo(x, pane.top + pane.h); ctx.stroke();
+        }
+      }
+    }
+
+    // horizontal grid + per-pane Y axis labels
+    const mono = getComputedStyle(document.body).getPropertyValue('--mono');
+    for (const pane of panes) {
+      const ticks = Math.max(1, Math.min(4, Math.round(pane.h / 38)));
+      const rightPane = pane.rows.length && pane.rows.every((r) => r.axis === 'right');
+      ctx.font = '9px ' + mono;
       ctx.fillStyle = 'rgba(127,147,173,.75)';
-      const ticks = 4;
       for (let i = 0; i <= ticks; i++) {
         const ratio = i / ticks;
-        const v = labelLeft.min + (labelLeft.max - labelLeft.min) * ratio;
-        const y = Math.round(y0 + ph - ratio * ph) + 0.5;
+        const v = pane.range.min + (pane.range.max - pane.range.min) * ratio;
+        const y = Math.round(pane.top + pane.h - ratio * pane.h) + 0.5;
         if (S.gridOn) {
           ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + pw, y); ctx.stroke();
         }
-        ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-        ctx.fillText(fmtAxis(v), x0 - 9, y);
-        if (anyRight) {
-          const rv = right.min + (right.max - right.min) * ratio;
-          ctx.textAlign = 'left';
-          ctx.fillStyle = 'rgba(127,147,173,.55)';
-          ctx.fillText(fmtAxis(rv), x0 + pw + 9, y);
-          ctx.fillStyle = 'rgba(127,147,173,.75)';
-        }
+        ctx.textAlign = rightPane ? 'left' : 'right'; ctx.textBaseline = 'middle';
+        ctx.fillText(fmtAxis(v), rightPane ? x0 + pw + 8 : x0 - 8, y);
       }
-      const xt = 5;
-      for (let i = 0; i <= xt; i++) {
-        const x = Math.round(x0 + pw * i / xt) + 0.5;
-        if (S.gridOn) {
-          ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + ph); ctx.stroke();
-        }
-        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        const t = start + (end - start) * i / xt;
-        const rel = (t - end) / 1000;
-        ctx.fillText((rel >= -0.05 ? '0' : rel.toFixed(0)) + 's', x, y0 + ph + 8);
-      }
+      // pane title + scale
+      const title = pane.title + (pane.unit ? ' [' + pane.unit + ']' : '') +
+        (pane.rows.length > 1 ? ' · ' + pane.rows.length + ' 路共享' : '');
+      ctx.font = '9px ' + mono;
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      const tw = Math.min(pw - 12, ctx.measureText(title).width + 10);
+      ctx.fillStyle = 'rgba(6,11,21,.62)';
+      ctx.fillRect(x0 + 4, pane.top + 3, tw, 13);
+      ctx.fillStyle = hexAlpha(pane.rows[0].color, .95);
+      ctx.fillText(title, x0 + 8, pane.top + 5);
+      // axes border
+      ctx.strokeStyle = 'rgba(120,150,190,.22)';
+      ctx.beginPath();
+      ctx.moveTo(x0 + 0.5, pane.top); ctx.lineTo(x0 + 0.5, pane.top + pane.h + 0.5); ctx.lineTo(x0 + pw, pane.top + pane.h + 0.5);
+      ctx.stroke();
+      if (S.zeroLine) drawZeroLine(ctx, pane.range, pane.Y, x0, pw, pane.top, pane.h, 'rgba(190,214,240,.26)');
     }
 
-    // 0 / center reference
-    if (S.zeroLine) {
-      if (leftSigs.length) drawZeroLine(ctx, left, YL, x0, pw, y0, ph, 'rgba(190,214,240,.26)');
-      if (anyRight) drawZeroLine(ctx, right, YR, x0, pw, y0, ph, 'rgba(96,165,250,.16)');
+    // bottom time labels
+    ctx.font = '9.5px ' + mono;
+    ctx.fillStyle = 'rgba(127,147,173,.75)';
+    for (let i = 0; i <= xt; i++) {
+      const x = Math.round(x0 + pw * i / xt) + 0.5;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      const t = start + (end - start) * i / xt;
+      const rel = (t - end) / 1000;
+      ctx.fillText((rel >= -0.05 ? '0' : rel.toFixed(0)) + 's', x, y0 + ph + 8);
     }
 
-    // axes
-    ctx.strokeStyle = 'rgba(120,150,190,.22)';
-    ctx.beginPath();
-    ctx.moveTo(x0 + 0.5, y0); ctx.lineTo(x0 + 0.5, y0 + ph + 0.5); ctx.lineTo(x0 + pw, y0 + ph + 0.5);
-    if (anyRight) { ctx.moveTo(x0 + pw + 0.5, y0); ctx.lineTo(x0 + pw + 0.5, y0 + ph); }
-    ctx.stroke();
-
-    const primary = primaryRow(rows);
-    // stall bands (使用合并后的事件, 与 "N 次" 计数一致)
+    // stall bands across all panes
     if (S.stall.enabled && S.stall.events.length) {
       for (const ev of S.stall.events) {
         const evEnd = ev.end == null ? end : ev.end;
         if (evEnd < start || ev.t > end) continue;
-        const xa = X(Math.max(ev.t, start));
-        const xb = X(Math.min(evEnd, end));
+        const xa = x0 + ((Math.max(ev.t, start) - start) / Math.max(1, end - start)) * pw;
+        const xb = x0 + ((Math.min(evEnd, end) - start) / Math.max(1, end - start)) * pw;
         ctx.fillStyle = 'rgba(251,77,103,.075)';
         ctx.fillRect(xa, y0, Math.max(1, xb - xa), ph);
         ctx.fillStyle = 'rgba(251,77,103,.55)';
@@ -3279,102 +3570,101 @@
       }
     }
 
-    // fills (primary current only)
-    if (S.fillOn && primary && primary.plot) {
-      const row = primary;
-      if (i1 - i0 > 1) {
+    const focus = S.focusId;
+    const alphaFor = (row) => {
+      if (focus) return row.id === focus ? 1 : 0.12;
+      return row.id === (panes.find((p) => p.primary && p.primary.id === row.id)?.primary?.id) ? 1 : 0.66;
+    };
+    const widthFor = (row) => {
+      const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name) || row.name.endsWith('.thresholdLast');
+      if (isThr) return 1.2;
+      return panes.some((p) => p.primary && p.primary.id === row.id) ? 2.1 : 1.15;
+    };
+
+    // fills (primary per pane)
+    if (S.fillOn) {
+      for (const pane of panes) {
+        const row = pane.primary;
+        if (!row || i1 - i0 <= 1) continue;
         ctx.beginPath();
         let started = false;
         for (let i = i0; i < i1; i++) {
           const v = rowValue(row, S.samples[i][1]);
           if (v === null) continue;
-          const x = X(S.samples[i][0]);
-          const y = yFor(row, v);
+          const x = x0 + ((S.samples[i][0] - start) / Math.max(1, end - start)) * pw;
+          const y = pane.Y(v);
           if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
         }
-        if (started) {
-          const lastX = X(S.samples[i1 - 1][0]);
-          ctx.lineTo(lastX, y0 + ph);
-          ctx.lineTo(X(S.samples[i0][0]), y0 + ph);
-          ctx.closePath();
-          const g = ctx.createLinearGradient(0, y0, 0, y0 + ph);
-          g.addColorStop(0, hexAlpha(row.color, .14));
-          g.addColorStop(1, hexAlpha(row.color, 0));
-          ctx.fillStyle = g;
-          ctx.fill();
-        }
+        if (!started) continue;
+        ctx.lineTo(x0 + pw, pane.top + pane.h);
+        ctx.lineTo(x0, pane.top + pane.h);
+        ctx.closePath();
+        const g = ctx.createLinearGradient(0, pane.top, 0, pane.top + pane.h);
+        g.addColorStop(0, hexAlpha(row.color, .14));
+        g.addColorStop(1, hexAlpha(row.color, 0));
+        ctx.fillStyle = g;
+        ctx.fill();
       }
     }
 
-    const focus = S.focusId;
-    const alphaFor = (row) => {
-      if (focus) return row.id === focus ? 1 : 0.12;
-      return row.id === (primary && primary.id) ? 1 : 0.62;
-    };
-    const widthFor = (row) => {
-      const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name) || row.name.endsWith('.thresholdLast');
-      if (isThr) return 1.2;
-      return row.id === (primary && primary.id) ? 2.2 : 1.15;
-    };
-
     // traces
-    for (const row of rows) {
-      const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name);
-      const isPrimary = primary && row.id === primary.id;
-      const alpha = alphaFor(row);
-      ctx.beginPath();
-      let started = false, prevY = 0;
-      for (let i = i0; i < i1; i++) {
-        const v = rowValue(row, S.samples[i][1]);
-        if (v === null) continue;
-        const x = X(S.samples[i][0]);
-        const y = yFor(row, v);
-        if (!started) {
-          ctx.moveTo(x, y); started = true;
-        } else if (row.step) {
-          ctx.lineTo(x, prevY);
-          ctx.lineTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
+    for (const pane of panes) {
+      for (const row of pane.rows) {
+        const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name);
+        const isPrimary = pane.primary && row.id === pane.primary.id;
+        const alpha = alphaFor(row);
+        ctx.beginPath();
+        let started = false, prevY = 0;
+        for (let i = i0; i < i1; i++) {
+          const v = rowValue(row, S.samples[i][1]);
+          if (v === null) continue;
+          const x = x0 + ((S.samples[i][0] - start) / Math.max(1, end - start)) * pw;
+          const y = pane.Y(v);
+          if (!started) {
+            ctx.moveTo(x, y); started = true;
+          } else if (row.step) {
+            ctx.lineTo(x, prevY);
+            ctx.lineTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+          prevY = y;
         }
-        prevY = y;
-      }
-      if (!started) continue;
-      if (S.glow) {
-        // 轻量光晕：不累积亮度缓冲，只沿当前路径加一圈低 alpha 辉光，
-        // 避免把整条历史反复叠加成一片白。
-        ctx.save();
-        ctx.globalCompositeOperation = 'lighter';
-        ctx.strokeStyle = hexAlpha(row.color, 0.055 * alpha);
-        ctx.lineWidth = widthFor(row) * 5.5;
+        if (!started) continue;
+        if (S.glow) {
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.strokeStyle = hexAlpha(row.color, 0.055 * alpha);
+          ctx.lineWidth = widthFor(row) * 5.5;
+          ctx.setLineDash([]);
+          ctx.stroke();
+          ctx.strokeStyle = hexAlpha(row.color, 0.10 * alpha);
+          ctx.lineWidth = widthFor(row) * 2.4;
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.lineWidth = widthFor(row);
+        ctx.strokeStyle = alpha >= 1 ? row.color : hexAlpha(row.color, alpha);
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.setLineDash(isThr ? [6, 4] : []);
+        if (isPrimary && !focus) {
+          ctx.save();
+          ctx.shadowColor = hexAlpha(row.color, .55);
+          ctx.shadowBlur = 8;
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.stroke();
         ctx.setLineDash([]);
-        ctx.stroke();
-        ctx.strokeStyle = hexAlpha(row.color, 0.10 * alpha);
-        ctx.lineWidth = widthFor(row) * 2.4;
-        ctx.stroke();
-        ctx.restore();
       }
-      ctx.lineWidth = widthFor(row);
-      ctx.strokeStyle = alpha >= 1 ? row.color : hexAlpha(row.color, alpha);
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.setLineDash(isThr ? [6, 4] : []);
-      if (isPrimary && !focus) {
-        ctx.save();
-        ctx.shadowColor = hexAlpha(row.color, .55);
-        ctx.shadowBlur = 8;
-        ctx.stroke();
-        ctx.restore();
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
     }
 
     // stall markers at top
     if (S.stall.enabled) {
       for (const ev of S.stall.events) {
         if (ev.t < start) continue;
-        const x = X(ev.t);
+        const x = x0 + ((ev.t - start) / Math.max(1, end - start)) * pw;
         ctx.fillStyle = 'rgba(251,77,103,.9)';
         ctx.beginPath();
         ctx.moveTo(x, y0 + 1);
@@ -3387,24 +3677,26 @@
 
     // hover
     if (S.hoverT !== null && S.hoverT >= start && S.hoverT <= end) {
-      const x = X(S.hoverT);
+      const x = x0 + ((S.hoverT - start) / Math.max(1, end - start)) * pw;
       ctx.strokeStyle = 'rgba(220,235,250,.28)';
       ctx.setLineDash([3, 4]);
       ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + ph); ctx.stroke();
       ctx.setLineDash([]);
       const nearest = nearestSample(S.hoverT);
       if (nearest) {
-        for (const row of rows) {
-          const v = rowValue(row, nearest[1]);
-          if (v === null) continue;
-          const y = yFor(row, v);
-          ctx.beginPath();
-          ctx.arc(x, y, 3, 0, Math.PI * 2);
-          ctx.fillStyle = row.color;
-          ctx.fill();
-          ctx.strokeStyle = 'rgba(5,10,18,.9)';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
+        for (const pane of panes) {
+          for (const row of pane.rows) {
+            const v = rowValue(row, nearest[1]);
+            if (v === null) continue;
+            const y = pane.Y(v);
+            ctx.beginPath();
+            ctx.arc(x, y, 3, 0, Math.PI * 2);
+            ctx.fillStyle = row.color;
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(5,10,18,.9)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
         }
       }
     }
@@ -3414,7 +3706,7 @@
       ctx.fillStyle = 'rgba(245,158,11,.14)';
       ctx.strokeStyle = 'rgba(245,158,11,.55)';
       const label = 'PAUSED';
-      ctx.font = 'bold 9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+      ctx.font = 'bold 9px ' + mono;
       const tw = ctx.measureText(label).width + 14;
       ctx.beginPath();
       roundRect(ctx, x0 + pw - tw - 8, y0 + 8, tw, 18, 4);
@@ -3479,7 +3771,7 @@
     const near = nearestSample(t);
     if (!near) { D.tip.classList.add('hidden'); return; }
     const rows = [];
-    for (const row of plotRows()) {
+    for (const row of visiblePlotRows()) {
       const v = rowValue(row, near[1]);
       if (v === null) continue;
       rows.push('<div class="ct-row"><span class="dot" style="background:' + row.color + ';color:' + row.color + '"></span>' +
@@ -3941,6 +4233,7 @@
     S.virtuals = S.virtuals.filter((v) => (v.sourceIds || []).some((id) => S.index.has(id)));
     ensureWatchRows();
     ensureWriteMods();
+    ensureWaveGroups();
     syncChannels();
     renderCatalog(); renderSelected(); renderLegend(); renderValueTable();
     renderStallSelects(); renderCalib(); renderWatchAll(); renderWriteMods();
