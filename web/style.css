@@ -319,6 +319,17 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .panel-x { border: 1px solid transparent; background: transparent; color: var(--muted2); font-size: 14px; line-height: 1; width: 22px; height: 22px; border-radius: 5px; cursor: pointer; flex: 0 0 auto; }
 .panel-x:hover { color: var(--text); border-color: var(--line2); background: rgba(255,255,255,.04); }
 .section-hidden { display: none !important; }
+.sel-row.focus { background: rgba(34,211,238,.08); outline: 1px solid rgba(34,211,238,.22); }
+.calib-modal { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; background: rgba(3,7,14,.68); backdrop-filter: blur(2px); }
+.calib-modal.hidden { display: none; }
+.calib-card { width: min(390px, calc(100vw - 28px)); border: 1px solid var(--line2); border-radius: 10px; background: rgba(12,21,38,.98); box-shadow: 0 22px 60px rgba(0,0,0,.55); padding: 13px 15px; }
+.calib-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.calib-target { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 9px; overflow-wrap: anywhere; }
+.calib-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.calib-form label { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--muted2); }
+.calib-form input, .calib-form select { height: 28px; border: 1px solid var(--line2); border-radius: 6px; background: rgba(7,13,24,.9); color: var(--text); padding: 0 7px; font-family: var(--mono); font-size: 11px; }
+.calib-foot { display: flex; justify-content: flex-end; gap: 7px; margin-top: 11px; }
+.ct-row .ct-conv { color: var(--muted); font-size: 10px; margin-left: 3px; }
 
 /* ---------------- write modules ---------------- */
 .write-card {
@@ -392,7 +403,7 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .vt-head, .vt-row {
   display: grid;
   /* 数值列按 6 位数 + 逗号分隔压缩；超长值在格内换行 */
-  grid-template-columns: 12px minmax(44px, 1.5fr) repeat(4, minmax(34px, 7ch)) minmax(28px, 40px);
+  grid-template-columns: 12px minmax(40px, 1.4fr) repeat(5, minmax(30px, 6.5ch)) minmax(26px, 38px);
   align-items: center; gap: 3px; padding: 3px 6px;
   font-family: var(--mono); font-size: 9.5px; font-variant-numeric: tabular-nums;
 }
@@ -408,6 +419,7 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .vt-row .vt-name .vt-tag { color: var(--violet); font-size: 8px; border: 1px solid rgba(167,139,250,.4); border-radius: 3px; padding: 0 3px; margin-left: 4px; }
 .vt-row .dot { width: 7px; height: 7px; }
 .vt-row .vt-cur { color: var(--cyan); }
+.vt-row .vt-conv { color: var(--green); }
 .vt-row .vt-stat { color: #9fb4cb; }
 .vt-row.avg .vt-cur { color: #d5c8ff; }
 .vt-c-unit { text-align: right; color: var(--muted2); font-size: 8.5px; overflow-wrap: anywhere; }

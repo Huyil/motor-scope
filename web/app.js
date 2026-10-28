@@ -212,6 +212,12 @@
     D.drawer = $('#drawer');
     D.drawerBackdrop = $('#drawerBackdrop');
     D.calibList = $('#calibList');
+    D.calibModal = $('#calibModal');
+    D.calibTarget = $('#calibTarget');
+    D.calScale = $('#calScale');
+    D.calOffset = $('#calOffset');
+    D.calUnit = $('#calUnit');
+    D.calAxis = $('#calAxis');
     D.curSel = $('#curSel');
     D.thrSel = $('#thrSel');
     D.catalogMeta = $('#catalogMeta');
@@ -2091,6 +2097,51 @@
     return isFinite(v) ? v : null;
   }
 
+  function isCalibrated(row) {
+    if (!row) return false;
+    if (row.kind === 'virtual') {
+      return (row.sourceIds || []).some((id) => isCalibrated(S.rows.get(id)));
+    }
+    return (row.scale ?? 1) !== 1 || (row.offset ?? 0) !== 0;
+  }
+
+  function rawValue(row, vals) {
+    if (!row) return null;
+    if (row.kind === 'virtual') {
+      const src = row._src || [];
+      let sum = 0, n = 0;
+      for (const k of src) {
+        const v = vals[k];
+        if (v === undefined || v === null || !isFinite(v)) continue;
+        sum += v; n++;
+      }
+      return n ? sum / n : null;
+    }
+    const i = row.ci;
+    if (i < 0 || i >= vals.length) return null;
+    const v = vals[i];
+    return v === undefined || v === null || !isFinite(v) ? null : v;
+  }
+
+  // 同一组里只要有一个未换算（或单位不一致），整组按原始值画
+  function paneUseScale(rows) {
+    if (!rows || !rows.length) return false;
+    if (!rows.every(isCalibrated)) return false;
+    const units = new Set(rows.map((r) => String(r.unit || '').trim().toLowerCase()));
+    return units.size === 1;
+  }
+
+  function plotValue(row, vals, pane) {
+    return pane && pane.useScale ? rowValue(row, vals) : rawValue(row, vals);
+  }
+
+  function convertedValue(row, raw) {
+    if (raw === null || raw === undefined) return null;
+    if (row.kind === 'virtual') return raw;
+    const v = raw * (row.scale ?? 1) + (row.offset ?? 0);
+    return isFinite(v) ? v : null;
+  }
+
   function virtualValue(v, vals) {
     let sum = 0, n = 0;
     const src = v._src;
@@ -2163,7 +2214,14 @@
       const live = S.liveRows.get(row.id);
       if (live) live.textContent = txt;
       const vt = S.vtRows.get(row.id);
-      if (vt) { setTableNum(vt.cur, rowTableText(row, vals), 'num vt-cur'); vt.cur.title = row.name + ' · ' + hex(row.addr); }
+      if (vt) {
+        setTableNum(vt.cur, fmtTableNum(rawValue(row, vals)), 'num vt-cur');
+        vt.cur.title = row.name + ' · ' + hex(row.addr) + '（原始）';
+        if (vt.conv) {
+          setTableNum(vt.conv, isCalibrated(row) ? fmtTableNum(convertedValue(row, rawValue(row, vals))) : '-', 'num vt-conv');
+          vt.conv.title = isCalibrated(row) ? '换算值 = 原始 × ' + row.scale + ' + ' + row.offset : '未设置换算';
+        }
+      }
     }
     for (const v of S.virtuals) {
       const txt = rowValueText(v, vals);
@@ -2174,7 +2232,10 @@
       const avg = S.avgCells.get(v.id);
       if (avg) avg.textContent = txt;
       const vt = S.vtRows.get(v.id);
-      if (vt) setTableNum(vt.cur, rowTableText(v, vals), 'num vt-cur');
+      if (vt) {
+        setTableNum(vt.cur, fmtTableNum(rawValue(v, vals)), 'num vt-cur');
+        if (vt.conv) setTableNum(vt.conv, isCalibrated(v) ? fmtTableNum(convertedValue(v, rawValue(v, vals))) : '-', 'num vt-conv');
+      }
     }
     updateStallUI(last[0]);
     refreshWriteUI();
@@ -3222,12 +3283,13 @@
       }
       el.addEventListener('click', (e) => {
         if (e.target.closest('.sel-x') || e.target.closest('.tgl')) return;
-        if (row.kind === 'virtual') { toast('AVG 虚拟行没有地址，可在左侧数组表里管理'); return; }
-        openDrawer();
-        setTimeout(() => {
-          const inp = document.querySelector('.calib-row[data-id="' + CSS.escape(row.id) + '"] input');
-          if (inp) inp.focus();
-        }, 80);
+        S.focusId = S.focusId === row.id ? null : row.id;
+        for (const [id, node] of S.selRows) node.classList.toggle('focus', id === S.focusId);
+        S.dirty = true;
+      });
+      el.addEventListener('dblclick', (e) => {
+        if (e.target.closest('.sel-x') || e.target.closest('.tgl')) return;
+        openCalibModal(row);
       });
       el.querySelector('.sel-x').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -3235,6 +3297,10 @@
       });
       box.appendChild(el);
       S.selRows.set(row.id, el);
+    }
+    if (S.focusId) {
+      if (S.selRows.has(S.focusId)) S.selRows.get(S.focusId).classList.add('focus');
+      else S.focusId = null;
     }
     if (S.samples.length) refreshLiveValues();
     updateEmptyHint();
@@ -3338,13 +3404,16 @@
       const cur = document.createElement('span');
       cur.className = 'num vt-cur';
       cur.textContent = '—';
+      const conv = document.createElement('span');
+      conv.className = 'num vt-conv';
+      conv.textContent = '-';
       const mn = document.createElement('span'); mn.className = 'num vt-stat'; mn.textContent = '--';
       const mx = document.createElement('span'); mx.className = 'num vt-stat'; mx.textContent = '--';
       const av = document.createElement('span'); av.className = 'num vt-stat'; av.textContent = '--';
       const un = document.createElement('span'); un.className = 'vt-c-unit'; un.textContent = row.unit || '';
-      el.append(dot, nm, cur, mn, mx, av, un);
+      el.append(dot, nm, cur, conv, mn, mx, av, un);
       body.appendChild(el);
-      S.vtRows.set(row.id, { cur, min: mn, max: mx, avg: av });
+      S.vtRows.set(row.id, { cur, conv, min: mn, max: mx, avg: av });
     }
     updateTableStats();
     if (S.samples.length) refreshLiveValues();
@@ -3438,6 +3507,54 @@
       ax.addEventListener('change', commit);
       box.appendChild(row);
     }
+  }
+
+  // ---------------------------------------------------------------- 换算弹窗
+  let calibEditId = '';
+
+  function openCalibModal(row) {
+    if (!row || !D.calibModal) return;
+    calibEditId = row.id;
+    D.calibTarget.textContent = row.name + (row.addr ? ' · ' + hex(row.addr) : '') +
+      (row.kind === 'virtual' ? ' · 数组平均' : '');
+    D.calScale.value = String(row.scale ?? 1);
+    D.calOffset.value = String(row.offset ?? 0);
+    D.calUnit.value = row.unit || '';
+    D.calAxis.value = row.axis === 'right' ? 'right' : 'left';
+    D.calScale.disabled = row.kind === 'virtual';
+    D.calOffset.disabled = row.kind === 'virtual';
+    D.calibModal.classList.remove('hidden');
+    setTimeout(() => D.calScale.focus(), 30);
+  }
+
+  function closeCalibModal() {
+    calibEditId = '';
+    D.calibModal?.classList.add('hidden');
+  }
+
+  function applyCalibModal() {
+    const row = S.rows.get(calibEditId) || S.virtuals.find((v) => v.id === calibEditId);
+    if (!row) { closeCalibModal(); return; }
+    if (row.kind !== 'virtual') {
+      const sc = Number(D.calScale.value);
+      const of = Number(D.calOffset.value);
+      row.scale = isFinite(sc) ? sc : 1;
+      row.offset = isFinite(of) ? of : 0;
+      row.unit = String(D.calUnit.value || '').trim();
+      row.axis = D.calAxis.value === 'right' ? 'right' : 'left';
+    } else {
+      row.unit = String(D.calUnit.value || '').trim();
+      row.axis = D.calAxis.value === 'right' ? 'right' : 'left';
+    }
+    saveLocal();
+    renderSelected();
+    renderValueTable();
+    renderLegend();
+    if (S.samples.length) refreshLiveValues();
+    S.dirty = true;
+    closeCalibModal();
+    toast('已更新换算：' + shortName(row.name) +
+      (isCalibrated(row) ? ' · ' + row.scale + '× + ' + row.offset + (row.unit ? ' ' + row.unit : '') : ' · 未设置'), 'ok');
   }
 
   // ---------------------------------------------------------------- chart
@@ -3577,11 +3694,11 @@
 
     const gap = 6;
     const each = Math.max(10, (ph - gap * (panes.length - 1)) / panes.length);
-    const axisRange = (list) => {
+    const axisRange = (list, pane) => {
       let mn = Infinity, mx = -Infinity, dmin = Infinity;
       for (const row of list) {
         for (let i = i0; i < i1; i++) {
-          const tv = rowValue(row, S.samples[i][1]);
+          const tv = plotValue(row, S.samples[i][1], pane);
           if (tv === null || !isFinite(tv)) continue;
           if (tv < mn) mn = tv;
           if (tv < dmin) dmin = tv;
@@ -3603,7 +3720,9 @@
       const pane = panes[pi];
       pane.top = y0 + pi * (each + gap);
       pane.h = each;
-      pane.range = axisRange(pane.rows) || { min: 0, max: 1 };
+      pane.useScale = paneUseScale(pane.rows);
+      pane.unit = pane.useScale ? String(pane.rows[0].unit || '').trim() : '';
+      pane.range = axisRange(pane.rows, pane) || { min: 0, max: 1 };
       pane.Y = (v) => pane.top + pane.h - ((v - pane.range.min) / Math.max(1e-9, pane.range.max - pane.range.min)) * pane.h;
       pane.primary = (byId(S.stall.currentId) && pane.rows.some((r) => r.id === S.stall.currentId))
         ? byId(S.stall.currentId)
@@ -3711,7 +3830,7 @@
         ctx.beginPath();
         let started = false;
         for (let i = i0; i < i1; i++) {
-          const v = rowValue(row, S.samples[i][1]);
+          const v = plotValue(row, S.samples[i][1], pane);
           if (v === null) continue;
           const x = x0 + ((S.samples[i][0] - start) / Math.max(1, end - start)) * pw;
           const y = pane.Y(v);
@@ -3738,7 +3857,7 @@
         ctx.beginPath();
         let started = false, prevY = 0;
         for (let i = i0; i < i1; i++) {
-          const v = rowValue(row, S.samples[i][1]);
+          const v = plotValue(row, S.samples[i][1], pane);
           if (v === null) continue;
           const x = x0 + ((S.samples[i][0] - start) / Math.max(1, end - start)) * pw;
           const y = pane.Y(v);
@@ -3808,7 +3927,7 @@
       if (nearest) {
         for (const pane of panes) {
           for (const row of pane.rows) {
-            const v = rowValue(row, nearest[1]);
+            const v = plotValue(row, nearest[1], pane);
             if (v === null) continue;
             const y = pane.Y(v);
             ctx.beginPath();
@@ -3894,10 +4013,24 @@
     if (!near) { D.tip.classList.add('hidden'); return; }
     const rows = [];
     for (const row of visiblePlotRows()) {
-      const v = rowValue(row, near[1]);
+      const pane = (view.panes || []).find((p) => p.rows.includes(row));
+      const v = plotValue(row, near[1], pane);
       if (v === null) continue;
+      const unit = pane && pane.useScale ? String(row.unit || '') : '';
+      let main;
+      if (pane && pane.useScale) {
+        main = fmtPhysical(row, v) + (unit ? ' ' + unit : '');
+      } else {
+        main = fmtTableNum(v);
+        if (isCalibrated(row)) {
+          const cv = convertedValue(row, rawValue(row, near[1]));
+          if (cv !== null) {
+            main += ' <span class="ct-conv">→ ' + esc(fmtTableNum(cv) + (row.unit ? ' ' + row.unit : '')) + '</span>';
+          }
+        }
+      }
       rows.push('<div class="ct-row"><span class="dot" style="background:' + row.color + ';color:' + row.color + '"></span>' +
-        '<span>' + esc(shortName(row.name)) + '</span><span class="v">' + esc(fmtPhysical(row, v)) + '</span></div>');
+        '<span>' + esc(shortName(row.name)) + '</span><span class="v">' + main + '</span></div>');
     }
     const rel = ((t - view.end) / 1000).toFixed(2);
     D.tip.innerHTML = '<div class="ct-time">' + rel + ' s · t=' + (near[0] / 1000).toFixed(2) + ' s</div>' + rows.join('');
@@ -4109,6 +4242,16 @@
       if (f) importProjectFile(f);
       D.projectFile.value = '';
     });
+    $('#btnCalibSelected')?.addEventListener('click', () => {
+      const row = (S.focusId && S.rows.get(S.focusId)) || selectedRows()[0];
+      if (!row) { toast('先添加/选择一行信号', 'err'); return; }
+      openCalibModal(row);
+    });
+    $('#btnCalibClose')?.addEventListener('click', closeCalibModal);
+    $('#btnCalibCancel')?.addEventListener('click', closeCalibModal);
+    $('#btnCalibApply')?.addEventListener('click', applyCalibModal);
+    D.calibModal?.addEventListener('click', (e) => { if (e.target === D.calibModal) closeCalibModal(); });
+
     D.sectionTabs?.querySelectorAll('button[data-sec]').forEach((b) => {
       b.addEventListener('click', () => toggleSection(b.dataset.sec));
     });
@@ -4134,6 +4277,7 @@
       const tag = (e.target?.tagName || '').toLowerCase();
       const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
       if (e.key === 'Escape') {
+        if (D.calibModal && !D.calibModal.classList.contains('hidden')) { closeCalibModal(); return; }
         if (S.ui.drawer) closeDrawer();
         else if (S.ui.log) { S.ui.log = false; D.logPanel.classList.add('hidden'); }
         return;

@@ -173,6 +173,7 @@
           <button data-sec="table" class="active">表</button>
           <button data-sec="write" class="active">写</button>
         </div>
+        <button id="btnCalibSelected" class="btn" title="设置选中行的换算与单位；也可双击左侧行">换算</button>
         <span class="section-hint">点分区标签或 × 快速取消该分区</span>
       </div>
 
@@ -245,6 +246,7 @@
             <span class="vt-c-dot"></span>
             <span>名称</span>
             <span class="num">当前</span>
+            <span class="num">换算值</span>
             <span class="num">最小</span>
             <span class="num">最大</span>
             <span class="num">平均</span>
@@ -370,11 +372,6 @@
     </section>
 
     <section class="drawer-sec">
-      <h3>信号标定 <span class="hint-inline">值 = 原始 × 缩放 + 偏移</span></h3>
-      <div id="calibList" class="calib-list"></div>
-    </section>
-
-    <section class="drawer-sec">
       <h3>符号与录制</h3>
       <div class="axf-import">
         <div class="field"><label>导入 AXF / ELF</label><input id="axfFile" type="file" accept=".axf,.elf"></div>
@@ -398,6 +395,21 @@
 </div>
 
 <datalist id="watchSignals"></datalist>
+<div id="calibModal" class="calib-modal hidden">
+  <div class="calib-card">
+    <div class="calib-head"><b>换算与单位</b><button id="btnCalibClose" class="btn icon" title="关闭">×</button></div>
+    <div class="calib-target" id="calibTarget"></div>
+    <div class="calib-form">
+      <label>比例<input id="calScale" type="number" step="any"></label>
+      <label>偏移<input id="calOffset" type="number" step="any"></label>
+      <label>单位<input id="calUnit" type="text" placeholder="如 V / A / °C"></label>
+      <label>轴<select id="calAxis"><option value="left">左轴</option><option value="right">右轴</option></select></label>
+    </div>
+    <p class="hint">值 = 原始 × 比例 + 偏移。同组波形只要有一个未换算，整组按原始值绘制；鼠标悬浮时换算行会额外显示换算值。</p>
+    <div class="calib-foot"><button id="btnCalibCancel" class="btn">取消</button><button id="btnCalibApply" class="btn primary">应用</button></div>
+  </div>
+</div>
+
 <div id="toasts" class="toasts"></div>
 
 <script src="/app.js"></script>
