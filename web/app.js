@@ -2262,7 +2262,7 @@
       if (!vt) continue;
       let mn = Infinity, mx = -Infinity, sum = 0, n = 0;
       for (let i = range[0]; i < range[1]; i++) {
-        const v = rowValue(row, S.samples[i][1]);
+        const v = rawValue(row, S.samples[i][1]);
         if (v === null || !isFinite(v)) continue;
         if (v < mn) mn = v;
         if (v > mx) mx = v;
