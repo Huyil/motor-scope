@@ -307,6 +307,18 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .at-row.avg .at-idx { color: var(--violet); }
 .at-row.avg .at-val { color: #d5c8ff; }
 .at-note { padding: 4px 7px; font-size: 9px; color: var(--muted2); border-top: 1px solid rgba(27,42,68,.65); }
+.at-actions { display: inline-flex; gap: 2px; justify-content: flex-end; }
+.at-actions button { border: 1px solid var(--line2); background: rgba(16,28,48,.6); color: var(--muted); border-radius: 4px; font-size: 8.5px; line-height: 15px; padding: 0 4px; cursor: pointer; font-family: var(--mono); }
+.at-actions button:hover { color: var(--text); border-color: var(--cyan); }
+.at-actions button.on { color: var(--cyan); border-color: rgba(34,211,238,.55); background: rgba(34,211,238,.12); }
+
+.selected-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 2px 5px; }
+.selected-head .section-hint { font-size: 10px; color: var(--muted2); margin-left: auto; }
+.selected-head .seg button { white-space: nowrap; }
+.section-title { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .04em; white-space: nowrap; }
+.panel-x { border: 1px solid transparent; background: transparent; color: var(--muted2); font-size: 14px; line-height: 1; width: 22px; height: 22px; border-radius: 5px; cursor: pointer; flex: 0 0 auto; }
+.panel-x:hover { color: var(--text); border-color: var(--line2); background: rgba(255,255,255,.04); }
+.section-hidden { display: none !important; }
 
 /* ---------------- write modules ---------------- */
 .write-card {

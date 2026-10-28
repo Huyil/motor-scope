@@ -99,7 +99,7 @@
       <div id="catalogBody" class="catalog-body"></div>
 
       <div class="selected-block">
-        <div class="side-title">波形列表 <span id="selCount" class="badge">0</span></div>
+        <div class="side-title">已选择 <span id="selCount" class="badge">0</span></div>
         <div id="selectedList" class="selected-list"></div>
       </div>
     </aside>
@@ -166,8 +166,19 @@
         </div>
       </section>
 
+      <div id="selectedHead" class="selected-head">
+        <div class="side-title">已选择 <span id="selectedCount" class="badge">0</span></div>
+        <div class="seg small" id="sectionTabs">
+          <button data-sec="chart" class="active">波形</button>
+          <button data-sec="table" class="active">表</button>
+          <button data-sec="write" class="active">写</button>
+        </div>
+        <span class="section-hint">点分区标签或 × 快速取消该分区</span>
+      </div>
+
       <section id="chartCard">
         <div class="chart-toolbar">
+          <span class="section-title">波形</span>
           <div class="legend" id="legend"></div>
           <div class="chart-tools">
             <label class="tool"><span>窗口</span>
@@ -184,6 +195,7 @@
             <label class="tool check"><input type="checkbox" id="gridOn" checked> 网格</label>
             <label class="tool check" title="0 / 中线参考线"><input type="checkbox" id="zeroLine" checked> 0 线</label>
             <label class="tool check" title="余晖 / 荧光渲染（简化后处理）"><input type="checkbox" id="glowOn"> 余晖</label>
+            <button class="panel-x" data-sec-close="chart" title="快速取消波形分区">×</button>
           </div>
         </div>
         <div id="canvasWrap">
@@ -200,8 +212,9 @@
       <div id="panels">
       <section id="writeCard" class="write-card">
         <div class="write-head">
-          <span class="side-title">写入</span>
+          <span class="side-title">写</span>
           <span class="write-hint">在左侧信号行点“写”加入 / 移除</span>
+          <button class="panel-x" data-sec-close="write" title="快速取消写分区">×</button>
           <label class="tool write-size-pick" title="写入窗口尺寸；自动=拉伸填满剩余高度">
             <span>尺寸</span>
             <select id="writeSize">
@@ -222,8 +235,9 @@
       <section id="tableCard" class="value-card">
         <div class="value-head" id="tableHead">
           <button id="btnTableToggle" class="collapse-btn" title="折叠 / 展开数值表" aria-expanded="true">▾</button>
-          <div class="side-title">数值表 <span id="tableCount" class="badge">0</span></div>
+          <div class="side-title">表 · 数值表 <span id="tableCount" class="badge">0</span></div>
           <span class="table-note">只显示“表”打开的项</span>
+          <button class="panel-x" data-sec-close="table" title="快速取消表分区">×</button>
           <span id="tableSum" class="table-sum"></span>
         </div>
         <div class="value-body" id="tableBody">

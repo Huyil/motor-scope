@@ -138,6 +138,7 @@
       connecting: false,
       tableOpen: true,
       topCompact: false,
+      sections: { chart: true, table: true, write: true },
     },
     es: null,
     selRows: new Map(),
@@ -178,6 +179,10 @@
     D.legend = $('#legend');
     D.valueTable = $('#valueTable');
     D.tableCard = $('#tableCard');
+    D.chartCard = $('#chartCard');
+    D.selectedHead = $('#selectedHead');
+    D.sectionTabs = $('#sectionTabs');
+    D.selectedCount = $('#selectedCount');
     D.tableBody = $('#tableBody');
     D.tableCount = $('#tableCount');
     D.tableSum = $('#tableSum');
@@ -383,6 +388,38 @@
     for (const r of S.rows.values()) if (r.table || r.plot) ids.add(r.id);
     for (const v of S.virtuals) if (v.table || v.plot) ids.add(v.id);
     return ids.size;
+  }
+
+  // “已选择”里要同时看到表/波；按 plot 优先、table 补充，去重
+  function selectedRows() {
+    const out = [];
+    const seen = new Set();
+    for (const r of plotRows()) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
+    for (const r of tableRows()) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
+    return out;
+  }
+
+  function syncSections() {
+    const secs = S.ui.sections || (S.ui.sections = { chart: true, table: true, write: true });
+    for (const [key, el] of [['chart', D.chartCard], ['table', D.tableCard], ['write', D.writeCard]]) {
+      if (el) el.classList.toggle('section-hidden', secs[key] === false);
+    }
+    if (D.sectionTabs) {
+      D.sectionTabs.querySelectorAll('button[data-sec]').forEach((b) => {
+        b.classList.toggle('active', secs[b.dataset.sec] !== false);
+        b.setAttribute('aria-pressed', secs[b.dataset.sec] !== false ? 'true' : 'false');
+      });
+    }
+    if (D.selectedCount) D.selectedCount.textContent = String(selectedRows().length);
+  }
+
+  function toggleSection(sec) {
+    if (!sec) return;
+    if (!S.ui.sections) S.ui.sections = { chart: true, table: true, write: true };
+    S.ui.sections[sec] = S.ui.sections[sec] === false;
+    syncSections();
+    saveLocal();
+    if (sec === 'chart' && S.ui.sections.chart) requestAnimationFrame(() => resizeChart());
   }
 
   function normalizeSignal(d) {
@@ -1451,6 +1488,7 @@
     renderWriteMods();
     ensureWaveGroups();
     syncTablePanel();
+    syncSections();
     saveLocal();
     updateProjectUI();
     resizeChart();
@@ -1537,6 +1575,13 @@
         S.glow = !!c.glow;
         S.ui.view = c.view === 'tree' ? 'tree' : 'list';
         S.ui.tableOpen = c.tableOpen !== false;
+        if (c.sections && typeof c.sections === 'object') {
+          S.ui.sections = {
+            chart: c.sections.chart !== false,
+            table: c.sections.table !== false,
+            write: c.sections.write !== false,
+          };
+        }
         if (c.stall) {
           S.stall.enabled = c.stall.enabled !== false;
           S.stall.autoPause = !!c.stall.autoPause;
@@ -1635,6 +1680,7 @@
     syncToggles();
     updateViewSeg();
     syncTablePanel();
+    syncSections();
     if (S.rows.size) sendConfig(true);
   }
 
@@ -1684,6 +1730,7 @@
         glow: S.glow,
         view: S.ui.view,
         tableOpen: S.ui.tableOpen,
+        sections: Object.assign({ chart: true, table: true, write: true }, S.ui.sections || {}),
         stall: {
           enabled: S.stall.enabled,
           autoPause: S.stall.autoPause,
@@ -1782,6 +1829,7 @@
     renderWatchAll();
     renderWriteMods();
     syncTablePanel();
+    syncSections();
     updateProjectUI();
     S.dirty = true;
     scheduleHistoryReload();
@@ -2411,7 +2459,8 @@
     const tab = S.ui.tab;
     const q = S.ui.search.trim().toLowerCase();
     D.sigCount.textContent = String(visibleRowCount());
-    D.selCount.textContent = String(plotRows().length);
+    D.selCount.textContent = String(selectedRows().length);
+    if (D.selectedCount) D.selectedCount.textContent = String(selectedRows().length);
     D.search.placeholder = tab === 'periph' ? '搜索外设 / 寄存器 / 位' : tab === 'custom' ? '自定义地址'
       : tab === 'waves' ? '搜索波形 / 分组' : '搜索变量 / 寄存器 / 地址';
     const viewRow = document.querySelector('.view-row');
@@ -2851,6 +2900,46 @@
     return null;
   }
 
+  function arrayRowFor(entry, create) {
+    let row = S.rows.get(entry.id);
+    if (!row && create) {
+      row = newRow(entry, { table: false, plot: false, support: false });
+      S.rows.set(entry.id, row);
+    }
+    return row;
+  }
+
+  function applyArrayFlags(entries, patch) {
+    for (const entry of entries) {
+      const row = arrayRowFor(entry, patch.table === true || patch.plot === true);
+      if (!row) continue;
+      if (patch.table !== undefined) row.table = !!patch.table;
+      if (patch.plot !== undefined) row.plot = !!patch.plot;
+      if (row.table || row.plot) row.support = false;
+    }
+    afterSignalsChanged();
+  }
+
+  function toggleArrayWrite(entries, on) {
+    if (on) {
+      for (const entry of entries) {
+        if (writeModForRow(entry.id)) continue;
+        const row = arrayRowFor(entry, true);
+        if (!row || !row.addr) continue;
+        S.write.mods.push(makeWriteMod(row));
+      }
+    } else {
+      const ids = new Set(entries.map((e) => e.id));
+      for (const mod of S.write.mods.slice()) {
+        if (!ids.has(mod.rowId)) continue;
+        stopLiveWrite(mod);
+        S.write.mods = S.write.mods.filter((m) => m !== mod);
+      }
+    }
+    ensureWriteMods();
+    afterSignalsChanged();
+  }
+
   function renderArrayTable(node, indices, depth) {
     const entries = arrayEntriesOf(node);
     S.arrayEntries.set(node.full, entries);
@@ -2861,8 +2950,43 @@
     wrap.style.setProperty('--depth', String(depth));
     const head = document.createElement('div');
     head.className = 'at-row at-head';
-    head.innerHTML = '<span class="at-idx">idx</span><span class="at-val">当前值</span><span class="at-tgl">表 / 波</span>';
+    head.innerHTML = '<span class="at-idx">idx</span><span class="at-val">当前值</span>' +
+      '<span class="at-tgl"><span class="at-actions">' +
+      '<button data-arr-all title="全选 / 取消全部元素（表+波）">全选</button>' +
+      '<button data-arr-flag="table" title="全部加入 / 移出数值表">表</button>' +
+      '<button data-arr-flag="plot" title="全部加入 / 移出波形">波</button>' +
+      '<button data-arr-write title="全部加入 / 移出写入">写</button>' +
+      '</span></span>';
     wrap.appendChild(head);
+    const allBtn = head.querySelector('[data-arr-all]');
+    allBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const allOn = entries.every((en) => {
+        const r = S.rows.get(en.id);
+        return r && r.table && r.plot;
+      });
+      applyArrayFlags(entries, { table: !allOn, plot: !allOn });
+      allBtn.classList.toggle('on', !allOn);
+    });
+    head.querySelectorAll('[data-arr-flag]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const flag = btn.dataset.arrFlag;
+        const allOn = entries.every((en) => {
+          const r = S.rows.get(en.id);
+          return r && r[flag];
+        });
+        applyArrayFlags(entries, { [flag]: !allOn });
+        btn.classList.toggle('on', !allOn);
+      });
+    });
+    const writeBtn = head.querySelector('[data-arr-write]');
+    writeBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const allOn = entries.length > 0 && entries.every((en) => !!writeModForRow(en.id));
+      toggleArrayWrite(entries, !allOn);
+      writeBtn.classList.toggle('on', !allOn);
+    });
     for (const i of Array.from(indices.keys()).sort((a, b) => a - b)) {
       const elem = indices.get(i);
       if (!elem || !elem.leaf) continue;
@@ -3057,13 +3181,11 @@
     if (!box) return;
     box.innerHTML = '';
     S.selRows.clear();
-    const rows = plotRows();
+    const rows = selectedRows();
     D.selCount.textContent = String(rows.length);
+    if (D.selectedCount) D.selectedCount.textContent = String(rows.length);
     if (!rows.length) {
-      const empty = tableRows().length
-        ? '数值表里有信号，但“波”都关着'
-        : '把左侧“波”打开，加入波形列表';
-      box.innerHTML = '<div class="cat-empty muted">' + empty + '</div>';
+      box.innerHTML = '<div class="cat-empty muted">把左侧“表”或“波”打开，加入已选择</div>';
       return;
     }
     for (const row of rows) {
@@ -3986,6 +4108,18 @@
       const f = D.projectFile.files && D.projectFile.files[0];
       if (f) importProjectFile(f);
       D.projectFile.value = '';
+    });
+    D.sectionTabs?.querySelectorAll('button[data-sec]').forEach((b) => {
+      b.addEventListener('click', () => toggleSection(b.dataset.sec));
+    });
+    document.querySelectorAll('[data-sec-close]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const sec = b.dataset.secClose;
+        if (!S.ui.sections) S.ui.sections = { chart: true, table: true, write: true };
+        S.ui.sections[sec] = false;
+        syncSections();
+        saveLocal();
+      });
     });
     $('#autoPause').addEventListener('change', (e) => { S.stall.autoPause = e.target.checked; saveLocal(); });
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
