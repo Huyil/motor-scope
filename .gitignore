@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 imports/
+
+# 自带便携 Python (~30MB 二进制): 随目录拷贝/压缩分发, 不进 git.
+# 想让它跟着 git 走就删掉这一行.
+runtime/

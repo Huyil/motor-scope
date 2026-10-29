@@ -70,6 +70,111 @@ def default_unit(name: str) -> str:
     return ""
 
 
+MCU_DIR = os.path.join(WEB_DIR, "mcu")
+MCU_INDEX = os.path.join(MCU_DIR, "index.json")
+CW32_SIGNATURE_ADDR = 0x001007E0   # 16 字节 ASCII 型号
+CW32_SIGNATURE_LEN = 16
+CH32_ESIG_FLASH_ADDR = 0x1FFFF7E0  # 低 16 位 = Flash KB
+CH32_ESIG_UID_ADDR = 0x1FFFF7E8    # 96-bit UID
+CORTEX_M0PLUS_CPUID = 0x410CC601
+
+
+def load_mcu_index() -> Dict[str, Any]:
+    """读 web/mcu/index.json（网页端同一份数据）；缺失/损坏时返回空表。"""
+    try:
+        with open(MCU_INDEX, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("models"), list):
+            return data
+    except Exception:
+        pass
+    return {"schema": 0, "models": []}
+
+
+def _read_bytes(source: Any, addr: int, length: int) -> bytes:
+    buf = bytearray()
+    for off in range(0, length, 4):
+        word = int(source.read_word(addr + off)) & 0xFFFFFFFF
+        buf += word.to_bytes(4, "little")
+    return bytes(buf[:length])
+
+
+def probe_chip(source: Any, index: Dict[str, Any],
+               expected: str = "") -> Optional[Dict[str, Any]]:
+    """按芯片 ID 区识别型号，并与符号表/固件里的型号比对。
+
+    CW32L0x: CPUID=0x410CC601（Cortex-M0+），型号在 0x001007E0 起 16 字节 ASCII。
+    CH32V203: RISC-V，无 Cortex-M CPUID；Flash 容量在 0x1FFFF7E0（KB），
+              UID 在 0x1FFFF7E8。C8/K8 同 die，只能识别到系列。
+    """
+    if source is None or getattr(source, "kind", "none") == "sim":
+        return None
+    expected = str(expected or "").strip()
+    models = index.get("models") or []
+    out: Dict[str, Any] = {
+        "detected": "", "vendor": "", "family": "", "exact": False,
+        "candidates": [], "expected": expected, "match": None,
+        "warning": "", "evidence": {},
+    }
+
+    cpuid = None
+    try:
+        cpuid = int(source.read_word(0xE000ED00)) & 0xFFFFFFFF
+        out["evidence"]["cpuid"] = cpuid
+    except Exception as exc:
+        out["evidence"]["cpuid_error"] = str(exc)
+
+    if cpuid == CORTEX_M0PLUS_CPUID:
+        try:
+            raw = _read_bytes(source, CW32_SIGNATURE_ADDR, CW32_SIGNATURE_LEN)
+            text = raw.split(b"\x00", 1)[0].decode("ascii", "replace").strip()
+            out["evidence"]["cw32_type"] = text
+            if text.upper().startswith("CW32"):
+                out["detected"] = text
+                out["vendor"] = "CW"
+                out["family"] = "CW32L0"
+                out["exact"] = True
+        except Exception as exc:
+            out["evidence"]["cw32_error"] = str(exc)
+    else:
+        try:
+            flash_kb = int(source.read_word(CH32_ESIG_FLASH_ADDR)) & 0xFFFF
+            out["evidence"]["flash_kb"] = flash_kb
+            cands = [m for m in models
+                     if (m.get("identify") or {}).get("kind") == "ch32-esig"
+                     and int(m.get("flash_kb") or 0) == flash_kb]
+            if cands:
+                ident = cands[0].get("identify") or {}
+                out["vendor"] = str(cands[0].get("vendor") or "WCH")
+                out["family"] = str(ident.get("family") or "CH32V203")
+                out["detected"] = out["family"]
+                out["candidates"] = [str(m.get("id")) for m in cands]
+                out["exact"] = len(cands) == 1
+            try:
+                out["evidence"]["uid"] = _read_bytes(source, CH32_ESIG_UID_ADDR, 12).hex()
+            except Exception:
+                pass
+        except Exception as exc:
+            out["evidence"]["ch32_error"] = str(exc)
+
+    if out["detected"] and expected:
+        names = set()
+        for m in models:
+            mid = str(m.get("id") or "")
+            if out["candidates"] and mid not in out["candidates"]:
+                continue
+            names.add(mid.upper())
+            names.update(str(a).upper() for a in (m.get("aliases") or []))
+        match = expected.upper() in names or expected.upper() == out["detected"].upper()
+        if not match and out["family"]:
+            match = expected.upper().startswith(out["family"].upper())
+        out["match"] = bool(match)
+        if not match:
+            out["warning"] = "芯片型号不一致：检测到 %s，符号表/固件为 %s" % (
+                out["detected"], expected)
+    return out
+
+
 PALETTE = [
     "#22d3ee", "#f59e0b", "#a78bfa", "#34d399", "#f472b6",
     "#60a5fa", "#fb7185", "#facc15", "#2dd4bf", "#c084fc",
@@ -751,6 +856,7 @@ class App:
         self.iface_override = args.iface
         self.target_override = args.target
         self.last_connect_error = ""
+        self.chip: Optional[Dict[str, Any]] = None
         self.log: Deque[str] = deque(maxlen=300)
         self._auto_thread: Optional[threading.Thread] = None
         self.load_catalog(auto_regen=True)
@@ -901,6 +1007,7 @@ class App:
         return {
             "version": VERSION,
             "source": info,
+            "chip": self.chip,
             "sampler": self.sampler.status(),
             "record": self.sampler.recorder.info(),
             "catalog": {
@@ -933,9 +1040,37 @@ class App:
             out += self.source.proc.log_tail(80)
         return out
 
+    # ---- 芯片识别 ----
+    def _probe_chip(self, src: Optional[Source] = None) -> Optional[Dict[str, Any]]:
+        src = src if src is not None else self.source
+        if src is None:
+            self.chip = None
+            return None
+        expected = str((self.catalog.get("meta") or {}).get("mcu") or "")
+        try:
+            info = probe_chip(src, load_mcu_index(), expected)
+        except Exception as exc:
+            info = {"detected": "", "expected": expected, "match": None,
+                    "warning": "", "error": str(exc), "evidence": {}}
+        self.chip = info
+        if info:
+            if info.get("warning"):
+                self.add_log(info["warning"])
+            elif info.get("detected"):
+                suffix = "" if info.get("exact") else "（仅识别到系列）"
+                self.add_log("芯片识别: %s%s" % (info["detected"], suffix))
+        return info
+
+    def probe_chip_now(self) -> Dict[str, Any]:
+        if self.source is None:
+            return {"ok": False, "error": "未连接"}
+        info = self._probe_chip()
+        return {"ok": True, "chip": info}
+
     # ---- 连接 ----
     def disconnect(self) -> None:
         src, self.source = self.source, None
+        self.chip = None
         self.sampler.set_source(None)
         if src is not None:
             try:
@@ -953,9 +1088,10 @@ class App:
         if mode == "sim":
             src: Source = SimSource()
             self.source = src
+            self.chip = None
             self.sampler.set_source(src)
             self.add_log("已切换到仿真信号源")
-            return {"ok": True, "source": src.info()}
+            return {"ok": True, "source": src.info(), "chip": None}
 
         if mode == "attach":
             host = str(payload.get("host") or "127.0.0.1")
@@ -964,7 +1100,10 @@ class App:
             try:
                 client.connect()
                 client.install_reader()
-                cpuid = client.read_words(0xE000ED00, 1)[0]
+                try:
+                    cpuid = client.read_words(0xE000ED00, 1)[0]
+                except Exception:
+                    cpuid = None
             except Exception as exc:
                 client.close()
                 self.last_connect_error = str(exc)
@@ -973,8 +1112,10 @@ class App:
             src.cpuid = cpuid  # type: ignore[attr-defined]
             self.source = src
             self.sampler.set_source(src)
-            self.add_log("已连上外部 TCL %s:%d, CPUID=0x%08x" % (host, port, cpuid))
-            return {"ok": True, "source": src.info()}
+            self.add_log("已连上外部 TCL %s:%d, CPUID=%s" % (
+                host, port, "0x%08x" % cpuid if cpuid is not None else "?"))
+            self._probe_chip(src)
+            return {"ok": True, "source": src.info(), "chip": self.chip}
 
         # 本地拉起 openocd
         exe = payload.get("openocd") or self.openocd_override
@@ -1009,7 +1150,8 @@ class App:
         self.source = src
         self.sampler.set_source(src)
         self.add_log("OpenOCD 已连接 (pid=%s, tcl_port=%d)" % (proc.pid, proc.port))
-        return {"ok": True, "source": src.info()}
+        self._probe_chip(src)
+        return {"ok": True, "source": src.info(), "chip": self.chip}
 
     def auto_connect(self) -> None:
         try:
@@ -1280,6 +1422,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "status": self.app.status_payload()})
             if path == "/api/config":
                 return self._json(self.app.apply_config(payload))
+            if path == "/api/chip/probe":
+                return self._json(self.app.probe_chip_now())
             if path == "/api/write":
                 return self._json(self.app.write_value(payload))
             if path == "/api/record":

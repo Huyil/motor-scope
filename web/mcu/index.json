@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "generated_at": "2026-10-29 16:08:12",
+  "models": [
+    {
+      "id": "CW32L010",
+      "aliases": [
+        "CW32L010F8"
+      ],
+      "vendor": "CW",
+      "core": "cortex-m0plus",
+      "flash_kb": 64,
+      "ram_kb": 4,
+      "package": null,
+      "file": "CW32L010.json",
+      "identify": {
+        "kind": "cw32-signature",
+        "type_addr": "0x001007E0",
+        "type_len": 16,
+        "type_ascii": true,
+        "expected_type": "CW32L010",
+        "pin_count_addr": "0x001007D5",
+        "flash_kb_addr": "0x001007D8",
+        "ram_kb_addr": "0x001007D6",
+        "uid_addr": "0x001007B0",
+        "uid_len": 10,
+        "exact": true,
+        "note": "签名区地址沿用 CW32L01x 系统信息区布局; 型号串需上机读 0x001007E0 确认"
+      },
+      "peripheral_count": 24,
+      "register_count": 254,
+      "bitfield_count": 1410
+    },
+    {
+      "id": "CW32L011",
+      "aliases": [
+        "CW32L011K8T6"
+      ],
+      "vendor": "CW",
+      "core": "cortex-m0plus",
+      "flash_kb": 64,
+      "ram_kb": 6,
+      "package": null,
+      "file": "CW32L011.json",
+      "identify": {
+        "kind": "cw32-signature",
+        "type_addr": "0x001007E0",
+        "type_len": 16,
+        "type_ascii": true,
+        "expected_type": "CW32L011",
+        "pin_count_addr": "0x001007D5",
+        "flash_kb_addr": "0x001007D8",
+        "ram_kb_addr": "0x001007D6",
+        "uid_addr": "0x001007B0",
+        "uid_len": 10,
+        "exact": true
+      },
+      "peripheral_count": 27,
+      "register_count": 304,
+      "bitfield_count": 2109
+    },
+    {
+      "id": "CW32L012",
+      "aliases": [
+        "CW32L012C8"
+      ],
+      "vendor": "CW",
+      "core": "cortex-m0plus",
+      "flash_kb": 64,
+      "ram_kb": 8,
+      "package": null,
+      "file": "CW32L012.json",
+      "identify": {
+        "kind": "cw32-signature",
+        "type_addr": "0x001007E0",
+        "type_len": 16,
+        "type_ascii": true,
+        "expected_type": "CW32L012",
+        "pin_count_addr": "0x001007D5",
+        "flash_kb_addr": "0x001007D8",
+        "ram_kb_addr": "0x001007D6",
+        "uid_addr": "0x001007B0",
+        "uid_len": 10,
+        "exact": true,
+        "note": "签名区地址按 CW32L01x 系统信息区布局 (DR2159 工具链文档 §2.4); 未逐型号上机验证"
+      },
+      "peripheral_count": 50,
+      "register_count": 562,
+      "bitfield_count": 3680
+    },
+    {
+      "id": "CH32V203C8T6",
+      "aliases": [],
+      "vendor": "WCH",
+      "core": "riscv32",
+      "flash_kb": 64,
+      "ram_kb": 20,
+      "package": "LQFP48",
+      "file": "CH32V203C8T6.json",
+      "identify": {
+        "kind": "ch32-esig",
+        "family": "CH32V203",
+        "flash_kb_addr": "0x1FFFF7E0",
+        "flash_kb": 64,
+        "uid_addr": "0x1FFFF7E8",
+        "uid_len": 12,
+        "exact": false,
+        "note": "ESIG 只有 Flash 容量 (R16_ESIG_FLACAP.F_SIZE) 与 96-bit UID, 没有型号字符串/封装/引脚数; C8T6 与 K8T6 同 die 同为 64KB, ESIG 无法区分",
+        "source": "CH32FV2x_V3xRM V2.5 §31.2, p.527 (PDF p.530-531)"
+      },
+      "peripheral_count": 51,
+      "register_count": 1090,
+      "bitfield_count": 5764
+    },
+    {
+      "id": "CH32V203K8T6",
+      "aliases": [],
+      "vendor": "WCH",
+      "core": "riscv32",
+      "flash_kb": 64,
+      "ram_kb": 20,
+      "package": "LQFP32",
+      "file": "CH32V203K8T6.json",
+      "identify": {
+        "kind": "ch32-esig",
+        "family": "CH32V203",
+        "flash_kb_addr": "0x1FFFF7E0",
+        "flash_kb": 64,
+        "uid_addr": "0x1FFFF7E8",
+        "uid_len": 12,
+        "exact": false,
+        "note": "ESIG 只有 Flash 容量 (R16_ESIG_FLACAP.F_SIZE) 与 96-bit UID, 没有型号字符串/封装/引脚数; C8T6 与 K8T6 同 die 同为 64KB, ESIG 无法区分",
+        "source": "CH32FV2x_V3xRM V2.5 §31.2, p.527 (PDF p.530-531)"
+      },
+      "peripheral_count": 51,
+      "register_count": 1090,
+      "bitfield_count": 5764
+    }
+  ]
+}

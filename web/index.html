@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MotorScope · DR2159</title>
+<title>MotorScope</title>
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1220'/%3E%3Cpath d='M3 18h6l2-8 4 14 3-10 2 4h9' fill='none' stroke='%2322d3ee' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 </head>
@@ -17,20 +17,11 @@
       </svg>
       <div class="brand-text">
         <b>MOTOR<span>SCOPE</span></b>
-        <small>DR2159 · CW32L011</small>
+        <small id="brandSub">通用波形台</small>
       </div>
     </div>
 
-    <div class="project-pick" title="工程存档（自动保存到浏览器）">
-      <span>工程</span>
-      <select id="projectSel"></select>
-    </div>
-
     <div class="top-actions" id="topActions">
-      <button id="btnConnect" class="btn primary" title="连接 / 切换信号源" aria-label="连接 / 切换信号源">
-        <svg viewBox="0 0 24 24"><path d="M9 7V3m6 4V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v4"/></svg>
-        <span class="btn-label">连接</span>
-      </button>
       <button id="btnPause" class="btn" title="暂停 / 继续 (空格)" aria-label="暂停 / 继续">
         <svg viewBox="0 0 24 24" class="ico-pause"><path d="M8 5h3v14H8zM13 5h3v14h-3z"/></svg>
         <svg viewBox="0 0 24 24" class="ico-play hidden"><path d="M8 5l12 7-12 7z"/></svg>
@@ -61,7 +52,7 @@
       </button>
     </div>
 
-    <div id="connPill" class="conn-pill" title="SWD 总线占用：调试器正在使用 SWD 读取目标内存">
+    <div id="connPill" class="conn-pill" title="SWD / SDI 总线占用：调试器正在读取目标内存">
       <span class="dot"></span>
       <span id="connText">未连接</span>
       <span id="connRate" class="sep">-- Hz</span>
@@ -106,75 +97,38 @@
 
     <main id="main">
       <section id="hero">
-        <div class="metric watch-card" id="mCurrent" data-watch="w1">
-          <button class="metric-edit" data-watch-edit="w1" title="编辑监视卡片：名称 / 寄存器地址" aria-label="编辑监视卡片">⋯</button>
-          <label class="watch-title">电机电流</label>
-          <div class="metric-value"><strong class="watch-val">--</strong><span class="watch-unit">counts</span></div>
-          <small class="watch-src">motor.over.current</small>
-          <div class="bar watch-bar"><i></i></div>
-          <div class="watch-editor hidden">
-            <div class="we-title">监视卡片</div>
-            <label class="we-field"><span>名称</span><input class="we-name" maxlength="24" placeholder="显示名称"></label>
-            <label class="we-field"><span>目标</span><input class="we-target" list="watchSignals" placeholder="信号名 / 0x20000352"></label>
-            <div class="we-line">
-              <label class="we-field we-size-field"><span>宽度</span><select class="we-size"><option value="1">1 B</option><option value="2" selected>2 B</option><option value="4">4 B</option></select></label>
-              <label class="check"><input type="checkbox" class="we-signed"> 有符号</label>
-              <label class="check"><input type="checkbox" class="we-margin"> 余量</label>
-            </div>
-            <div class="we-actions"><button class="btn primary we-apply">应用</button><button class="btn we-cancel">取消</button></div>
-          </div>
+        <div class="metric ctl-card" id="cardProject" data-go="project" role="button" tabindex="0" title="切换 / 管理工程">
+          <span class="ctl-head"><span class="ctl-kicker">工程</span><span class="ctl-go">›</span></span>
+          <strong class="ctl-val" id="cardProjectVal">默认</strong>
+          <small class="ctl-sub" id="cardProjectSub">自动保存到浏览器</small>
         </div>
-        <div class="metric watch-card" id="mThreshold" data-watch="w2">
-          <button class="metric-edit" data-watch-edit="w2" title="编辑监视卡片：名称 / 寄存器地址" aria-label="编辑监视卡片">⋯</button>
-          <label class="watch-title">堵转阈值</label>
-          <div class="metric-value"><strong class="watch-val">--</strong><span class="watch-unit">counts</span></div>
-          <small class="watch-src">motor.over.thresholdLast</small>
-          <div class="bar watch-bar"><i></i></div>
-          <div class="watch-editor hidden">
-            <div class="we-title">监视卡片</div>
-            <label class="we-field"><span>名称</span><input class="we-name" maxlength="24" placeholder="显示名称"></label>
-            <label class="we-field"><span>目标</span><input class="we-target" list="watchSignals" placeholder="信号名 / 0x20000352"></label>
-            <div class="we-line">
-              <label class="we-field we-size-field"><span>宽度</span><select class="we-size"><option value="1">1 B</option><option value="2" selected>2 B</option><option value="4">4 B</option></select></label>
-              <label class="check"><input type="checkbox" class="we-signed"> 有符号</label>
-              <label class="check"><input type="checkbox" class="we-margin"> 余量</label>
-            </div>
-            <div class="we-actions"><button class="btn primary we-apply">应用</button><button class="btn we-cancel">取消</button></div>
-          </div>
+
+        <div class="metric ctl-card" id="cardSymbol" data-go="symbol" role="button" tabindex="0" title="芯片型号 / 符号表">
+          <span class="ctl-head"><span class="ctl-kicker">符号</span><span class="ctl-go">›</span></span>
+          <strong class="ctl-val" id="cardSymbolVal">—</strong>
+          <small class="ctl-sub" id="cardSymbolSub">导入 AXF / 选择型号</small>
         </div>
-        <div class="metric watch-card" id="mMargin" data-watch="w3">
-          <button class="metric-edit" data-watch-edit="w3" title="编辑监视卡片：名称 / 寄存器地址" aria-label="编辑监视卡片">⋯</button>
-          <label class="watch-title">余量</label>
-          <div class="metric-value"><strong class="watch-val">--</strong><span class="watch-unit">counts</span></div>
-          <small class="watch-src">阈值 − 电流（内置）</small>
-          <div class="bar watch-bar"><i></i></div>
-          <div class="watch-editor hidden">
-            <div class="we-title">监视卡片</div>
-            <label class="we-field"><span>名称</span><input class="we-name" maxlength="24" placeholder="显示名称"></label>
-            <label class="we-field"><span>目标</span><input class="we-target" list="watchSignals" placeholder="信号名 / 0x20000352"></label>
-            <div class="we-line">
-              <label class="we-field we-size-field"><span>宽度</span><select class="we-size"><option value="1">1 B</option><option value="2" selected>2 B</option><option value="4">4 B</option></select></label>
-              <label class="check"><input type="checkbox" class="we-signed"> 有符号</label>
-              <label class="check"><input type="checkbox" class="we-margin"> 余量</label>
-            </div>
-            <div class="we-actions"><button class="btn primary we-apply">应用</button><button class="btn we-cancel">取消</button></div>
-          </div>
+
+        <div class="metric ctl-card" id="cardSource" data-go="source" role="button" tabindex="0" title="选择并连接信号源">
+          <span class="ctl-head"><span class="ctl-kicker">信号源</span>
+            <button id="btnSourceToggle" class="ctl-action" type="button" title="连接 / 断开（再次按下释放调试器）">连接</button>
+          </span>
+          <strong class="ctl-val" id="cardSourceVal">未连接</strong>
+          <small class="ctl-sub" id="cardSourceSub">OpenOCD / TCL / 仿真</small>
         </div>
-        <div class="stall-card" id="stallCard">
-          <div class="stall-top"><span class="stall-dot"></span><b id="stallText">安全</b><span id="stallCount" class="stall-count">0 次</span></div>
-          <div class="stall-sub" id="stallSub">未达到堵转阈值</div>
+
+        <div class="metric ctl-card" id="cardRate" data-go="rate" role="button" tabindex="0" title="采样率">
+          <span class="ctl-head"><span class="ctl-kicker">采样率</span><span class="ctl-go">›</span></span>
+          <strong class="ctl-val" id="cardRateVal">100 <i>Hz</i></strong>
+          <small class="ctl-sub" id="cardRateSub">实际 --</small>
+          <span class="ctl-bar"><i id="cardRateBar"></i><em id="cardRateBarText">0%</em></span>
         </div>
       </section>
 
-      <div id="selectedHead" class="selected-head">
-        <div class="side-title">已选择 <span id="selectedCount" class="badge">0</span></div>
-        <div class="seg small" id="sectionTabs">
-          <button data-sec="chart" class="active">波形</button>
-          <button data-sec="table" class="active">表</button>
-          <button data-sec="write" class="active">写</button>
-        </div>
-        <button id="btnCalibSelected" class="btn" title="设置选中行的换算与单位；也可双击左侧行">换算</button>
-        <span class="section-hint">点分区标签或 × 快速取消该分区</span>
+      <div id="chipBanner" class="chip-banner hidden">
+        <span class="chip-dot"></span>
+        <span id="chipBannerText"></span>
+        <button id="btnChipBannerFix" class="link">查看</button>
       </div>
 
       <section id="chartCard">
@@ -202,10 +156,9 @@
         <div id="canvasWrap">
           <canvas id="chart"></canvas>
           <div id="cursorTip" class="cursor-tip hidden"></div>
-          <div id="stallRibbon" class="stall-ribbon hidden"><span>STALL</span><b id="stallRibbonText"></b></div>
           <div id="emptyHint" class="empty-hint">
             <div>还没有信号</div>
-            <small>在左侧把“波”打开，或点击“连接”</small>
+            <small>在左侧把“波”打开，或点击顶部“信号源”</small>
           </div>
         </div>
       </section>
@@ -276,12 +229,12 @@
       <svg viewBox="0 0 48 48"><path d="M6 28h9l3-13 6 22 4.5-15 3 6H42" fill="none" stroke="#22d3ee" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </div>
     <h2>连接目标</h2>
-    <p class="muted">通过 H7-TOOL / CMSIS-DAP 活体读取 <code>motor.over.current</code>、<code>motor.over.thresholdLast</code> 等变量，不暂停电机。</p>
+    <p class="muted">活体读取目标内存，不暂停 CPU。连接后会读取芯片 ID，自动识别型号并与符号表比对。</p>
     <div class="overlay-actions">
       <button id="btnQuickConnect" class="btn primary big">连接 OpenOCD</button>
       <button id="btnQuickSim" class="btn big">先看仿真</button>
     </div>
-    <p id="overlayHint" class="overlay-hint">将自动寻找 <code>tools/openocd</code>，启动 tcl_port 并读 CPUID 握手。</p>
+    <p id="overlayHint" class="overlay-hint">将自动寻找 OpenOCD，启动 tcl_port 并读芯片签名。</p>
     <button id="btnOverlayAdvanced" class="link">高级设置（路径 / 附加已有 TCL 端口）</button>
   </div>
 </div>
@@ -294,7 +247,7 @@
     <button id="btnDrawerClose" class="btn icon" title="关闭">×</button>
   </div>
   <div class="drawer-body">
-    <section class="drawer-sec">
+    <section class="drawer-sec" id="secProject">
       <h3>工程</h3>
       <div class="row2">
         <select id="projectSel2"></select>
@@ -312,7 +265,7 @@
       <p class="hint" id="projectState">自动保存到浏览器 localStorage</p>
     </section>
 
-    <section class="drawer-sec">
+    <section class="drawer-sec" id="secSource">
       <h3>信号源</h3>
       <div class="seg" id="srcSeg">
         <button data-mode="openocd" class="active">OpenOCD</button>
@@ -334,10 +287,11 @@
         <button id="btnDoConnect" class="btn primary">连接</button>
         <button id="btnDisconnect" class="btn">断开</button>
       </div>
-      <p class="hint" id="srcHint">启动 openocd.exe（tcl_port 自动选空闲端口），读 CPUID 0x410CC601 握手。</p>
+      <p class="hint" id="srcHint">启动 openocd.exe（tcl_port 自动选空闲端口），连接后读芯片 ID 自动识别型号。</p>
+      <div class="chip-line" id="chipLine">芯片：未识别</div>
     </section>
 
-    <section class="drawer-sec">
+    <section class="drawer-sec" id="secRate">
       <h3>采样</h3>
       <div class="row2">
         <div class="field"><label>频率</label>
@@ -359,23 +313,23 @@
           </select>
         </div>
       </div>
-      <p class="hint">读 1~2 个连续区域，100 Hz 在 4 MHz SWD 下通常能跑满；读不动就降到 50 Hz。</p>
+      <p class="hint">顶部采样率卡片底部进度条显示“实际 / 目标”。读不动就降到 50 Hz。</p>
     </section>
 
-    <section class="drawer-sec">
-      <h3>堵转判定</h3>
-      <div class="field"><label>电流信号</label><select id="curSel"></select></div>
-      <div class="field"><label>阈值信号</label><select id="thrSel"></select></div>
-      <label class="check"><input type="checkbox" id="stallEnable" checked> 启用判定（current ≥ thresholdLast）</label>
-      <label class="check"><input type="checkbox" id="autoPause"> 触发时自动暂停</label>
-      <p class="hint">阈值信号建议用 <code>motor.over.thresholdLast</code>——它是固件扣除自适应 offset 后的实际判决门限。</p>
-    </section>
-
-    <section class="drawer-sec">
-      <h3>符号与录制</h3>
+    <section class="drawer-sec" id="secSymbol">
+      <h3>符号与芯片</h3>
+      <div class="field">
+        <label>芯片型号（寄存器模板）</label>
+        <div class="row2">
+          <select id="mcuSel"></select>
+          <button id="btnChipProbe" class="btn">重新识别</button>
+        </div>
+      </div>
+      <div id="chipWarn" class="chip-warn hidden"></div>
+      <div id="chipInfo" class="hint">连接后自动读取芯片 ID；也可以手动选型号。</div>
       <div class="axf-import">
         <div class="field"><label>导入 AXF / ELF</label><input id="axfFile" type="file" accept=".axf,.elf"></div>
-        <div class="field"><label>同时导入 cw32l011.h（可选）</label><input id="hdrFile" type="file" accept=".h,.hpp"></div>
+        <div class="field"><label>同时导入头文件（可选）</label><input id="hdrFile" type="file" accept=".h,.hpp"></div>
         <button id="btnImportAxf" class="btn primary">导入并重建符号</button>
         <p class="hint">AXF 提供变量/地址；头文件提供外设寄存器基址。导入后当前通道按名字重新解析地址。</p>
       </div>
@@ -394,7 +348,6 @@
   <pre id="logText"></pre>
 </div>
 
-<datalist id="watchSignals"></datalist>
 <div id="calibModal" class="calib-modal hidden">
   <div class="calib-card">
     <div class="calib-head"><b>换算与单位</b><button id="btnCalibClose" class="btn icon" title="关闭">×</button></div>
@@ -405,7 +358,7 @@
       <label>单位<input id="calUnit" type="text" placeholder="如 V / A / °C"></label>
       <label>轴<select id="calAxis"><option value="left">左轴</option><option value="right">右轴</option></select></label>
     </div>
-    <p class="hint">值 = 原始 × 比例 + 偏移。同组波形只要有一个未换算，整组按原始值绘制；鼠标悬浮时换算行会额外显示换算值。</p>
+    <p class="hint">值 = 原始 × 比例 + 偏移。同组波形只要有一个未换算，整组按原始值绘制；鼠标悬浮时换算行会额外显示换算值。提示：右键图例里变暗的通道也能打开这里。</p>
     <div class="calib-foot"><button id="btnCalibCancel" class="btn">取消</button><button id="btnCalibApply" class="btn primary">应用</button></div>
   </div>
 </div>

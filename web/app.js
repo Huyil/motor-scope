@@ -82,12 +82,13 @@
     gridOn: true,
     zeroLine: true,
     glow: false,
-    // 顶部 3 张可配置监视卡片；mode='margin' 时是内置“阈值-电流”
-    watch: [
-      { key: 'w1', title: '电机电流', mode: 'value', signal: 'motor.over.current', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: 'motor.over.current' },
-      { key: 'w2', title: '堵转阈值', mode: 'value', signal: 'motor.over.thresholdLast', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: 'motor.over.thresholdLast' },
-      { key: 'w3', title: '余量', mode: 'margin', signal: '', addr: 0, size: 2, signed: false, bit: null, unit: 'counts', rowId: '' },
-    ],
+    // 芯片型号 / 寄存器模板（与后端识别结果共用 web/mcu/index.json）
+    chip: null,
+    lastMode: 'openocd',
+    mcu: {
+      models: [], active: '', detected: '', candidates: [], exact: false,
+      expected: '', match: null, warning: '', loaded: false, periphs: [], manual: false,
+    },
     // 波形分组：默认分组内每路独立轴；拖入自定义组则共享轴
     wave: {
       groups: [{ id: 'default', name: '默认分组', visible: true, auto: true }],
@@ -113,17 +114,6 @@
     hoverX: null,
     view: null,
     size: { w: 0, h: 0 },
-    stall: {
-      enabled: true,
-      currentId: '',
-      thresholdId: '',
-      autoPause: false,
-      active: false,
-      since: 0,
-      count: 0,
-      lastDuration: 0,
-      events: [],
-    },
     ui: {
       tab: 'vars',
       view: 'list',
@@ -180,9 +170,6 @@
     D.valueTable = $('#valueTable');
     D.tableCard = $('#tableCard');
     D.chartCard = $('#chartCard');
-    D.selectedHead = $('#selectedHead');
-    D.sectionTabs = $('#sectionTabs');
-    D.selectedCount = $('#selectedCount');
     D.tableBody = $('#tableBody');
     D.tableCount = $('#tableCount');
     D.tableSum = $('#tableSum');
@@ -195,15 +182,6 @@
     D.wrap = $('#canvasWrap');
     D.tip = $('#cursorTip');
     D.empty = $('#emptyHint');
-    D.ribbon = $('#stallRibbon');
-    D.ribbonText = $('#stallRibbonText');
-    D.mCurrent = $('#mCurrent');
-    D.watchCards = { w1: $('#mCurrent'), w2: $('#mThreshold'), w3: $('#mMargin') };
-    D.watchSignals = $('#watchSignals');
-    D.stallCard = $('#stallCard');
-    D.stallText = $('#stallText');
-    D.stallSub = $('#stallSub');
-    D.stallCount = $('#stallCount');
     D.statSamples = $('#statSamples');
     D.statRate = $('#statRate');
     D.statLatency = $('#statLatency');
@@ -211,16 +189,31 @@
     D.statMsg = $('#statMsg');
     D.drawer = $('#drawer');
     D.drawerBackdrop = $('#drawerBackdrop');
-    D.calibList = $('#calibList');
     D.calibModal = $('#calibModal');
     D.calibTarget = $('#calibTarget');
     D.calScale = $('#calScale');
     D.calOffset = $('#calOffset');
     D.calUnit = $('#calUnit');
     D.calAxis = $('#calAxis');
-    D.curSel = $('#curSel');
-    D.thrSel = $('#thrSel');
     D.catalogMeta = $('#catalogMeta');
+    D.mcuSel = $('#mcuSel');
+    D.chipWarn = $('#chipWarn');
+    D.chipInfo = $('#chipInfo');
+    D.chipLine = $('#chipLine');
+    D.chipBanner = $('#chipBanner');
+    D.chipBannerText = $('#chipBannerText');
+    D.brandSub = $('#brandSub');
+    D.cardProjectVal = $('#cardProjectVal');
+    D.cardProjectSub = $('#cardProjectSub');
+    D.cardSymbolVal = $('#cardSymbolVal');
+    D.cardSymbolSub = $('#cardSymbolSub');
+    D.cardSourceVal = $('#cardSourceVal');
+    D.btnSourceToggle = $('#btnSourceToggle');
+    D.cardSourceSub = $('#cardSourceSub');
+    D.cardRateVal = $('#cardRateVal');
+    D.cardRateSub = $('#cardRateSub');
+    D.cardRateBar = $('#cardRateBar');
+    D.cardRateBarText = $('#cardRateBarText');
     D.axfFile = $('#axfFile');
     D.hdrFile = $('#hdrFile');
     D.btnImportAxf = $('#btnImportAxf');
@@ -238,7 +231,6 @@
     D.logText = $('#logText');
     D.btnRecord = $('#btnRecord');
     D.btnPause = $('#btnPause');
-    D.btnConnect = $('#btnConnect');
     D.srcHint = $('#srcHint');
     D.rateSel = $('#rateSel');
     D.winSel = $('#winSel');
@@ -256,6 +248,20 @@
     buildIndex();
   }
 
+  // 外设列表：AXF 里解析出的优先；缺失的型号用 web/mcu 模板补齐。
+  function peripheralList() {
+    const base = S.catalog.peripherals || [];
+    const tpl = S.mcu.periphs || [];
+    if (!tpl.length) return base;
+    const meta = String(S.catalog.meta?.mcu || '').toUpperCase();
+    const active = String(S.mcu.active || '').toUpperCase();
+    // 型号和符号表不是同一家族时，别把两边的外设混在一起
+    if (meta && active && meta.slice(0, 6) !== active.slice(0, 6)) return tpl;
+    const have = new Set(base.map((p) => p.name));
+    const extra = tpl.filter((p) => !have.has(p.name));
+    return extra.length ? base.concat(extra) : base;
+  }
+
   function buildIndex() {
     S.index.clear();
     for (const v of S.catalog.variables || []) {
@@ -264,7 +270,7 @@
         group: v.group || '', bit: v.bit || null,
       });
     }
-    for (const p of S.catalog.peripherals || []) {
+    for (const p of peripheralList()) {
       for (const r of p.regs || []) {
         const rid = p.name + '.' + r.name;
         S.index.set(rid, {
@@ -282,7 +288,194 @@
         }
       }
     }
-    renderWatchDatalist();
+  }
+
+  // ---------------------------------------------------------------- MCU / 芯片
+  async function loadMcuIndex() {
+    try {
+      const data = await fetchJSON('/mcu/index.json');
+      S.mcu.models = Array.isArray(data.models) ? data.models : [];
+      S.mcu.loaded = true;
+    } catch (e) {
+      S.mcu.models = [];
+      S.mcu.loaded = false;
+    }
+    if (D.mcuSel) {
+      D.mcuSel.innerHTML = '';
+      for (const m of S.mcu.models) {
+        const o = document.createElement('option');
+        o.value = m.id;
+        o.textContent = m.id + (m.package ? ' · ' + m.package : '');
+        D.mcuSel.appendChild(o);
+      }
+    }
+    S.mcu.expected = String(S.catalog.meta?.mcu || '');
+    const snap = currentSnapshot();
+    const want = [snap.mcu, S.mcu.expected].find((id) => S.mcu.models.some((m) => m.id === id));
+    if (want) await selectMcu(want);
+    else renderCards();
+  }
+
+  let mcuReq = 0;
+  async function selectMcu(id, manual = false) {
+    const m = S.mcu.models.find((x) => x.id === id);
+    if (!m) return;
+    S.mcu.active = id;
+    if (manual) S.mcu.manual = true;
+    if (D.mcuSel && D.mcuSel.value !== id) D.mcuSel.value = id;
+    if (!m.file) { renderCards(); return; }
+    const req = ++mcuReq;
+    try {
+      const t = await fetchJSON('/mcu/' + m.file);
+      if (req !== mcuReq) return;
+      S.mcu.periphs = Array.isArray(t.peripherals) ? t.peripherals : [];
+    } catch (e) {
+      if (req !== mcuReq) return;
+      S.mcu.periphs = [];
+    }
+    buildIndex();
+    renderCatalog();
+    renderCards();
+  }
+
+  function applyChip(chip) {
+    S.chip = chip || null;
+    const c = chip || {};
+    S.mcu.detected = c.detected || '';
+    S.mcu.candidates = Array.isArray(c.candidates) ? c.candidates : [];
+    S.mcu.exact = !!c.exact;
+    if (c.expected) S.mcu.expected = c.expected;
+    S.mcu.match = c.match == null ? null : !!c.match;
+    S.mcu.warning = c.warning || '';
+    if (S.mcu.detected) {
+      const cands = S.mcu.candidates;
+      let pick = '';
+      if (cands.includes(S.mcu.expected)) pick = S.mcu.expected;
+      else if (cands.length) pick = cands[0];
+      else pick = S.mcu.detected;
+      if (pick) selectMcu(pick);
+    }
+    renderChipUI();
+    renderCards();
+    if (S.mcu.warning && S.lastChipWarning !== S.mcu.warning) {
+      S.lastChipWarning = S.mcu.warning;
+      toast(S.mcu.warning, 'err');
+    }
+    if (!S.mcu.warning) S.lastChipWarning = '';
+  }
+
+  async function probeChipNow() {
+    try {
+      const r = await post('/api/chip/probe', {});
+      if (!r.ok) throw new Error(r.error || '识别失败');
+      S.lastChipKey = r.chip ? JSON.stringify(r.chip) : '';
+      applyChip(r.chip);
+      toast(r.chip?.detected ? '识别到 ' + r.chip.detected : '未识别到芯片型号',
+        r.chip?.detected ? 'ok' : 'err');
+    } catch (e) {
+      toast('芯片识别失败: ' + e.message, 'err');
+    }
+  }
+
+  function renderChipUI() {
+    const c = S.chip;
+    const det = c?.detected || '';
+    const exp = S.mcu.expected || '';
+    const cands = (c?.candidates || []).join(' / ');
+    if (D.chipLine) {
+      D.chipLine.textContent = det ? '芯片：' + det + (c.exact ? '' : '（系列）') : '芯片：未识别';
+    }
+    if (D.chipInfo) {
+      if (!c) {
+        D.chipInfo.textContent = '连接后自动读取芯片 ID；也可以手动选型号。';
+      } else {
+        D.chipInfo.textContent = '检测：' + (det || '未识别') +
+          (c.exact ? '' : '（系列）') +
+          ' · 符号表：' + (exp || '未标注') +
+          (cands ? ' · 候选：' + cands : '') +
+          (c.evidence?.flash_kb ? ' · Flash ' + c.evidence.flash_kb + ' KB' : '');
+      }
+    }
+    if (D.chipWarn) {
+      D.chipWarn.classList.toggle('hidden', !S.mcu.warning);
+      D.chipWarn.textContent = S.mcu.warning || '';
+    }
+    if (D.chipBanner) {
+      D.chipBanner.classList.toggle('hidden', !S.mcu.warning);
+      if (D.chipBannerText) D.chipBannerText.textContent = S.mcu.warning || '';
+    }
+    if (D.brandSub) {
+      D.brandSub.textContent = [S.mcu.active || S.mcu.expected, det && det !== (S.mcu.active || S.mcu.expected) ? '检测 ' + det : '']
+        .filter(Boolean).join(' · ') || '通用波形台';
+    }
+  }
+
+  function renderCards() {
+    const p = readProjects();
+    if (D.cardProjectVal) D.cardProjectVal.textContent = p.active || '默认';
+    if (D.cardProjectSub) {
+      D.cardProjectSub.textContent = S.projectSavedAt
+        ? '已保存 ' + new Date(S.projectSavedAt).toLocaleTimeString('zh-CN', { hour12: false })
+        : '自动保存到浏览器';
+    }
+
+    const model = S.mcu.active || S.mcu.expected || '';
+    if (D.cardSymbolVal) D.cardSymbolVal.textContent = model || '—';
+    if (D.cardSymbolSub) {
+      const vars = (S.catalog.variables || []).length;
+      const periphs = peripheralList().length;
+      const bits = [];
+      if (vars) bits.push(vars + ' 变量');
+      if (periphs) bits.push(periphs + ' 外设');
+      if (S.mcu.detected) bits.push('检测 ' + S.mcu.detected);
+      D.cardSymbolSub.textContent = bits.join(' · ') || '导入 AXF / 选择型号';
+      D.cardSymbolSub.classList.toggle('warn', !!S.mcu.warning);
+    }
+
+    const kind = S.source?.kind || 'none';
+    const connected = sourceConnected(S.source) && !S.sampler?.error;
+    const srcLabel = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '未连接';
+    if (D.cardSourceVal) {
+      D.cardSourceVal.textContent = connected ? srcLabel : (kind === 'none' ? '未连接' : srcLabel + '（断开）');
+    }
+    if (D.cardSourceSub) {
+      const chip = S.mcu.detected || S.mcu.expected || '';
+      D.cardSourceSub.textContent = connected
+        ? (chip ? '已连接 · ' + chip : '已连接')
+        : 'OpenOCD / TCL / 仿真';
+      D.cardSourceSub.classList.toggle('warn', !!S.sampler?.error);
+    }
+    if (D.btnSourceToggle) {
+      D.btnSourceToggle.textContent = connected ? '断开' : '连接';
+      D.btnSourceToggle.classList.toggle('on', !!connected);
+      D.btnSourceToggle.title = connected
+        ? '再次按下断开，释放 HID / SWD，可切给 MRS、Keil 等工具'
+        : '连接当前信号源';
+    }
+
+    const target = Number(S.rate) || 0;
+    const actual = Number(S.sampler?.rate_actual) || 0;
+    if (D.cardRateVal) D.cardRateVal.innerHTML = target + ' <i>Hz</i>';
+    if (D.cardRateSub) D.cardRateSub.textContent = connected ? '实际 ' + actual.toFixed(1) + ' Hz' : '实际 --';
+    const pct = (connected && target > 0)
+      ? Math.max(0, Math.min(100, actual / target * 100)) : 0;
+    if (D.cardRateBar) D.cardRateBar.style.width = pct.toFixed(1) + '%';
+    if (D.cardRateBarText) D.cardRateBarText.textContent = connected ? actual.toFixed(0) + ' Hz' : '0%';
+  }
+
+  // 按 id 或名字找目录项（写入模块重绑地址、导入 AXF 后重解析都用到）
+  function catalogEntryFor(id, name) {
+    let e = id ? S.index.get(id) : null;
+    if (e) return e;
+    const n = String(name || '').trim();
+    if (!n) return null;
+    e = S.index.get(n);
+    if (e) return e;
+    const low = n.toLowerCase();
+    for (const x of S.index.values()) {
+      if ((x.name || '').toLowerCase() === low || (x.id || '').toLowerCase() === low) return x;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------- rows / channels
@@ -410,13 +603,6 @@
     for (const [key, el] of [['chart', D.chartCard], ['table', D.tableCard], ['write', D.writeCard]]) {
       if (el) el.classList.toggle('section-hidden', secs[key] === false);
     }
-    if (D.sectionTabs) {
-      D.sectionTabs.querySelectorAll('button[data-sec]').forEach((b) => {
-        b.classList.toggle('active', secs[b.dataset.sec] !== false);
-        b.setAttribute('aria-pressed', secs[b.dataset.sec] !== false ? 'true' : 'false');
-      });
-    }
-    if (D.selectedCount) D.selectedCount.textContent = String(selectedRows().length);
   }
 
   function toggleSection(sec) {
@@ -681,9 +867,8 @@
     const need = new Set();
     for (const r of S.rows.values()) if (r.table || r.plot) need.add(r.id);
     for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
-    // 写入模块 / 监视卡片即使不在表/波形里，也要采样，才能显示当前值和回读
+    // 写入模块即使不在表/波形里，也要采样，才能显示当前值和回读
     for (const m of S.write.mods) if (m.rowId && S.rows.has(m.rowId)) need.add(m.rowId);
-    for (const c of S.watch) if (c.mode === 'value' && c.rowId && S.rows.has(c.rowId)) need.add(c.rowId);
     const next = [];
     for (const r of S.rows.values()) if (need.has(r.id)) next.push(r);
     S.signals = next;
@@ -714,280 +899,7 @@
       S.lastChannelKey = after;
       scheduleHistoryReload();
       S.dirty = true;
-      if (!byId(S.stall.currentId) || !byId(S.stall.thresholdId)) {
-        S.stall.active = false;
-        updateStallUI(S.lastT);
-      }
     }
-  }
-
-  // ---------------------------------------------------------------- 监视卡片
-  function watchCard(key) { return S.watch.find((c) => c.key === key) || null; }
-  function watchRow(card) { return card && card.rowId ? S.rows.get(card.rowId) : null; }
-  function watchSourceText(row) {
-    if (!row) return '';
-    const bit = Array.isArray(row.bit)
-      ? '[' + (row.bit[1] > 1 ? (row.bit[0] + ':' + (row.bit[0] + row.bit[1] - 1)) : row.bit[0]) + ']'
-      : '';
-    return row.name + bit + ' @ ' + hex(row.addr, 6);
-  }
-
-  function watchDom(key) {
-    D.watchEls = D.watchEls || {};
-    if (D.watchEls[key]) return D.watchEls[key];
-    const root = D.watchCards[key];
-    if (!root) return null;
-    const els = {
-      root,
-      title: root.querySelector('.watch-title'),
-      val: root.querySelector('.watch-val'),
-      unit: root.querySelector('.watch-unit'),
-      src: root.querySelector('.watch-src'),
-      bar: root.querySelector('.watch-bar i'),
-      editor: root.querySelector('.watch-editor'),
-    };
-    D.watchEls[key] = els;
-    return els;
-  }
-
-  function findTarget(text, size, signed) {
-    const t = String(text || '').trim();
-    if (!t) return null;
-    if (/^0x[0-9a-f]+$/i.test(t) || /^\d+$/.test(t)) {
-      const addr = parseInt(t, /^0x/i.test(t) ? 16 : 10);
-      if (!isFinite(addr) || addr < 0) return null;
-      return { id: '', name: '@' + hex(addr, 4), addr: addr >>> 0, size, signed, bit: null, unit: '' };
-    }
-    let e = S.index.get(t);
-    if (!e) {
-      const low = t.toLowerCase();
-      for (const x of S.index.values()) {
-        if ((x.name || '').toLowerCase() === low || (x.id || '').toLowerCase() === low) { e = x; break; }
-      }
-    }
-    if (!e || !e.addr) return null;
-    return {
-      id: e.id || e.name, name: e.name || e.id, addr: e.addr >>> 0,
-      size: e.size || size, signed: !!e.signed,
-      bit: Array.isArray(e.bit) ? [Number(e.bit[0]), Number(e.bit[1])] : null,
-      unit: e.unit || inferUnit(e.name) || '',
-    };
-  }
-
-  // 按 id 找符号；找不到时按显示名兜底（应对 AXF 里 id/name 轻微差异）
-  function catalogEntryFor(id, name) {
-    let e = id ? S.index.get(id) : null;
-    if (e) return e;
-    const n = String(name || '').trim();
-    if (!n) return null;
-    e = S.index.get(n);
-    if (e) return e;
-    const low = n.toLowerCase();
-    for (const x of S.index.values()) {
-      if ((x.name || '').toLowerCase() === low || (x.id || '').toLowerCase() === low) return x;
-    }
-    return null;
-  }
-
-  function ensureWatchRows() {
-    const used = new Set();
-    for (const card of S.watch) {
-      if (card.mode !== 'value') { card.rowId = ''; continue; }
-      if (card.signal && S.index.has(card.signal)) {
-        const e = S.index.get(card.signal);
-        card.addr = e.addr >>> 0;
-        card.size = e.size || card.size || 2;
-        card.signed = !!e.signed;
-        card.bit = Array.isArray(e.bit) ? [Number(e.bit[0]), Number(e.bit[1])] : null;
-        card.unit = e.unit || inferUnit(e.name) || '';
-      }
-      let row = card.rowId ? S.rows.get(card.rowId) : null;
-      if (!row && card.signal && S.rows.has(card.signal)) {
-        row = S.rows.get(card.signal);
-        card.rowId = card.signal;
-      }
-      if (!row) {
-        if (!card.addr) continue;
-        const id = 'watch:' + card.key;
-        row = S.rows.get(id);
-        if (!row) {
-          row = newRow({
-            id, name: card.title || ('@' + hex(card.addr, 4)),
-            addr: card.addr >>> 0, size: card.size || 2, signed: !!card.signed,
-            bit: Array.isArray(card.bit) ? card.bit : null,
-            kind: 'watch', group: '监视', type: ((card.size || 2) * 8) + 'b',
-          }, { table: false, plot: false, support: false });
-          S.rows.set(id, row);
-        }
-        row.addr = card.addr >>> 0;
-        row.size = card.size || 2;
-        row.signed = !!card.signed;
-        row.bit = Array.isArray(card.bit) ? card.bit : null;
-        row.name = card.title;
-        row.unit = card.unit || '';
-        row.watchOnly = true;
-        card.rowId = id;
-      }
-      if (row && row.watchOnly) {
-        row.addr = card.addr >>> 0;
-        row.size = card.size || 2;
-        row.signed = !!card.signed;
-        row.bit = Array.isArray(card.bit) ? card.bit : null;
-        row.name = card.title;
-        row.unit = card.unit || '';
-      }
-      used.add(card.rowId);
-    }
-    for (const [id, row] of Array.from(S.rows.entries())) {
-      if (row.watchOnly && !used.has(id) && !row.table && !row.plot && !row.support) S.rows.delete(id);
-    }
-  }
-
-  function renderWatchDatalist() {
-    if (!D.watchSignals) return;
-    const frag = document.createDocumentFragment();
-    for (const e of S.index.values()) {
-      if (!e || !e.addr) continue;
-      const o = document.createElement('option');
-      o.value = e.id || e.name;
-      if (e.name && e.name !== o.value) o.label = e.name;
-      frag.appendChild(o);
-    }
-    D.watchSignals.innerHTML = '';
-    D.watchSignals.appendChild(frag);
-  }
-
-  function renderWatchLabels() {
-    for (const card of S.watch) {
-      const els = watchDom(card.key);
-      if (!els) continue;
-      els.title.textContent = card.title;
-      els.root.classList.toggle('custom-value', card.mode !== 'margin');
-      const row = watchRow(card);
-      els.src.textContent = card.mode === 'margin'
-        ? '阈值 − 电流（内置）'
-        : (row ? watchSourceText(row) : '未绑定');
-      els.root.dataset.mode = card.mode;
-    }
-  }
-
-  function refreshWatchValues(vals) {
-    const last = Array.isArray(vals) ? vals : (latestSample() ? latestSample()[1] : null);
-    for (const card of S.watch) {
-      const els = watchDom(card.key);
-      if (!els) continue;
-      if (card.mode === 'margin') {
-        const cur = byId(S.stall.currentId);
-        const thr = byId(S.stall.thresholdId);
-        const ci = cur ? cur.ci : -1;
-        const ti = thr ? thr.ci : -1;
-        if (last && ci >= 0 && ti >= 0 && ci < last.length && ti < last.length) {
-          const cv = last[ci] * cur.scale + cur.offset;
-          const tv = last[ti] * thr.scale + thr.offset;
-          els.val.textContent = fmtInt(tv - cv);
-          els.unit.textContent = cur.unit || '';
-          const pct = tv > 0 ? clamp((cv / tv) * 100, 0, 100) : 0;
-          if (els.bar) els.bar.style.width = pct.toFixed(1) + '%';
-        } else {
-          els.val.textContent = '--';
-          els.unit.textContent = 'counts';
-          if (els.bar) els.bar.style.width = '0%';
-        }
-        continue;
-      }
-      const row = watchRow(card);
-      if (!row || row.ci < 0 || !last) {
-        els.val.textContent = '--';
-        els.unit.textContent = '';
-        continue;
-      }
-      const raw = last[row.ci];
-      if (raw === undefined || raw === null) {
-        els.val.textContent = '--';
-        els.unit.textContent = row.unit || '';
-        continue;
-      }
-      els.val.textContent = fmtValue(row, raw);
-      els.unit.textContent = row.unit || '';
-      els.src.textContent = watchSourceText(row);
-    }
-  }
-
-  function renderWatchAll() {
-    renderWatchLabels();
-    const last = latestSample();
-    refreshWatchValues(last ? last[1] : null);
-  }
-
-  function closeWatchEditor() {
-    for (const card of S.watch) {
-      const els = watchDom(card.key);
-      if (!els) continue;
-      els.root.classList.remove('editing');
-      if (els.editor) els.editor.classList.add('hidden');
-    }
-  }
-
-  function openWatchEditor(key) {
-    closeWatchEditor();
-    const card = watchCard(key);
-    const els = watchDom(key);
-    if (!card || !els || !els.editor) return;
-    const name = els.editor.querySelector('.we-name');
-    const target = els.editor.querySelector('.we-target');
-    const size = els.editor.querySelector('.we-size');
-    const signed = els.editor.querySelector('.we-signed');
-    const margin = els.editor.querySelector('.we-margin');
-    if (name) name.value = card.title || '';
-    if (target) {
-      target.value = card.mode === 'margin' ? '' : (card.signal || (card.addr ? hex(card.addr, 4) : ''));
-      target.disabled = card.mode === 'margin';
-    }
-    if (size) size.value = String(card.size || 2);
-    if (signed) signed.checked = !!card.signed;
-    if (margin) margin.checked = card.mode === 'margin';
-    els.root.classList.add('editing');
-    els.editor.classList.remove('hidden');
-    if (name) setTimeout(() => { name.focus(); name.select(); }, 20);
-  }
-
-  function applyWatchEditor(key) {
-    const card = watchCard(key);
-    const els = watchDom(key);
-    if (!card || !els || !els.editor) return;
-    const name = (els.editor.querySelector('.we-name')?.value || '').trim();
-    const targetText = (els.editor.querySelector('.we-target')?.value || '').trim();
-    const size = Number(els.editor.querySelector('.we-size')?.value) || 2;
-    const signed = !!els.editor.querySelector('.we-signed')?.checked;
-    const margin = !!els.editor.querySelector('.we-margin')?.checked;
-    if (margin) {
-      card.mode = 'margin';
-      card.signal = '';
-      card.addr = 0;
-      card.rowId = '';
-      card.title = name || '余量';
-    } else {
-      if (!targetText) { toast('请填写信号名或 0x 地址', 'err'); return; }
-      const t = findTarget(targetText, size, signed);
-      if (!t) { toast('找不到信号或地址: ' + targetText, 'err'); return; }
-      card.mode = 'value';
-      card.signal = t.id;
-      card.addr = t.addr;
-      card.size = t.size;
-      card.signed = t.signed;
-      card.bit = t.bit || null;
-      card.unit = t.unit || '';
-      card.title = name || t.name || ('@' + hex(t.addr, 4));
-      card.rowId = (t.id && S.rows.has(t.id)) ? t.id : ('watch:' + card.key);
-    }
-    ensureWatchRows();
-    syncChannels();
-    closeWatchEditor();
-    renderWatchLabels();
-    renderWatchAll();
-    saveLocal();
-    sendConfig();
-    S.dirty = true;
   }
 
   // ---------------------------------------------------------------- 写入模块
@@ -1043,7 +955,6 @@
 
   function releaseWriteRows() {
     const used = new Set(S.write.mods.map((m) => m.rowId));
-    for (const c of S.watch) if (c.rowId) used.add(c.rowId);
     for (const [id, row] of Array.from(S.rows.entries())) {
       if (row.writeOnly && !used.has(id) && !row.table && !row.plot && !row.support) S.rows.delete(id);
     }
@@ -1459,7 +1370,6 @@
   }
 
   function afterSignalsChanged() {
-    ensureWatchRows();
     ensureWriteMods();
     ensureWaveGroups();
     syncChannels();
@@ -1467,9 +1377,6 @@
     renderSelected();
     renderLegend();
     renderValueTable();
-    renderStallSelects();
-    renderCalib();
-    renderWatchLabels();
     renderWriteMods();
     updateEmptyHint();
     saveLocal();
@@ -1482,21 +1389,20 @@
     cacheDom();
     bindUI();
     await loadCatalog();
+    await loadMcuIndex();
     await loadStatus();
     restoreConfig();
     renderCatalog();
     renderSelected();
     renderLegend();
     renderValueTable();
-    renderStallSelects();
-    renderCalib();
-    renderWatchAll();
     renderWriteMods();
     ensureWaveGroups();
     syncTablePanel();
     syncSections();
     saveLocal();
     updateProjectUI();
+    renderCards();
     resizeChart();
     updateOverlay();
     connectSSE();
@@ -1579,6 +1485,7 @@
         S.gridOn = c.gridOn !== false;
         S.zeroLine = c.zeroLine !== false;
         S.glow = !!c.glow;
+        if (['openocd', 'attach', 'sim'].includes(c.lastMode)) S.lastMode = c.lastMode;
         S.ui.view = c.view === 'tree' ? 'tree' : 'list';
         S.ui.tableOpen = c.tableOpen !== false;
         if (c.sections && typeof c.sections === 'object') {
@@ -1588,29 +1495,9 @@
             write: c.sections.write !== false,
           };
         }
-        if (c.stall) {
-          S.stall.enabled = c.stall.enabled !== false;
-          S.stall.autoPause = !!c.stall.autoPause;
-          S.stall.currentId = c.stall.currentId || '';
-          S.stall.thresholdId = c.stall.thresholdId || '';
-        }
-        if (Array.isArray(c.watch)) {
-          const base = S.watch.slice();
-          S.watch = [0, 1, 2].map((i) => {
-            const w = c.watch[i] || base[i] || {};
-            return {
-              key: 'w' + (i + 1),
-              title: String(w.title || base[i]?.title || ('监视 ' + (i + 1))).slice(0, 24),
-              mode: w.mode === 'margin' ? 'margin' : 'value',
-              signal: String(w.signal || ''),
-              addr: Number(w.addr) >>> 0,
-              size: Number(w.size) || 2,
-              signed: !!w.signed,
-              bit: Array.isArray(w.bit) ? [Number(w.bit[0]), Number(w.bit[1])] : null,
-              unit: String(w.unit || ''),
-              rowId: String(w.rowId || ''),
-            };
-          });
+        // 旧版的“监视卡片”行不再使用，避免留下不可见的采样通道
+        for (const [id, row] of Array.from(S.rows.entries())) {
+          if (row.watchOnly && !row.table && !row.plot) S.rows.delete(id);
         }
         if (Array.isArray(c.write?.mods)) {
           S.write.mods = c.write.mods.slice(0, 8).map((m, i) => ({
@@ -1675,14 +1562,9 @@
         }));
       }
     }
-    ensureWatchRows();
     ensureWriteMods();
     ensureWaveGroups();
     syncChannels();
-    const st = S.catalog.stall || {};
-    const sampled = S.signals.filter((s) => !isHidden(s));
-    if (!byId(S.stall.currentId)) S.stall.currentId = st.current || (sampled[0]?.id || '');
-    if (!byId(S.stall.thresholdId)) S.stall.thresholdId = st.threshold || (sampled[1]?.id || '');
     syncToggles();
     updateViewSeg();
     syncTablePanel();
@@ -1707,8 +1589,6 @@
     const go = $('#gridOn'); if (go) go.checked = S.gridOn;
     const zl = $('#zeroLine'); if (zl) zl.checked = S.zeroLine;
     const gl = $('#glowOn'); if (gl) gl.checked = S.glow;
-    const se = $('#stallEnable'); if (se) se.checked = S.stall.enabled;
-    const ap = $('#autoPause'); if (ap) ap.checked = S.stall.autoPause;
   }
 
   function saveLocal() {
@@ -1720,7 +1600,7 @@
           scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
           step: s.step, axis: s.axis, type: s.type,
           table: !!s.table, plot: !!s.plot, support: !!s.support, groupId: s.groupId || '',
-          writeOnly: !!s.writeOnly, watchOnly: !!s.watchOnly,
+          writeOnly: !!s.writeOnly,
         })),
         virtuals: S.virtuals.map((v) => ({
           id: v.id, arrayId: v.arrayId, name: v.name, sourceIds: v.sourceIds.slice(),
@@ -1737,16 +1617,8 @@
         view: S.ui.view,
         tableOpen: S.ui.tableOpen,
         sections: Object.assign({ chart: true, table: true, write: true }, S.ui.sections || {}),
-        stall: {
-          enabled: S.stall.enabled,
-          autoPause: S.stall.autoPause,
-          currentId: S.stall.currentId,
-          thresholdId: S.stall.thresholdId,
-        },
-        watch: S.watch.map((c) => ({
-          title: c.title, mode: c.mode, signal: c.signal, addr: c.addr,
-          size: c.size, signed: !!c.signed, bit: c.bit || null, unit: c.unit, rowId: c.rowId,
-        })),
+        mcu: S.mcu.active,
+        lastMode: S.lastMode,
         wave: {
           seq: S.wave.seq,
           groups: S.wave.groups.map((g) => ({
@@ -1823,6 +1695,7 @@
         : '自动保存到浏览器 localStorage';
       D.projectState.textContent = t + ' · 当前：' + active;
     }
+    if (typeof renderCards === 'function') renderCards();
   }
 
   function renderAfterProjectLoad() {
@@ -1830,13 +1703,11 @@
     renderSelected();
     renderLegend();
     renderValueTable();
-    renderStallSelects();
-    renderCalib();
-    renderWatchAll();
     renderWriteMods();
     syncTablePanel();
     syncSections();
     updateProjectUI();
+    renderCards();
     S.dirty = true;
     scheduleHistoryReload();
   }
@@ -1851,7 +1722,6 @@
     localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name] || {}));
     S.samples = [];
     S.lastT = 0;
-    resetStall();
     S.paused = false;
     updatePauseUI();
     restoreConfig();
@@ -1900,7 +1770,6 @@
     localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[next] || {}));
     S.samples = [];
     S.lastT = 0;
-    resetStall();
     restoreConfig();
     renderAfterProjectLoad();
     toast('已删除，切换到：' + next, 'ok');
@@ -1933,7 +1802,6 @@
       localStorage.setItem('ms.cfg.v2', JSON.stringify(data));
       S.samples = [];
       S.lastT = 0;
-      resetStall();
       restoreConfig();
       renderAfterProjectLoad();
       toast('已导入工程：' + name, 'ok');
@@ -1951,16 +1819,10 @@
       S.rows.set(row.id, row);
     }
     ensureWaveGroups();
-    ensureWatchRows();
     ensureWriteMods();
     syncChannels();
-    renderWatchLabels();
     renderWriteMods();
     if (rate) S.rate = Number(rate) || S.rate;
-    const st = S.catalog.stall || {};
-    const sampled = S.signals.filter((s) => !isHidden(s));
-    if (!byId(S.stall.currentId)) S.stall.currentId = st.current || (sampled[0]?.id || '');
-    if (!byId(S.stall.thresholdId)) S.stall.thresholdId = st.threshold || (sampled[1]?.id || '');
     syncToggles();
   }
 
@@ -2003,7 +1865,7 @@
         applyStatus(msg.status);
         if (!S.rows.size && msg.config?.signals?.length) {
           adoptSignals(msg.config.signals, msg.config.rate);
-          renderSelected(); renderLegend(); renderValueTable(); renderStallSelects(); renderCalib();
+          renderSelected(); renderLegend(); renderValueTable();
           saveLocal();
           loadHistory();
         } else if (S.rows.size) {
@@ -2048,12 +1910,9 @@
     const arr = Array.from(map.values()).sort((a, b) => a[0] - b[0]);
     S.samples = arr;
     if (arr.length) S.lastT = Math.max(S.lastT, arr[arr.length - 1][0]);
-    resetStall();
-    for (const [t, vals] of arr) detectStall(t, vals, true);
     pruneSamples();
     S.dirty = true;
     refreshLiveValues();
-    updateStallUI(S.lastT);
   }
 
   function onSamples(batch) {
@@ -2067,7 +1926,6 @@
       if (!nchan || vals.length !== nchan) continue;
       S.samples.push([t, vals]);
       S.lastT = t;
-      detectStall(t, vals);
     }
     S.sampleCountSeen += batch.length;
     pruneSamples();
@@ -2203,7 +2061,6 @@
     const last = latestSample();
     if (!last) return;
     const vals = last[1];
-    refreshWatchValues(vals);
     // 目录/波形列表/图例/数值表里的实时值
     for (const row of S.rows.values()) {
       const txt = rowValueText(row, vals);
@@ -2237,7 +2094,6 @@
         if (vt.conv) setTableNum(vt.conv, isCalibrated(v) ? fmtTableNum(convertedValue(v, rawValue(v, vals))) : '-', 'num vt-conv');
       }
     }
-    updateStallUI(last[0]);
     refreshWriteUI();
     const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     if (now - S.lastStatsAt > 240) {
@@ -2278,88 +2134,6 @@
     }
   }
 
-  function updateStallUI(t) {
-    const st = S.stall;
-    const active = st.enabled && st.active;
-    D.stallCard.classList.toggle('danger', active);
-    for (const c of S.watch) {
-      const els = watchDom(c.key);
-      if (!els) continue;
-      els.root.classList.toggle('danger', active && (c.rowId === st.currentId || c.mode === 'margin'));
-    }
-    D.ribbon.classList.toggle('hidden', !active);
-    if (active) {
-      const dur = Math.max(0, t - st.since) / 1000;
-      D.stallText.textContent = '堵转判定';
-      D.stallSub.textContent = '电流 ≥ 阈值 · 持续 ' + dur.toFixed(1) + ' s';
-      D.ribbonText.textContent = '电流 ≥ 阈值 · ' + dur.toFixed(1) + ' s';
-    } else {
-      D.stallText.textContent = '安全';
-      const last = latestSample();
-      let marginTxt = '未达到堵转阈值';
-      if (last) {
-        const cur = byId(st.currentId), thr = byId(st.thresholdId);
-        const ci = cur ? cur.ci : -1;
-        const ti = thr ? thr.ci : -1;
-        if (ci >= 0 && ti >= 0 && ci < last[1].length && ti < last[1].length) {
-          const cv = last[1][ci] * cur.scale + cur.offset;
-          const tv = last[1][ti] * thr.scale + thr.offset;
-          marginTxt = '余量 ' + fmtInt(tv - cv) + (cur.unit ? ' ' + cur.unit : '');
-          if (st.lastDuration > 0) marginTxt += ' · 上次 ' + (st.lastDuration / 1000).toFixed(1) + ' s';
-        }
-      }
-      D.stallSub.textContent = marginTxt;
-    }
-    D.stallCount.textContent = st.count + ' 次';
-  }
-
-  function detectStall(t, vals, replay = false) {
-    const st = S.stall;
-    if (!st.enabled) return;
-    const cur = byId(st.currentId);
-    const thr = byId(st.thresholdId);
-    if (!cur || !thr) return;
-    const ci = cur.ci;
-    const ti = thr.ci;
-    if (ci < 0 || ti < 0 || ci >= vals.length || ti >= vals.length) return;
-    const cv = vals[ci] * cur.scale + cur.offset;
-    const tv = vals[ti] * thr.scale + thr.offset;
-    const above = tv > 0 && cv >= tv;
-    if (above && !st.active) {
-      // 电流在阈值附近抖会切出很多 0.1s 的假事件; 600ms 内的间隔并成一次
-      const prev = st.events[st.events.length - 1];
-      const merge = prev && prev.end != null && (t - prev.end) < 600;
-      st.active = true;
-      st.since = merge ? prev.t : t;
-      if (merge) {
-        prev.end = null;
-      } else {
-        st.count += 1;
-        st.events.push({ t, end: null });
-        if (st.events.length > 500) st.events.shift();
-      }
-      if (!replay && st.autoPause && !S.paused) {
-        S.paused = true;
-        S.pauseAt = t;
-        updatePauseUI();
-      }
-    } else if (!above && st.active) {
-      st.active = false;
-      st.lastDuration = t - st.since;
-      const ev = st.events[st.events.length - 1];
-      if (ev && ev.end === null) ev.end = t;
-    }
-  }
-
-  function resetStall() {
-    S.stall.active = false;
-    S.stall.since = 0;
-    S.stall.count = 0;
-    S.stall.lastDuration = 0;
-    S.stall.events = [];
-  }
-
-  // 主动/被动断开、重连、切工程都调用：清掉在途写入并强制回到未解锁
   function disarmWrite(reason) {
     for (const mod of S.write.mods) {
       stopLiveWrite(mod);
@@ -2385,9 +2159,7 @@
       S.pauseAt = 0;
       S.paused = false;
       S.hoverT = null;
-      resetStall();
       updatePauseUI();
-      updateStallUI(0);
       S.dirty = true;
     }
     S.serverUptime = up;
@@ -2395,8 +2167,14 @@
     S.sampler = st.sampler || {};
     S.record = st.record || {};
     S.lastStatusAt = Date.now();
+    const chipKey = st.chip ? JSON.stringify(st.chip) : '';
+    if (chipKey !== S.lastChipKey) {
+      S.lastChipKey = chipKey;
+      applyChip(st.chip);
+    }
     const kind = S.source.kind || 'none';
     const connected = sourceConnected(S.source) && !S.sampler.error;
+    if (connected && kind !== 'none') S.lastMode = kind;
     if (!connected && S.write.armed) {
       disarmWrite('连接断开，写入已锁定');
       saveLocal();
@@ -2413,8 +2191,8 @@
     D.statRecord.textContent = S.record.active ? ((S.record.count || 0).toLocaleString('en-US') + ' 点') : '关';
     D.btnRecord.classList.toggle('active', !!S.record.active);
     let msg = '运行中';
-    if (S.sampler.error) msg = S.sampler.error;
-    else if (S.source.kind === 'none') msg = st.connect_error || '等待连接';
+    if (S.sampler.error) msg = brief(S.sampler.error);
+    else if (S.source.kind === 'none') msg = brief(st.connect_error) || '等待连接';
     else if (!connected) msg = '连接已断开';
     else if (S.paused) msg = '已暂停（数据仍在后台缓存）';
     D.statMsg.textContent = msg;
@@ -2427,12 +2205,13 @@
     }
     if (S.source.kind === 'none' && st.connect_error && !S.errors.has(st.connect_error)) {
       S.errors.add(st.connect_error);
-      toast('连接失败: ' + st.connect_error, 'err');
+      toast('连接失败: ' + brief(st.connect_error), 'err');
     }
     updateOverlay();
+    renderCards();
     if (!S.rows.size && st.config?.signals?.length && !S.ui.connecting) {
       adoptSignals(st.config.signals, st.config.rate);
-      renderSelected(); renderLegend(); renderValueTable(); renderStallSelects(); renderCalib();
+      renderSelected(); renderLegend(); renderValueTable();
     }
   }
 
@@ -2458,13 +2237,15 @@
     if (S.ui.connecting) {
       D.overlayHint.textContent = '正在启动 OpenOCD 并读 CPUID 握手…';
     } else if (S.status?.connect_error) {
-      D.overlayHint.textContent = S.status.connect_error;
+      D.overlayHint.textContent = brief(S.status.connect_error);
     } else {
-      D.overlayHint.textContent = '将自动寻找 tools/openocd，启动 tcl_port 并读 CPUID 握手。';
+      D.overlayHint.textContent = '将自动寻找 OpenOCD，启动 tcl_port 并读取芯片 ID。';
     }
   }
 
   async function doConnect(mode) {
+    S.lastMode = mode;
+    D.srcSegMode = mode;
     const payload = { mode };
     if (mode === 'openocd') {
       const p = ($('#inpOcd')?.value || '').trim();
@@ -2475,10 +2256,6 @@
     }
     S.ui.connecting = true;
     S.ui.overlayDismissed = true;
-    D.btnConnect.disabled = true;
-    const label = D.btnConnect.querySelector('span');
-    const old = label ? label.textContent : '';
-    if (label) label.textContent = '连接中';
     updateOverlay();
     try {
       const res = await post('/api/connect', payload, { timeout: 30000 });
@@ -2489,15 +2266,27 @@
       await sendConfig(true);
       await refreshStatus();
     } catch (e) {
-      toast('连接失败: ' + e.message, 'err');
+      toast('连接失败: ' + brief(e.message), 'err');
       openLog();
     } finally {
       S.ui.connecting = false;
-      D.btnConnect.disabled = false;
-      if (label) label.textContent = old || '连接';
       updateOverlay();
       fitTopbar();
       refreshStatus();
+    }
+  }
+
+  async function disconnectSource() {
+    try {
+      await post('/api/disconnect', {});
+      disarmWrite('已断开，写入已锁定');
+      S.ui.overlayDismissed = false;
+      S.lastChipKey = '';
+      applyChip(null);
+      toast('已断开，调试器已释放', 'ok');
+      await refreshStatus();
+    } catch (e) {
+      toast('断开失败: ' + e.message, 'err');
     }
   }
 
@@ -2521,7 +2310,6 @@
     const q = S.ui.search.trim().toLowerCase();
     D.sigCount.textContent = String(visibleRowCount());
     D.selCount.textContent = String(selectedRows().length);
-    if (D.selectedCount) D.selectedCount.textContent = String(selectedRows().length);
     D.search.placeholder = tab === 'periph' ? '搜索外设 / 寄存器 / 位' : tab === 'custom' ? '自定义地址'
       : tab === 'waves' ? '搜索波形 / 分组' : '搜索变量 / 寄存器 / 地址';
     const viewRow = document.querySelector('.view-row');
@@ -3228,6 +3016,14 @@
     });
   }
 
+  function brief(text, max = 160) {
+    const s = String(text || '').trim();
+    if (!s) return '';
+    const lines = s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const head = lines.slice(0, 2).join(' · ');
+    return head.length > max ? head.slice(0, max) + '…' : head;
+  }
+
   function esc(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
@@ -3244,7 +3040,6 @@
     S.selRows.clear();
     const rows = selectedRows();
     D.selCount.textContent = String(rows.length);
-    if (D.selectedCount) D.selectedCount.textContent = String(rows.length);
     if (!rows.length) {
       box.innerHTML = '<div class="cat-empty muted">把左侧“表”或“波”打开，加入已选择</div>';
       return;
@@ -3328,6 +3123,11 @@
       chip.querySelector('.lax').textContent = row.axis === 'right' ? 'R' : '';
       chip.addEventListener('pointerenter', () => setFocus(row.id, false));
       chip.addEventListener('pointerleave', () => { if (!S.focusPinned) setFocus(null, false); });
+      // 右键（包括已经变暗的通道）打开换算/单位
+      chip.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        openCalibModal(row);
+      });
       chip.addEventListener('click', () => {
         if (S.focusPinned && S.focusId === row.id) {
           S.focusPinned = false;
@@ -3439,76 +3239,6 @@
     }
   }
 
-  // ---------------------------------------------------------------- stall selects / calibration
-  function renderStallSelects() {
-    for (const [el, current] of [[D.curSel, S.stall.currentId], [D.thrSel, S.stall.thresholdId]]) {
-      if (!el) continue;
-      el.innerHTML = '';
-      const usable = S.signals.filter((x) => !isHidden(x));
-      if (!usable.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = '（先添加信号）';
-        el.appendChild(o);
-        continue;
-      }
-      for (const s of usable) {
-        const o = document.createElement('option');
-        o.value = s.id;
-        o.textContent = s.name;
-        el.appendChild(o);
-      }
-      const want = current || usable[0].id;
-      el.value = want;
-      if (el.value !== want) {
-        if (el === D.curSel) S.stall.currentId = el.value;
-        else S.stall.thresholdId = el.value;
-      }
-    }
-  }
-
-  function renderCalib() {
-    const box = D.calibList;
-    if (!box) return;
-    box.innerHTML = '';
-    const rows = Array.from(S.rows.values()).filter((r) => !r.support);
-    if (!rows.length) {
-      box.innerHTML = '<div class="muted" style="font-size:10.5px">先添加信号</div>';
-      return;
-    }
-    for (const sig of rows) {
-      const row = document.createElement('div');
-      row.className = 'calib-row';
-      row.dataset.id = sig.id;
-      row.innerHTML = '<span class="cname"></span><input class="scale" type="number" step="0.001" title="缩放"><input class="offset" type="number" step="0.001" title="偏移"><input class="unit" type="text" title="单位"><select class="axis" title="左轴 / 右轴"><option value="left">L</option><option value="right">R</option></select>';
-      row.querySelector('.cname').textContent = sig.name;
-      row.querySelector('.cname').title = hex(sig.addr) + ' · ' + sig.name;
-      const sc = row.querySelector('.scale');
-      const of = row.querySelector('.offset');
-      const un = row.querySelector('.unit');
-      const ax = row.querySelector('.axis');
-      sc.value = String(sig.scale);
-      of.value = String(sig.offset);
-      un.value = sig.unit || '';
-      ax.value = sig.axis || 'left';
-      const commit = () => {
-        sig.scale = Number(sc.value) || 0;
-        sig.offset = Number(of.value) || 0;
-        sig.unit = un.value.trim();
-        sig.axis = ax.value === 'right' ? 'right' : 'left';
-        saveLocal();
-        sendConfig();
-        S.dirty = true;
-        refreshLiveValues();
-      };
-      sc.addEventListener('change', commit);
-      of.addEventListener('change', commit);
-      un.addEventListener('change', commit);
-      ax.addEventListener('change', commit);
-      box.appendChild(row);
-    }
-  }
-
   // ---------------------------------------------------------------- 换算弹窗
   let calibEditId = '';
 
@@ -3615,10 +3345,7 @@
   }
 
   function primaryRow(rows) {
-    const cur = byId(S.stall.currentId);
-    if (cur && cur.plot) return cur;
-    return rows.find((r) => r.kind !== 'virtual' && /current/i.test(r.name)) ||
-      rows.find((r) => r.kind === 'virtual') || rows[0] || null;
+    return rows.find((r) => r.kind !== 'virtual') || rows[0] || null;
   }
 
   function axisRef(range) {
@@ -3724,9 +3451,7 @@
       pane.unit = pane.useScale ? String(pane.rows[0].unit || '').trim() : '';
       pane.range = axisRange(pane.rows, pane) || { min: 0, max: 1 };
       pane.Y = (v) => pane.top + pane.h - ((v - pane.range.min) / Math.max(1e-9, pane.range.max - pane.range.min)) * pane.h;
-      pane.primary = (byId(S.stall.currentId) && pane.rows.some((r) => r.id === S.stall.currentId))
-        ? byId(S.stall.currentId)
-        : (pane.rows.find((r) => /current/i.test(r.name)) || pane.rows[0] || null);
+      pane.primary = pane.rows[0] || null;
     }
 
     // pane backgrounds
@@ -3797,30 +3522,14 @@
       ctx.fillText((rel >= -0.05 ? '0' : rel.toFixed(0)) + 's', x, y0 + ph + 8);
     }
 
-    // stall bands across all panes
-    if (S.stall.enabled && S.stall.events.length) {
-      for (const ev of S.stall.events) {
-        const evEnd = ev.end == null ? end : ev.end;
-        if (evEnd < start || ev.t > end) continue;
-        const xa = x0 + ((Math.max(ev.t, start) - start) / Math.max(1, end - start)) * pw;
-        const xb = x0 + ((Math.min(evEnd, end) - start) / Math.max(1, end - start)) * pw;
-        ctx.fillStyle = 'rgba(251,77,103,.075)';
-        ctx.fillRect(xa, y0, Math.max(1, xb - xa), ph);
-        ctx.fillStyle = 'rgba(251,77,103,.55)';
-        ctx.fillRect(xa, y0, Math.max(1, xb - xa), 2);
-      }
-    }
-
     const focus = S.focusId;
     const alphaFor = (row) => {
       if (focus) return row.id === focus ? 1 : 0.12;
       return row.id === (panes.find((p) => p.primary && p.primary.id === row.id)?.primary?.id) ? 1 : 0.66;
     };
-    const widthFor = (row) => {
-      const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name) || row.name.endsWith('.thresholdLast');
-      if (isThr) return 1.2;
-      return panes.some((p) => p.primary && p.primary.id === row.id) ? 2.1 : 1.15;
-    };
+    const widthFor = (row) => (
+      panes.some((p) => p.primary && p.primary.id === row.id) ? 2.1 : 1.15
+    );
 
     // fills (primary per pane)
     if (S.fillOn) {
@@ -3851,7 +3560,6 @@
     // traces
     for (const pane of panes) {
       for (const row of pane.rows) {
-        const isThr = row.id === S.stall.thresholdId || /threshold/i.test(row.name);
         const isPrimary = pane.primary && row.id === pane.primary.id;
         const alpha = alphaFor(row);
         ctx.beginPath();
@@ -3888,7 +3596,7 @@
         ctx.strokeStyle = alpha >= 1 ? row.color : hexAlpha(row.color, alpha);
         ctx.lineJoin = 'round';
         ctx.lineCap = 'round';
-        ctx.setLineDash(isThr ? [6, 4] : []);
+        ctx.setLineDash([]);
         if (isPrimary && !focus) {
           ctx.save();
           ctx.shadowColor = hexAlpha(row.color, .55);
@@ -3898,21 +3606,6 @@
         }
         ctx.stroke();
         ctx.setLineDash([]);
-      }
-    }
-
-    // stall markers at top
-    if (S.stall.enabled) {
-      for (const ev of S.stall.events) {
-        if (ev.t < start) continue;
-        const x = x0 + ((ev.t - start) / Math.max(1, end - start)) * pw;
-        ctx.fillStyle = 'rgba(251,77,103,.9)';
-        ctx.beginPath();
-        ctx.moveTo(x, y0 + 1);
-        ctx.lineTo(x + 5, y0 + 1);
-        ctx.lineTo(x + 2.5, y0 + 7);
-        ctx.closePath();
-        ctx.fill();
       }
     }
 
@@ -4102,11 +3795,6 @@
       openDrawer();
     });
 
-    D.btnConnect.addEventListener('click', () => {
-      if (sourceConnected(S.source)) openDrawer();
-      else openDrawer();
-    });
-
     D.btnPause.addEventListener('click', togglePause);
     $('#btnClear').addEventListener('click', clearAll);
     D.btnRecord.addEventListener('click', toggleRecord);
@@ -4169,23 +3857,18 @@
       const mode = D.srcSegMode || 'openocd';
       doConnect(mode);
     });
-    $('#btnDisconnect').addEventListener('click', async () => {
-      try {
-        await post('/api/disconnect', {});
-        disarmWrite('已断开，写入已锁定');
-        S.ui.overlayDismissed = false;
-        toast('已断开', 'ok');
-        await refreshStatus();
-      } catch (e) { toast(e.message, 'err'); }
+    $('#btnDisconnect').addEventListener('click', disconnectSource);
+    D.btnSourceToggle?.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (sourceConnected(S.source) && !S.sampler?.error) {
+        await disconnectSource();
+        return;
+      }
+      const mode = S.lastMode
+        || (S.source?.kind === 'sim' ? 'sim' : S.source?.kind === 'attach' ? 'attach' : 'openocd');
+      await doConnect(mode);
     });
-    D.rateSel.addEventListener('change', () => { S.rate = Number(D.rateSel.value); saveLocal(); sendConfig(); });
-    D.curSel.addEventListener('change', () => {
-      S.stall.currentId = D.curSel.value; resetStall(); saveLocal(); S.dirty = true;
-    });
-    D.thrSel.addEventListener('change', () => {
-      S.stall.thresholdId = D.thrSel.value; resetStall(); saveLocal(); S.dirty = true;
-    });
-    $('#stallEnable').addEventListener('change', (e) => { S.stall.enabled = e.target.checked; resetStall(); saveLocal(); S.dirty = true; });
+    D.rateSel.addEventListener('change', () => { S.rate = Number(D.rateSel.value); saveLocal(); sendConfig(); renderCards(); });
 
     // 写入：全局解锁 + 每个模块自己的类型/范围/实时
     D.writeSize?.addEventListener('change', () => {
@@ -4208,26 +3891,17 @@
       saveLocal();
     });
 
-    // 监视卡片编辑
-    for (const btn of $$('[data-watch-edit]')) {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openWatchEditor(btn.dataset.watchEdit);
+    // 顶部 4 张控制卡：工程 / 符号 / 信号源 / 采样率
+    for (const card of $$('.ctl-card')) {
+      const go = () => openDrawer(card.dataset.go);
+      card.addEventListener('click', go);
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
       });
     }
-    for (const card of S.watch) {
-      const els = watchDom(card.key);
-      if (!els || !els.editor) continue;
-      els.editor.querySelector('.we-apply')?.addEventListener('click', () => applyWatchEditor(card.key));
-      els.editor.querySelector('.we-cancel')?.addEventListener('click', () => closeWatchEditor());
-      els.editor.querySelector('.we-margin')?.addEventListener('change', (e) => {
-        const target = els.editor.querySelector('.we-target');
-        if (target) target.disabled = !!e.target.checked;
-      });
-    }
-    document.addEventListener('click', (e) => {
-      if (!e.target.closest('.watch-card')) closeWatchEditor();
-    });
+    D.mcuSel?.addEventListener('change', () => selectMcu(D.mcuSel.value, true));
+    $('#btnChipProbe')?.addEventListener('click', probeChipNow);
+    $('#btnChipBannerFix')?.addEventListener('click', () => openDrawer('symbol'));
 
     // 工程
     D.projectSel?.addEventListener('change', () => switchProject(D.projectSel.value));
@@ -4242,19 +3916,11 @@
       if (f) importProjectFile(f);
       D.projectFile.value = '';
     });
-    $('#btnCalibSelected')?.addEventListener('click', () => {
-      const row = (S.focusId && S.rows.get(S.focusId)) || selectedRows()[0];
-      if (!row) { toast('先添加/选择一行信号', 'err'); return; }
-      openCalibModal(row);
-    });
     $('#btnCalibClose')?.addEventListener('click', closeCalibModal);
     $('#btnCalibCancel')?.addEventListener('click', closeCalibModal);
     $('#btnCalibApply')?.addEventListener('click', applyCalibModal);
     D.calibModal?.addEventListener('click', (e) => { if (e.target === D.calibModal) closeCalibModal(); });
 
-    D.sectionTabs?.querySelectorAll('button[data-sec]').forEach((b) => {
-      b.addEventListener('click', () => toggleSection(b.dataset.sec));
-    });
     document.querySelectorAll('[data-sec-close]').forEach((b) => {
       b.addEventListener('click', () => {
         const sec = b.dataset.secClose;
@@ -4264,7 +3930,6 @@
         saveLocal();
       });
     });
-    $('#autoPause').addEventListener('change', (e) => { S.stall.autoPause = e.target.checked; saveLocal(); });
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
     $('#btnImportAxf').addEventListener('click', importAxf);
     $('#btnRecordCsv').addEventListener('click', () => {
@@ -4362,19 +4027,21 @@
     addSignal(id, { table: true, plot: true });
   }
 
-  function openDrawer() {
+  function openDrawer(section) {
     S.ui.drawer = true;
     S.ui.overlayDismissed = true;
     D.drawer.classList.add('open');
     D.drawerBackdrop.classList.remove('hidden');
-    renderCalib();
-    renderStallSelects();
     updateOverlay();
+    renderChipUI();
     const mode = S.source.kind === 'sim' ? 'sim' : S.source.kind === 'attach' ? 'attach' : 'openocd';
     D.srcSegMode = mode;
     $$('#srcSeg button').forEach((x) => x.classList.toggle('active', x.dataset.mode === mode));
     $('#fieldOpenocd').classList.toggle('hidden', mode !== 'openocd');
     $('#fieldAttach').classList.toggle('hidden', mode !== 'attach');
+    const map = { project: '#secProject', source: '#secSource', rate: '#secRate', symbol: '#secSymbol' };
+    const target = section && map[section] ? document.querySelector(map[section]) : null;
+    if (target) setTimeout(() => target.scrollIntoView({ block: 'start', behavior: 'smooth' }), 60);
   }
 
   function closeDrawer() {
@@ -4409,10 +4076,7 @@
     S.pauseAt = 0;
     S.paused = false;
     S.hoverT = null;
-    resetStall();
     updatePauseUI();
-    updateStallUI(0);
-    renderWatchAll();
     renderWriteMods();
     for (const row of S.selRows.values()) {
       const v = row.querySelector('.sel-val'); if (v) v.textContent = '—';
@@ -4493,11 +4157,9 @@
     buildIndex();
     S.samples = [];
     S.lastT = 0;
-    resetStall();
     let missing = 0;
     // 按 id 重新解析地址；新 AXF 里不存在的旧行删掉，避免拿旧地址继续采样
     for (const [id, row] of Array.from(S.rows.entries())) {
-      if (row.watchOnly) continue; // 监视卡由 ensureWatchRows 按自身绑定重解析
       const e = catalogEntryFor(id, row.name);
       if (e) {
         row.addr = e.addr >>> 0; row.size = e.size || row.size; row.signed = !!e.signed;
@@ -4509,12 +4171,17 @@
       }
     }
     S.virtuals = S.virtuals.filter((v) => (v.sourceIds || []).some((id) => S.index.has(id)));
-    ensureWatchRows();
     ensureWriteMods();
     ensureWaveGroups();
     syncChannels();
     renderCatalog(); renderSelected(); renderLegend(); renderValueTable();
-    renderStallSelects(); renderCalib(); renderWatchAll(); renderWriteMods();
+    renderWriteMods();
+    S.mcu.expected = String(catalog.meta?.mcu || '');
+    if (!S.chip && S.mcu.expected && S.mcu.models.some((m) => m.id === S.mcu.expected)) {
+      selectMcu(S.mcu.expected);
+    }
+    applyChip(S.chip);
+    renderCards();
     sendConfig(true);
     if (D.catalogMeta && catalog.meta) {
       D.catalogMeta.textContent = 'AXF ' + (catalog.meta.generated_at || '?') + ' · ' +

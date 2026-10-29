@@ -33,6 +33,10 @@
 
 ## 2. 快速开始
 
+> **免安装**：本目录自带 `runtime\python`（CPython 3.13.3 + pyelftools，Windows x64），
+> 不需要另装 Python；`start_scope.bat` 会优先用它。整个目录拷到别的机器即可运行，
+> 详见 [runtime/README.md](runtime/README.md)。
+
 ### 2.1 有硬件
 
 前提：
@@ -44,7 +48,7 @@
 然后：
 
 ```bat
-tools\motor_scope\start_scope.bat
+start_scope.bat
 ```
 
 它会：
@@ -64,7 +68,7 @@ start_scope.bat --port 8790 --rate 50
 ### 2.2 没硬件 / 只想看 UI
 
 ```bat
-tools\motor_scope\start_scope_sim.bat
+start_scope_sim.bat
 ```
 
 或者在连接卡片上点 **“先看仿真”**。仿真是一个 30 秒循环：
@@ -181,10 +185,11 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 - 或直接跑：
 
 ```bat
-tools\motor_scope\regen_signals.bat
+regen_signals.bat
 ```
 
-> 需要 `pyelftools`（`pip install pyelftools`）。运行时本身只用 Python 标准库。
+> 自带 `runtime\python` 已含 `pyelftools`；只有改用系统 Python 时才需要
+> `pip install pyelftools`。运行时本身只用 Python 标准库。
 > **地址和烧录进板子的固件必须是同一次 build**；对不上时数值会“看起来像”，
 > 对不上时先看设置页底部的 `AXF 时间`，重新生成并重新烧录。
 
@@ -339,15 +344,16 @@ python scope_server.py --attach 127.0.0.1:6767 --open
 ## 8. 文件
 
 ```
-tools/motor_scope/
+motor-scope/
 ├─ scope_server.py      HTTP/SSE 服务、采样线程、仿真源、录制
 ├─ ocd.py               OpenOCD Tcl-RPC 客户端、进程管理、区域规划
 ├─ gen_signals.py       AXF/DWARF + cw32l011.h → signals.json
-├─ signals.json         生成的信号目录（当前 444 变量 / 27 外设）
-├─ start_scope.bat      一键启动（自动连 OpenOCD）
+├─ signals.json         生成的信号目录（当前 461 变量 / 27 外设）
+├─ start_scope.bat      一键启动（自动连 OpenOCD，优先用自带 Python）
 ├─ start_scope_sim.bat  一键仿真
 ├─ regen_signals.bat    重新生成符号
-├─ requirements.txt     pyelftools（仅重建符号时需要）
+├─ requirements.txt     pyelftools（改用系统 Python 时才需要）
+├─ runtime/             自带便携 Python 3.13.3 + pyelftools（见 runtime/README.md）
 ├─ API.md              Agent/脚本用的 HTTP API（history/next/status/catalog）
 ├─ web/                 index.html / style.css / app.js（原生 canvas，无前端依赖）
 ├─ tests/               mock_tcl.py + test_core.py（区域/位域/写入） + test_history.py

@@ -269,7 +269,8 @@ def _collect_typedefs(dwarf) -> Dict[str, Tuple[Any, Any]]:
     return types
 
 
-def _collect_variables(dwarf) -> List[Dict[str, Any]]:
+def _collect_variables(dwarf, ram_min: int = RAM_MIN,
+                       ram_max: int = RAM_MAX) -> List[Dict[str, Any]]:
     seen = set()
     rows: List[Dict[str, Any]] = []
     for cu in dwarf.iter_CUs():
@@ -282,7 +283,7 @@ def _collect_variables(dwarf) -> List[Dict[str, Any]]:
             if "DW_AT_type" not in die.attributes:
                 continue
             addr = _location_addr(die)
-            if addr is None or not (RAM_MIN <= addr < RAM_MAX):
+            if addr is None or not (ram_min <= addr < ram_max):
                 continue
             t = die.get_DIE_from_attribute("DW_AT_type")
             kind, size, signed, label = _type_label(t, cu)
@@ -411,14 +412,29 @@ def _collect_peripherals(header: str, types: Dict[str, Tuple[Any, Any]]) -> List
     return out
 
 
+def _infer_mcu(machine: str, header: str) -> str:
+    """从 ELF 架构 + 头文件名推断型号，供前端与芯片识别比对。"""
+    if "RISCV" in (machine or "").upper():
+        return "CH32V203"
+    m = re.search(r"cw32l(\d{3})", os.path.basename(header or "").lower())
+    if m:
+        return "CW32L" + m.group(1)
+    return "CW32L011"
+
+
 def build(axf: str, header: str, map_path: Optional[str] = None) -> Dict[str, Any]:
     with open(axf, "rb") as f:
         elf = ELFFile(f)
+        machine = str(elf.header.get("e_machine", ""))
+        if "RISCV" in machine.upper():
+            ram_min, ram_max = 0x20000000, 0x20005000   # CH32V203: 20KB
+        else:
+            ram_min, ram_max = RAM_MIN, RAM_MAX
         if not elf.has_dwarf_info():
             raise RuntimeError("AXF 里没有 DWARF 信息: %s" % axf)
         dwarf = elf.get_dwarf_info()
         types = _collect_typedefs(dwarf)
-        variables = _collect_variables(dwarf)
+        variables = _collect_variables(dwarf, ram_min, ram_max)
         peripherals = _collect_peripherals(header, types) if os.path.isfile(header) else []
 
     def find(fragment: str) -> Optional[str]:
@@ -443,8 +459,8 @@ def build(axf: str, header: str, map_path: Optional[str] = None) -> Dict[str, An
         "axf_size": os.path.getsize(axf),
         "header": os.path.basename(header),
         "map": os.path.basename(map_path) if map_path else "",
-        "mcu": "CW32L011",
-        "ram": [RAM_MIN, RAM_MAX],
+        "mcu": _infer_mcu(machine, header),
+        "ram": [ram_min, ram_max],
         "variable_count": len(variables),
         "peripheral_count": len(peripherals),
     }
