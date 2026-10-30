@@ -92,6 +92,34 @@ class TclClient:
             data = self._recv_until(DELIM, deadline)
             return data.decode("utf-8", "replace")
 
+    def install_halt_reader(self) -> None:
+        """RISC-V: 内存读必须先 halt；一条 Tcl 命令内完成 halt→读→resume。"""
+        proc = (
+            "proc ms_read_halt {regions} {\n"
+            "  catch {halt}\n"
+            "  set code [catch {\n"
+            "    set out {}\n"
+            "    foreach r $regions {\n"
+            "      set out [concat $out [read_memory [lindex $r 0] 32 [lindex $r 1]]]\n"
+            "    }\n"
+            "  } result]\n"
+            "  catch {resume}\n"
+            "  if {$code} { error $result }\n"
+            "  return $out\n"
+            "}"
+        )
+        self.command(proc)
+
+    def read_regions_halt(self, regions: Sequence[Tuple[int, int]]) -> List[int]:
+        if not regions:
+            return []
+        spec = " ".join("{0x%08x %d}" % (int(a), int(n)) for a, n in regions)
+        resp = self.command("ms_read_halt {%s}" % spec)
+        return _parse_int_list(resp, expect=sum(int(n) for _, n in regions))
+
+    def resume(self) -> None:
+        self.command("resume")
+
     # ---- 采样相关 -------------------------------------------------
     def install_reader(self) -> None:
         """安装批量读内存的 Tcl 过程 (幂等)."""
@@ -264,7 +292,7 @@ class OcdProcess:
             return list(self.log)[-n:]
 
     # ---- 生命周期 -------------------------------------------------
-    def start(self, timeout: float = 15.0) -> TclClient:
+    def start(self, timeout: float = 15.0, require_cpuid: bool = True) -> TclClient:
         if self.proc is not None:
             raise OcdError("OpenOCD 进程已在运行")
         cmd = [self.paths.exe, "-s", self.paths.scripts, "-f", self.paths.iface]
@@ -306,14 +334,21 @@ class OcdProcess:
                 client = TclClient("127.0.0.1", self.port, timeout=2.0)
                 client.connect()
                 client.install_reader()
-                # 握手: 读 CPUID, 同时确认 read_memory 通路可用
-                cpuid = client.read_words(0xE000ED00, 1)[0]
+                # 握手: TCL 通了就算成功；CPUID 读不到时按 RISC-V/运行态继续
+                cpuid = None
+                try:
+                    cpuid = client.read_words(0xE000ED00, 1)[0]
+                except Exception as exc:
+                    if require_cpuid:
+                        raise OcdError("CPUID 读取失败: %s" % exc)
+                    self._append_log("INFO: CPUID 读取失败（RISC-V 可能在运行），继续: %s" % exc)
                 if cpuid == 0:
                     self._append_log("INFO: 目标不是 Cortex-M (CPUID=0)，按 RISC-V / 其它架构继续")
-                elif cpuid != 0x410CC601:
+                elif cpuid is not None and cpuid != 0x410CC601:
                     self._append_log("WARN: CPUID=0x%08x (期望 0x410CC601, 可能不是 M0+)" % cpuid)
                 self.client = client
-                self._append_log("TCL 已连接 127.0.0.1:%d, CPUID=0x%08x" % (self.port, cpuid))
+                self._append_log("TCL 已连接 127.0.0.1:%d, CPUID=%s" % (
+                    self.port, "0x%08x" % cpuid if cpuid is not None else "?"))
                 return client
             except (OcdError, OSError) as exc:
                 last_err = str(exc)

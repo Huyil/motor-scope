@@ -269,6 +269,21 @@ def _collect_typedefs(dwarf) -> Dict[str, Tuple[Any, Any]]:
     return types
 
 
+def _spec_die(die):
+    """跟随 DW_AT_specification，拿到带 name/type 的声明 DIE。"""
+    seen = set()
+    while "DW_AT_specification" in die.attributes:
+        key = id(die)
+        if key in seen:
+            break
+        seen.add(key)
+        try:
+            die = die.get_DIE_from_attribute("DW_AT_specification")
+        except Exception:
+            break
+    return die
+
+
 def _collect_variables(dwarf, ram_min: int = RAM_MIN,
                        ram_max: int = RAM_MAX) -> List[Dict[str, Any]]:
     seen = set()
@@ -277,15 +292,19 @@ def _collect_variables(dwarf, ram_min: int = RAM_MIN,
         for die in cu.get_top_DIE().iter_children():
             if die.tag != "DW_TAG_variable":
                 continue
-            nm = _name(die)
-            if not nm or "DW_AT_declaration" in die.attributes:
+            if "DW_AT_declaration" in die.attributes:
                 continue
-            if "DW_AT_type" not in die.attributes:
+            spec = _spec_die(die)
+            nm = _name(die) or _name(spec)
+            if not nm:
                 continue
             addr = _location_addr(die)
             if addr is None or not (ram_min <= addr < ram_max):
                 continue
-            t = die.get_DIE_from_attribute("DW_AT_type")
+            type_owner = die if "DW_AT_type" in die.attributes else spec
+            if "DW_AT_type" not in type_owner.attributes:
+                continue
+            t = type_owner.get_DIE_from_attribute("DW_AT_type")
             kind, size, signed, label = _type_label(t, cu)
             local: List[Dict[str, Any]] = []
             if kind in ("struct", "union"):

@@ -303,6 +303,19 @@
   }
 
   // ---------------------------------------------------------------- MCU / 芯片
+  function resolveMcuId(id) {
+    const up = String(id || '').trim().toUpperCase();
+    if (!up) return '';
+    const exact = S.mcu.models.find((m) => m.id.toUpperCase() === up);
+    if (exact) return exact.id;
+    const fam = S.mcu.models.find((m) => {
+      const mid = m.id.toUpperCase();
+      const family = String(m.identify?.family || '').toUpperCase();
+      return (family && family === up) || mid.startsWith(up) || up.startsWith(mid);
+    });
+    return fam ? fam.id : '';
+  }
+
   async function loadMcuIndex() {
     try {
       const data = await fetchJSON('/mcu/index.json');
@@ -323,7 +336,7 @@
     }
     S.mcu.expected = String(S.catalog.meta?.mcu || '');
     const snap = currentSnapshot();
-    const want = [snap.mcu, S.mcu.expected].find((id) => S.mcu.models.some((m) => m.id === id));
+    const want = [snap.mcu, S.mcu.expected].map(resolveMcuId).find(Boolean);
     if (want) await selectMcu(want);
     else renderCards();
   }
@@ -364,7 +377,7 @@
       let pick = '';
       if (cands.includes(S.mcu.expected)) pick = S.mcu.expected;
       else if (cands.length) pick = cands[0];
-      else pick = S.mcu.detected;
+      else pick = resolveMcuId(S.mcu.detected) || S.mcu.detected;
       if (pick) selectMcu(pick);
     }
     renderChipUI();
@@ -1721,7 +1734,7 @@
   function syncToggles() {
     if (D.winSel) D.winSel.value = String(S.windowSec);
     if (D.winSel2) D.winSel2.value = String(S.windowSec);
-    if (D.rateSel) D.rateSel.value = String(S.rate);
+    if (D.rateSel) { D.rateSel.value = String(S.rate); syncRateOptions(); }
     const az = $('#autoZero'); if (az) az.checked = S.autoZero;
     const fo = $('#fillOn'); if (fo) fo.checked = S.fillOn;
     const go = $('#gridOn'); if (go) go.checked = S.gridOn;
@@ -2396,6 +2409,12 @@
     const payload = { mode };
     if (mode === 'openocd') {
       payload.arch = S.arch;
+      if (S.arch === 'riscv' && S.rate > 20) {
+        S.rate = 20;
+        syncToggles();
+        saveLocal();
+        toast('RISC-V 每次读取需要短暂 halt，采样率已降到 20 Hz');
+      }
       const p = ($('#inpOcd')?.value || '').trim();
       if (p) payload.openocd = p;
     } else if (mode === 'attach') {
@@ -3049,7 +3068,7 @@
     head.className = 'tree-head';
     head.dataset.node = 'g:periph';
     head.innerHTML = '<span class="arrow">▶</span><span class="tname">外设</span><span class="tkind">periph</span><span class="tcount"></span>';
-    head.querySelector('.tcount').textContent = (S.catalog.peripherals || []).length + ' 个';
+    head.querySelector('.tcount').textContent = peripheralList().length + ' 个';
     box.appendChild(head);
     const inner = document.createElement('div');
     inner.className = 'tree-body';
@@ -3060,7 +3079,7 @@
   }
 
   function renderPeriphInto(body, q) {
-    const list = S.catalog.peripherals || [];
+    const list = peripheralList();
     const frag = document.createDocumentFragment();
     let any = false;
     for (const p of list) {
@@ -4013,7 +4032,15 @@
         || (S.source?.kind === 'sim' ? 'sim' : S.source?.kind === 'attach' ? 'attach' : 'openocd');
       await doConnect(mode);
     });
-    D.rateSel.addEventListener('change', () => { S.rate = Number(D.rateSel.value); saveLocal(); sendConfig(); renderCards(); });
+    D.rateSel.addEventListener('change', () => {
+      let v = Number(D.rateSel.value) || 20;
+      if (S.arch === 'riscv' && v > 20) v = 20;
+      S.rate = v;
+      if (D.rateSel.value !== String(v)) D.rateSel.value = String(v);
+      saveLocal();
+      sendConfig();
+      renderCards();
+    });
 
     // 写入：全局解锁 + 每个模块自己的类型/范围/实时
     D.writeSize?.addEventListener('change', () => {
@@ -4257,10 +4284,22 @@
     } else if (mode === 'attach') {
       D.srcHint.textContent = '连到已经在跑的 OpenOCD tcl_port（如手工启动的 openocd -c "tcl_port 6666"），RISC-V / ARM 都可。';
     } else if (S.arch === 'riscv') {
-      D.srcHint.textContent = '启动 WCH OpenOCD（wlinke + sdi）连接 CH32V203；需要 MounRiver Studio 自带的 OpenOCD。';
+      D.srcHint.textContent = '启动 WCH OpenOCD（wlinke + sdi）连接 CH32V203。读取内存需要短暂 halt；可选 1–20 Hz，越低干扰越小。程序会短暂停顿，但不会一直暂停。';
     } else {
       D.srcHint.textContent = '启动 ARM OpenOCD（cmsis-dap + SWD）连接 CW32L0，读芯片 ID 自动识别型号。';
     }
+  }
+
+  function syncRateOptions() {
+    if (!D.rateSel) return;
+    const max = S.arch === 'riscv' ? 20 : 200;
+    for (const o of D.rateSel.options) {
+      o.disabled = Number(o.value) > max;
+    }
+    if (Number(D.rateSel.value) > max) {
+      D.rateSel.value = String(max);
+    }
+    S.rate = Number(D.rateSel.value) || S.rate;
   }
 
   function syncArchUI() {
@@ -4276,6 +4315,7 @@
       if (label) label.textContent = 'OpenOCD 根目录（留空自动）';
       if (inp) inp.placeholder = 'D:\\Code\\DR2159\\tools\\openocd';
     }
+    syncRateOptions();
     updateSourceHint();
   }
 
@@ -4384,9 +4424,8 @@
     renderCatalog(); renderSelected(); renderLegend(); renderValueTable();
     renderWriteMods();
     S.mcu.expected = String(catalog.meta?.mcu || '');
-    if (!S.chip && S.mcu.expected && S.mcu.models.some((m) => m.id === S.mcu.expected)) {
-      selectMcu(S.mcu.expected);
-    }
+    const mid = resolveMcuId(S.mcu.expected);
+    if (!S.chip && mid) selectMcu(mid);
     applyChip(S.chip);
     renderCards();
     sendConfig(true);

@@ -219,6 +219,10 @@
           <div class="row2">
         <div class="field"><label>频率</label>
           <select id="rateSel">
+            <option value="1">1 Hz</option>
+            <option value="2">2 Hz</option>
+            <option value="5">5 Hz</option>
+            <option value="10">10 Hz</option>
             <option value="20">20 Hz</option>
             <option value="50">50 Hz</option>
             <option value="100" selected>100 Hz</option>
@@ -243,7 +247,7 @@
           <select id="marginThr" title="阈值信号"></select>
         </div>
       </div>
-      <p class="hint">顶部采样率卡片底部进度条显示余量（阈值 − 电流）。读不动就降到 50 Hz。</p>
+      <p class="hint">顶部采样率卡片底部进度条显示余量（阈值 − 电流）。RISC-V 读取需要短暂 halt：可选 1 / 2 / 5 / 10 / 20 Hz，越低对程序干扰越小。</p>
         </div>
       </section>
 

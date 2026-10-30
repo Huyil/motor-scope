@@ -304,6 +304,8 @@ class OpenOcdSource(Source):
         self._region_key: Any = None
         self._starts: List[int] = []
         self.cpuid: Optional[int] = None
+        self.riscv = False
+        self.try_nohalt = False
 
     def _prepare(self, signals: Sequence[Signal]) -> None:
         key = tuple((s.addr, s.span()[1]) for s in signals)
@@ -321,7 +323,19 @@ class OpenOcdSource(Source):
         if not signals:
             return []
         self._prepare(signals)
-        words = self.client.read_regions([(r.addr, r.words) for r in self.regions])
+        regions = [(r.addr, r.words) for r in self.regions]
+        if self.riscv:
+            words = None
+            if self.try_nohalt:
+                # 先尝试运行中读（SBA / 硬件采样）；WCH-Link 当前不支持则回退 halt
+                try:
+                    words = self.client.read_regions(regions)
+                except Exception:
+                    self.try_nohalt = False
+            if words is None:
+                words = self.client.read_regions_halt(regions)
+        else:
+            words = self.client.read_regions(regions)
         out: List[int] = []
         for s in signals:
             region = None
@@ -342,12 +356,36 @@ class OpenOcdSource(Source):
         return out
 
     def read_word(self, addr: int) -> int:
-        return self.client.read_words(int(addr) & ~0x3, 1)[0]
+        addr = int(addr) & ~0x3
+        if self.riscv:
+            if self.try_nohalt:
+                try:
+                    return self.client.read_regions([(addr, 1)])[0]
+                except Exception:
+                    self.try_nohalt = False
+            return self.client.read_regions_halt([(addr, 1)])[0]
+        return self.client.read_words(addr, 1)[0]
 
     def write(self, addr: int, size: int, value: int) -> None:
+        if self.riscv:
+            try:
+                self.client.command("halt")
+                self.client.write_mem(int(addr), int(size), int(value))
+            finally:
+                try:
+                    self.client.command("resume")
+                except Exception:
+                    pass
+            return
         self.client.write_mem(int(addr), int(size), int(value))
 
     def close(self) -> None:
+        # RISC-V 调试读会 halt，关闭前务必让目标继续跑
+        if self.riscv:
+            try:
+                self.client.command("resume")
+            except Exception:
+                pass
         self.proc.stop()
 
     def info(self) -> Dict[str, Any]:
@@ -702,6 +740,12 @@ class Sampler(threading.Thread):
             self.error = ""
             self._cond.notify_all()
         self._wake.set()
+
+    def set_rate(self, rate: float) -> None:
+        with self._cond:
+            self.rate = float(rate)
+            self.generation += 1
+            self._cond.notify_all()
 
     def set_signals(self, signals: Sequence[Signal], rate: float) -> None:
         key = tuple((s.addr, s.size, s.shift, s.width) for s in signals)
@@ -1294,14 +1338,29 @@ class App:
         port = int(payload.get("tcl_port") or 0)
         proc = ocd.OcdProcess(paths, port=port, verbose=self.args.verbose)
         try:
-            client = proc.start(timeout=float(payload.get("timeout") or 15.0))
+            client = proc.start(timeout=float(payload.get("timeout") or 15.0),
+                                require_cpuid=(self.arch != "riscv"))
         except Exception as exc:
             proc.stop()
             self.last_connect_error = str(exc)
             raise
         src = OpenOcdSource(proc, client)
+        src.riscv = (self.arch == "riscv")
+        if src.riscv:
+            client.install_halt_reader()
+            try:
+                client.command("riscv set_prefer_sba on")
+            except Exception:
+                pass
+            src.try_nohalt = True
+            if self.sampler.rate > 20:
+                self.sampler.set_rate(20)
+                self.add_log("RISC-V 读取需要 halt，采样率默认降到 20 Hz")
         try:
-            src.cpuid = client.read_words(0xE000ED00, 1)[0]
+            if src.riscv:
+                src.cpuid = client.read_regions_halt([(0xE000ED00, 1)])[0]
+            else:
+                src.cpuid = client.read_words(0xE000ED00, 1)[0]
         except Exception:
             src.cpuid = None
         self.source = src
@@ -1309,6 +1368,11 @@ class App:
         self.add_log("OpenOCD 已连接 (pid=%s, tcl_port=%d)" % (proc.pid, proc.port))
         self._probe_chip(src)
         self._begin_recording()
+        if src.riscv:
+            try:
+                client.command("resume")
+            except Exception:
+                pass
         return {"ok": True, "source": src.info(), "chip": self.chip}
 
     def auto_connect(self) -> None:
@@ -1337,6 +1401,9 @@ class App:
             seen.add(key)
             signals.append(s)
         rate = float(payload.get("rate") or 100)
+        if getattr(self.source, "riscv", False) and rate > 20:
+            self.add_log("RISC-V 读取需要 halt，采样率限制为 20 Hz")
+            rate = 20.0
         self.sampler.set_signals(signals, rate)
         if self.sampler.recorder.active:
             self.sampler.recorder.set_signals(signals)

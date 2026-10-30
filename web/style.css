@@ -541,7 +541,11 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .tool.check input { accent-color: var(--cyan); width: 12px; height: 12px; }
 
 #canvasWrap { position: relative; flex: 1; min-height: 0; }
-#chart { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+#chart {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none;
+  /* 波形区的指针：一个带描边的小圆点（热点在圆心），替代十字线 */
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12'%3E%3Ccircle cx='6' cy='6' r='3' fill='%2322d3ee' fill-opacity='.95' stroke='%23060a12' stroke-width='1.6'/%3E%3C/svg%3E") 6 6, crosshair;
+}
 .cursor-tip {
   position: absolute; z-index: 5; pointer-events: none;
   min-width: 150px; padding: 8px 10px;
