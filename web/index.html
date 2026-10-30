@@ -22,6 +22,10 @@
     </div>
 
     <div class="top-actions" id="topActions">
+      <button id="btnConnect" class="btn primary" title="连接 / 断开（再次按下释放调试器）" aria-label="连接 / 断开">
+        <svg viewBox="0 0 24 24"><path d="M9 7V3m6 4V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v4"/></svg>
+        <span class="btn-label">连接</span>
+      </button>
       <button id="btnPause" class="btn" title="暂停 / 继续 (空格)" aria-label="暂停 / 继续">
         <svg viewBox="0 0 24 24" class="ico-pause"><path d="M8 5h3v14H8zM13 5h3v14h-3z"/></svg>
         <svg viewBox="0 0 24 24" class="ico-play hidden"><path d="M8 5l12 7-12 7z"/></svg>
@@ -31,21 +35,9 @@
         <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg>
         <span class="btn-label">清空</span>
       </button>
-      <button id="btnRecord" class="btn" title="录制 (R)" aria-label="录制">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/></svg>
-        <span class="btn-label">录制</span>
-      </button>
-      <button id="btnCsv" class="btn" title="导出 CSV" aria-label="导出 CSV">
-        <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 19h16"/></svg>
-        <span class="btn-label">CSV</span>
-      </button>
       <button id="btnShot" class="btn" title="截图" aria-label="截图">
         <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
         <span class="btn-label">截图</span>
-      </button>
-      <button id="btnSettings" class="btn" title="设置" aria-label="设置">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5L9 6.1a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L5 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.7 1L9.5 21h5l.3-3.1a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z"/></svg>
-        <span class="btn-label">设置</span>
       </button>
       <button id="btnSidebar" class="btn only-mobile" title="信号列表" aria-label="信号列表">
         <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
@@ -95,24 +87,23 @@
       </div>
     </aside>
 
+
     <main id="main">
       <section id="hero">
         <div class="metric ctl-card" id="cardProject" data-go="project" role="button" tabindex="0" title="切换 / 管理工程">
-          <span class="ctl-head"><span class="ctl-kicker">工程</span><span class="ctl-go">›</span></span>
+          <span class="ctl-head"><span class="ctl-kicker">工程配置</span><span class="ctl-go">›</span></span>
           <strong class="ctl-val" id="cardProjectVal">默认</strong>
           <small class="ctl-sub" id="cardProjectSub">自动保存到浏览器</small>
         </div>
 
-        <div class="metric ctl-card" id="cardSymbol" data-go="symbol" role="button" tabindex="0" title="芯片型号 / 符号表">
-          <span class="ctl-head"><span class="ctl-kicker">符号</span><span class="ctl-go">›</span></span>
-          <strong class="ctl-val" id="cardSymbolVal">—</strong>
-          <small class="ctl-sub" id="cardSymbolSub">导入 AXF / 选择型号</small>
+        <div class="metric ctl-card" id="cardRecord" data-go="record" role="button" tabindex="0" title="录制状态 / 导出">
+          <span class="ctl-head"><span class="ctl-kicker">录制</span><span class="ctl-go">›</span></span>
+          <strong class="ctl-val" id="cardRecordVal">0 点</strong>
+          <small class="ctl-sub" id="cardRecordSub">连接后自动录制</small>
         </div>
 
         <div class="metric ctl-card" id="cardSource" data-go="source" role="button" tabindex="0" title="选择并连接信号源">
-          <span class="ctl-head"><span class="ctl-kicker">信号源</span>
-            <button id="btnSourceToggle" class="ctl-action" type="button" title="连接 / 断开（再次按下释放调试器）">连接</button>
-          </span>
+          <span class="ctl-head"><span class="ctl-kicker">信号源</span><span class="ctl-go">›</span></span>
           <strong class="ctl-val" id="cardSourceVal">未连接</strong>
           <small class="ctl-sub" id="cardSourceSub">OpenOCD / TCL / 仿真</small>
         </div>
@@ -121,7 +112,138 @@
           <span class="ctl-head"><span class="ctl-kicker">采样率</span><span class="ctl-go">›</span></span>
           <strong class="ctl-val" id="cardRateVal">100 <i>Hz</i></strong>
           <small class="ctl-sub" id="cardRateSub">实际 --</small>
-          <span class="ctl-bar"><i id="cardRateBar"></i><em id="cardRateBarText">0%</em></span>
+          <span class="ctl-bar"><i id="cardRateBar"></i><em id="cardRateBarText">余量 --</em></span>
+        </div>
+      </section>
+
+
+      <section class="float-panel" id="panelProject" data-panel="project" hidden>
+        <div class="fp-head"><b>工程配置</b><button class="fp-x" data-panel-close="project" title="关闭">×</button></div>
+        <div class="fp-body">
+          <div class="row2">
+        <select id="projectSel2"></select>
+        <button id="btnProjectNew" class="btn">新建（复制当前）</button>
+      </div>
+      <div class="row2" style="margin-top:6px">
+        <button id="btnProjectSaveAs" class="btn">另存为</button>
+        <button id="btnProjectDelete" class="btn">删除当前</button>
+      </div>
+      <div class="row2" style="margin-top:6px">
+        <button id="btnProjectExport" class="btn">导出 JSON</button>
+        <button id="btnProjectImport" class="btn">导入 JSON</button>
+      </div>
+      <input id="projectFile" type="file" accept=".json,application/json" hidden>
+      <p class="hint" id="projectState">自动保存到浏览器 localStorage</p>
+          <div class="fp-sep"></div>
+          <h4 class="fp-h4">符号与芯片</h4>
+          <div class="field">
+        <label>芯片型号（寄存器模板）</label>
+        <div class="row2">
+          <select id="mcuSel"></select>
+          <button id="btnChipProbe" class="btn">重新识别</button>
+        </div>
+      </div>
+      <div id="chipWarn" class="chip-warn hidden"></div>
+      <div id="chipInfo" class="hint">连接后自动读取芯片 ID；也可以手动选型号。</div>
+      <div class="axf-import">
+        <div class="field"><label>AXF / ELF（变量与地址）</label><input id="axfFile" type="file" accept=".axf,.elf"></div>
+        <button id="btnImportVars" class="btn primary" type="button" style="width:100%;margin-top:6px">导入 AXF/ELF</button>
+        <div class="field" style="margin-top:10px"><label>寄存器表（.svd / .json）</label><input id="hdrFile" type="file" accept=".svd,.json"></div>
+        <button id="btnImportRegs" class="btn" type="button" style="width:100%;margin-top:6px">导入寄存器表</button>
+        <p class="hint">AXF/ELF 只更新变量；寄存器表单独更新外设，支持 SVD 或 web/mcu 生成的 JSON。CW32 已内置模板，不再需要头文件。</p>
+      </div>
+      <div class="row2" style="margin-top:8px">
+        <button id="btnReloadCatalog" class="btn">从当前 AXF 重新生成</button>
+      </div>
+      <p class="hint" id="catalogMeta"></p>
+        </div>
+      </section>
+
+      <section class="float-panel" id="panelRecord" data-panel="record" hidden>
+        <div class="fp-head"><b>录制</b><span class="badge">自动</span><button class="fp-x" data-panel-close="record" title="关闭">×</button></div>
+        <div class="fp-body">
+          <div class="rec-grid">
+            <div><span>点数</span><b id="recCount">0</b></div>
+            <div><span>时长</span><b id="recSeconds">0 s</b></div>
+            <div><span>起始</span><b id="recStart">--</b></div>
+            <div><span>队列</span><b id="recLimit">--</b></div>
+          </div>
+          <p class="hint" id="recHint">连接后自动开始；队列满时最旧样本被丢弃，起始时间会随之前移。</p>
+          <button id="btnRecVars" class="btn" type="button">选择导出变量…</button>
+          <div id="recVars" class="rec-vars hidden"></div>
+          <div class="row2" style="margin-top:10px">
+            <button id="btnRecExport" class="btn primary">导出 CSV</button>
+          </div>
+          <button id="btnRecReset" class="btn" type="button" style="width:100%;margin-top:8px">重置录制（丢弃当前数据）</button>
+        </div>
+      </section>
+
+      <section class="float-panel" id="panelSource" data-panel="source" hidden>
+        <div class="fp-head"><b>信号源</b><button class="fp-x" data-panel-close="source" title="关闭">×</button></div>
+        <div class="fp-body">
+          <div class="field">
+            <label>目标架构</label>
+            <div class="seg" id="archSeg">
+              <button data-arch="cw32" class="active">CW32L0 · ARM</button>
+              <button data-arch="riscv">CH32V203 · RISC-V</button>
+            </div>
+          </div>
+          <div class="seg" id="srcSeg">
+        <button data-mode="openocd" class="active">OpenOCD</button>
+        <button data-mode="attach">附加 TCL</button>
+        <button data-mode="sim">仿真</button>
+      </div>
+      <div class="field" id="fieldOpenocd">
+        <label>OpenOCD 根目录（留空自动）</label>
+        <input id="inpOcd" type="text" placeholder="D:\Code\DR2159\tools\openocd">
+      </div>
+      <div class="field hidden" id="fieldAttach">
+        <label>已有 TCL 端口</label>
+        <div class="row2">
+          <input id="inpAttachHost" type="text" value="127.0.0.1">
+          <input id="inpAttachPort" type="number" value="6666">
+        </div>
+      </div>
+      <div class="row2">
+        <button id="btnDoConnect" class="btn primary">连接</button>
+        <button id="btnDisconnect" class="btn">断开</button>
+      </div>
+      <p class="hint" id="srcHint">启动 openocd.exe（tcl_port 自动选空闲端口），连接后读芯片 ID 自动识别型号。</p>
+      <div class="chip-line" id="chipLine">芯片：未识别</div>
+        </div>
+      </section>
+
+      <section class="float-panel" id="panelRate" data-panel="rate" hidden>
+        <div class="fp-head"><b>采样</b><button class="fp-x" data-panel-close="rate" title="关闭">×</button></div>
+        <div class="fp-body">
+          <div class="row2">
+        <div class="field"><label>频率</label>
+          <select id="rateSel">
+            <option value="20">20 Hz</option>
+            <option value="50">50 Hz</option>
+            <option value="100" selected>100 Hz</option>
+            <option value="150">150 Hz</option>
+            <option value="200">200 Hz</option>
+          </select>
+        </div>
+        <div class="field"><label>窗口</label>
+          <select id="winSel2">
+            <option value="5">5 s</option>
+            <option value="10">10 s</option>
+            <option value="20" selected>20 s</option>
+            <option value="30">30 s</option>
+            <option value="60">60 s</option>
+          </select>
+        </div>
+      </div>
+      <div class="fp-sep"></div>
+      <div class="field"><label>余量 = 阈值 − 电流</label>
+        <div class="row2">
+          <select id="marginCur" title="电流信号"></select>
+          <select id="marginThr" title="阈值信号"></select>
+        </div>
+      </div>
+      <p class="hint">顶部采样率卡片底部进度条显示余量（阈值 − 电流）。读不动就降到 50 Hz。</p>
         </div>
       </section>
 
@@ -238,109 +360,6 @@
     <button id="btnOverlayAdvanced" class="link">高级设置（路径 / 附加已有 TCL 端口）</button>
   </div>
 </div>
-
-<!-- 设置抽屉 -->
-<div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
-<aside id="drawer" class="drawer">
-  <div class="drawer-head">
-    <h2>设置</h2>
-    <button id="btnDrawerClose" class="btn icon" title="关闭">×</button>
-  </div>
-  <div class="drawer-body">
-    <section class="drawer-sec" id="secProject">
-      <h3>工程</h3>
-      <div class="row2">
-        <select id="projectSel2"></select>
-        <button id="btnProjectNew" class="btn">新建（复制当前）</button>
-      </div>
-      <div class="row2" style="margin-top:6px">
-        <button id="btnProjectSaveAs" class="btn">另存为</button>
-        <button id="btnProjectDelete" class="btn">删除当前</button>
-      </div>
-      <div class="row2" style="margin-top:6px">
-        <button id="btnProjectExport" class="btn">导出 JSON</button>
-        <button id="btnProjectImport" class="btn">导入 JSON</button>
-      </div>
-      <input id="projectFile" type="file" accept=".json,application/json" hidden>
-      <p class="hint" id="projectState">自动保存到浏览器 localStorage</p>
-    </section>
-
-    <section class="drawer-sec" id="secSource">
-      <h3>信号源</h3>
-      <div class="seg" id="srcSeg">
-        <button data-mode="openocd" class="active">OpenOCD</button>
-        <button data-mode="attach">附加 TCL</button>
-        <button data-mode="sim">仿真</button>
-      </div>
-      <div class="field" id="fieldOpenocd">
-        <label>OpenOCD 根目录（留空自动）</label>
-        <input id="inpOcd" type="text" placeholder="D:\Code\DR2159\tools\openocd">
-      </div>
-      <div class="field hidden" id="fieldAttach">
-        <label>已有 TCL 端口</label>
-        <div class="row2">
-          <input id="inpAttachHost" type="text" value="127.0.0.1">
-          <input id="inpAttachPort" type="number" value="6666">
-        </div>
-      </div>
-      <div class="row2">
-        <button id="btnDoConnect" class="btn primary">连接</button>
-        <button id="btnDisconnect" class="btn">断开</button>
-      </div>
-      <p class="hint" id="srcHint">启动 openocd.exe（tcl_port 自动选空闲端口），连接后读芯片 ID 自动识别型号。</p>
-      <div class="chip-line" id="chipLine">芯片：未识别</div>
-    </section>
-
-    <section class="drawer-sec" id="secRate">
-      <h3>采样</h3>
-      <div class="row2">
-        <div class="field"><label>频率</label>
-          <select id="rateSel">
-            <option value="20">20 Hz</option>
-            <option value="50">50 Hz</option>
-            <option value="100" selected>100 Hz</option>
-            <option value="150">150 Hz</option>
-            <option value="200">200 Hz</option>
-          </select>
-        </div>
-        <div class="field"><label>窗口</label>
-          <select id="winSel2">
-            <option value="5">5 s</option>
-            <option value="10">10 s</option>
-            <option value="20" selected>20 s</option>
-            <option value="30">30 s</option>
-            <option value="60">60 s</option>
-          </select>
-        </div>
-      </div>
-      <p class="hint">顶部采样率卡片底部进度条显示“实际 / 目标”。读不动就降到 50 Hz。</p>
-    </section>
-
-    <section class="drawer-sec" id="secSymbol">
-      <h3>符号与芯片</h3>
-      <div class="field">
-        <label>芯片型号（寄存器模板）</label>
-        <div class="row2">
-          <select id="mcuSel"></select>
-          <button id="btnChipProbe" class="btn">重新识别</button>
-        </div>
-      </div>
-      <div id="chipWarn" class="chip-warn hidden"></div>
-      <div id="chipInfo" class="hint">连接后自动读取芯片 ID；也可以手动选型号。</div>
-      <div class="axf-import">
-        <div class="field"><label>导入 AXF / ELF</label><input id="axfFile" type="file" accept=".axf,.elf"></div>
-        <div class="field"><label>同时导入头文件（可选）</label><input id="hdrFile" type="file" accept=".h,.hpp"></div>
-        <button id="btnImportAxf" class="btn primary">导入并重建符号</button>
-        <p class="hint">AXF 提供变量/地址；头文件提供外设寄存器基址。导入后当前通道按名字重新解析地址。</p>
-      </div>
-      <div class="row2" style="margin-top:8px">
-        <button id="btnReloadCatalog" class="btn">从当前 AXF 重新生成</button>
-        <button id="btnRecordCsv" class="btn">下载录制 CSV</button>
-      </div>
-      <p class="hint" id="catalogMeta"></p>
-    </section>
-  </div>
-</aside>
 
 <!-- 日志 -->
 <div id="logPanel" class="log-panel hidden">

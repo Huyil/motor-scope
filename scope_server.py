@@ -91,6 +91,30 @@ def load_mcu_index() -> Dict[str, Any]:
     return {"schema": 0, "models": []}
 
 
+def find_mcu_template(mcu: str) -> str:
+    """按型号/系列匹配内置寄存器模板；CH32V203 可命中 C8T6/K8T6。"""
+    up = str(mcu or "").strip().upper()
+    if not up:
+        return ""
+    for m in load_mcu_index().get("models") or []:
+        mid = str(m.get("id") or "")
+        fam = str((m.get("identify") or {}).get("family") or "")
+        mu = mid.upper()
+        if mu == up or (fam and fam.upper() == up) or mu.startswith(up) or up.startswith(mu):
+            return mid
+    return ""
+
+
+def _svd_peripherals(path: str) -> List[Dict[str, Any]]:
+    """复用 tools/build_mcu_tables.py 的 SVD 解析（derivedFrom/dim/cluster）。"""
+    import importlib.util
+    tool = os.path.join(HERE, "tools", "build_mcu_tables.py")
+    spec = importlib.util.spec_from_file_location("build_mcu_tables", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod.build_ch32(path)
+
+
 def _read_bytes(source: Any, addr: int, length: int) -> bytes:
     buf = bytearray()
     for off in range(0, length, 4):
@@ -524,6 +548,8 @@ class Hub:
 
 
 class Recorder:
+    """环形录制：连接后自动开始；队列满后最旧样本被丢弃，起始时间随之前移。"""
+
     def __init__(self, limit: int = 300000):
         self.limit = limit
         self.active = False
@@ -539,9 +565,25 @@ class Recorder:
             self.data.clear()
             self.signals = [s.to_dict() for s in signals]
 
+    def set_signals(self, signals: Sequence[Signal]) -> None:
+        """配置变化时同步录制列；列集合变了就重新开始（旧数据列数对不上）。"""
+        new = [s.to_dict() for s in signals]
+        with self._lock:
+            old_ids = [str(x.get("id")) for x in self.signals]
+            new_ids = [str(x.get("id")) for x in new]
+            if old_ids != new_ids:
+                self.data.clear()
+                self.started = time.time()
+            self.signals = new
+
     def stop(self) -> None:
         with self._lock:
             self.active = False
+
+    def reset(self) -> None:
+        with self._lock:
+            self.data.clear()
+            self.started = time.time()
 
     def append(self, t_ms: float, values: List[int]) -> None:
         if not self.active:
@@ -552,22 +594,47 @@ class Recorder:
     def info(self) -> Dict[str, Any]:
         with self._lock:
             n = len(self.data)
-            return {"active": self.active, "count": n,
-                    "seconds": (time.time() - self.started) if self.active and self.started else 0.0}
+            first = self.data[0][0] if n else None
+            last = self.data[-1][0] if n else None
+            span = ((last - first) / 1000.0) if n > 1 else 0.0
+            now = time.time()
+            if n:
+                start_wall = now - span
+            else:
+                start_wall = self.started if self.active and self.started else 0.0
+            return {
+                "active": self.active,
+                "count": n,
+                "seconds": round(span, 2),
+                "start_wall": round(start_wall, 3) if start_wall else 0,
+                "oldest_t": first,
+                "latest_t": last,
+                "limit": self.limit,
+                "signals": [{"id": x.get("id"), "name": x.get("name"), "unit": x.get("unit")}
+                            for x in self.signals],
+            }
 
-    def csv(self) -> str:
+    def csv(self, only_ids: Optional[Sequence[str]] = None) -> str:
         with self._lock:
             signals = [Signal(s) for s in self.signals] or []
             rows = list(self.data)
+        keep = None
+        if only_ids:
+            want = set(str(x) for x in only_ids)
+            keep = [i for i, s in enumerate(signals) if s.id in want]
+            if keep:
+                signals = [signals[i] for i in keep]
         out = io.StringIO()
         header = ["t_ms"] + ["%s%s" % (s.name, (" [%s]" % s.unit) if s.unit else "") for s in signals]
         out.write(",".join(_csv_cell(h) for h in header) + "\n")
         for t, vals in rows:
             cells = ["%.1f" % t]
-            for i, s in enumerate(signals):
+            idx = keep if keep is not None else list(range(len(signals)))
+            for j, i in enumerate(idx):
+                sig = signals[j]
                 raw = vals[i] if i < len(vals) else 0
-                val = raw * s.scale + s.offset
-                cells.append(("%.4f" % val).rstrip("0").rstrip(".") if s.scale != 1 or s.offset else str(raw))
+                val = raw * sig.scale + sig.offset
+                cells.append(("%.4f" % val).rstrip("0").rstrip(".") if sig.scale != 1 or sig.offset else str(raw))
             out.write(",".join(cells) + "\n")
         return out.getvalue()
 
@@ -857,6 +924,7 @@ class App:
         self.target_override = args.target
         self.last_connect_error = ""
         self.chip: Optional[Dict[str, Any]] = None
+        self.arch = "cw32"
         self.log: Deque[str] = deque(maxlen=300)
         self._auto_thread: Optional[threading.Thread] = None
         self.load_catalog(auto_regen=True)
@@ -922,7 +990,8 @@ class App:
 
     def import_catalog(self, axf_bytes: bytes, axf_name: str,
                        header_bytes: Optional[bytes] = None,
-                       header_name: str = "") -> Dict[str, Any]:
+                       header_name: str = "",
+                       import_mode: str = "header") -> Dict[str, Any]:
         """导入一个 AXF/ELF（可选 cw32l011.h），重建 signals.json.
 
         不依赖项目目录: 文件会存到 tools/motor_scope/imports/ 后再解析。
@@ -965,9 +1034,18 @@ class App:
             if header_path:
                 self.header = header_path
         warning = ""
+        template_used = ""
         if not data.get("peripherals"):
-            warning = "未解析到外设寄存器：请在导入时同时选择 cw32l011.h（当前头文件缺失或没有 CW_* 宏）"
-            self.add_log(warning)
+            mcu = str((data.get("meta") or {}).get("mcu") or "")
+            if import_mode == "vars":
+                self.add_log("仅导入变量（%s），外设寄存器沿用当前模板" % (mcu or "未知型号"))
+            else:
+                template_used = find_mcu_template(mcu)
+                if template_used:
+                    self.add_log("AXF 未带可用头文件，外设寄存器使用内置模板: %s" % template_used)
+                else:
+                    warning = "未解析到外设寄存器，请重新导入 SVD"
+                    self.add_log(warning)
         self.add_log("已导入 AXF: %s (%d 变量 / %d 外设)"
                      % (safe(axf_name, "axf"), len(data.get("variables", [])),
                         len(data.get("peripherals", []))))
@@ -975,7 +1053,63 @@ class App:
                 "counts": {"variables": len(data.get("variables", [])),
                            "peripherals": len(data.get("peripherals", []))},
                 "header_used": os.path.basename(header_path) if header_path else "",
+                "template_used": template_used,
+                "mode": import_mode,
                 "warning": warning}
+
+    def import_register_table(self, data: bytes, name: str) -> Dict[str, Any]:
+        """只更新外设寄存器表：支持 .svd / .h / .json，不动变量与地址。"""
+        ext = os.path.splitext(name or "")[1].lower()
+        if not data:
+            raise RuntimeError("寄存器表文件为空")
+        if len(data) > 32 * 1024 * 1024:
+            raise RuntimeError("寄存器表文件超过 32MB")
+        periphs: List[Dict[str, Any]] = []
+        source = ext.lstrip(".")
+        if ext == ".svd":
+            os.makedirs(self.import_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S") + "_%d" % (time.time_ns() % 1000000)
+            safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.basename(name or "table.svd"))[:96] or "table.svd"
+            path = os.path.join(self.import_dir, stamp + "_" + safe)
+            with open(path, "wb") as f:
+                f.write(data)
+            periphs = _svd_peripherals(path)
+            source = "svd"
+        elif ext == ".json":
+            try:
+                obj = json.loads(data.decode("utf-8"))
+            except Exception as exc:
+                raise RuntimeError("JSON 解析失败: %s" % exc)
+            periphs = obj.get("peripherals") if isinstance(obj, dict) else obj
+            if not isinstance(periphs, list):
+                raise RuntimeError("JSON 里没有 peripherals 数组")
+            source = "json"
+        else:
+            raise RuntimeError("寄存器表只支持 .svd / .json（CW32 已内置模板，不需要头文件）")
+
+        if not periphs:
+            raise RuntimeError("未解析到外设寄存器，请重新导入 SVD")
+        with self.catalog_lock:
+            self.catalog["peripherals"] = periphs
+            meta = self.catalog.setdefault("meta", {})
+            meta["peripheral_count"] = len(periphs)
+            meta["register_table"] = os.path.basename(name or "")
+            meta["register_source"] = source
+            tmp = self.signals_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.catalog, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, self.signals_path)
+        self.add_log("寄存器表已导入: %s (%d 外设, 来源 %s)" % (
+            os.path.basename(name or ""), len(periphs), source))
+        return {"ok": True, "catalog": self.catalog,
+                "counts": {"peripherals": len(periphs),
+                           "variables": len(self.catalog.get("variables") or [])},
+                "source": source}
+
+    def reset_recording(self) -> Dict[str, Any]:
+        self.sampler.recorder.reset()
+        self.add_log("录制已手动重置")
+        return {"ok": True, "record": self.sampler.recorder.info()}
 
     def default_config(self) -> Dict[str, Any]:
         variables = {v["name"]: v for v in self.catalog.get("variables", [])}
@@ -1007,6 +1141,7 @@ class App:
         return {
             "version": VERSION,
             "source": info,
+            "arch": self.arch,
             "chip": self.chip,
             "sampler": self.sampler.status(),
             "record": self.sampler.recorder.info(),
@@ -1072,12 +1207,20 @@ class App:
         src, self.source = self.source, None
         self.chip = None
         self.sampler.set_source(None)
+        self.sampler.recorder.stop()
         if src is not None:
             try:
                 src.close()
             except Exception as exc:
                 self.add_log("关闭源失败: %s" % exc)
             self.add_log("已断开")
+
+    def _begin_recording(self) -> None:
+        try:
+            self.sampler.recorder.start(self.sampler.signals)
+            self.add_log("自动录制已开始 (%d 路)" % len(self.sampler.signals))
+        except Exception as exc:
+            self.add_log("自动录制启动失败: %s" % exc)
 
     def connect(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         mode = str(payload.get("mode") or "openocd").lower()
@@ -1091,6 +1234,7 @@ class App:
             self.chip = None
             self.sampler.set_source(src)
             self.add_log("已切换到仿真信号源")
+            self._begin_recording()
             return {"ok": True, "source": src.info(), "chip": None}
 
         if mode == "attach":
@@ -1115,17 +1259,30 @@ class App:
             self.add_log("已连上外部 TCL %s:%d, CPUID=%s" % (
                 host, port, "0x%08x" % cpuid if cpuid is not None else "?"))
             self._probe_chip(src)
+            self._begin_recording()
             return {"ok": True, "source": src.info(), "chip": self.chip}
 
         # 本地拉起 openocd
+        arch = str(payload.get("arch") or "cw32").lower()
+        self.arch = "riscv" if arch in ("riscv", "ch32", "ch32v203", "rv32") else "cw32"
         exe = payload.get("openocd") or self.openocd_override
         iface = payload.get("iface") or self.iface_override
         target = payload.get("target") or self.target_override
-        paths = ocd.find_openocd(self.project, exe)
-        if paths is None:
-            msg = "找不到可用的 OpenOCD (需要 bin/openocd.exe + interface/cmsis-dap-v1.cfg + target/cw32l01x-flm.cfg)"
-            self.last_connect_error = msg
-            raise RuntimeError(msg)
+        if self.arch == "riscv":
+            paths = ocd.find_wch_openocd(self.project, exe)
+            if paths is None:
+                msg = ("找不到 WCH RISC-V OpenOCD：需要 bin/openocd.exe + bin/wch-riscv.cfg "
+                       "（默认在 MounRiver Studio 目录，可在连接面板里指定根目录）")
+                self.last_connect_error = msg
+                raise RuntimeError(msg)
+            if iface:
+                paths = ocd.OcdPaths(paths.exe, paths.scripts, iface, paths.target)
+        else:
+            paths = ocd.find_openocd(self.project, exe)
+            if paths is None:
+                msg = "找不到可用的 OpenOCD (需要 bin/openocd.exe + interface/cmsis-dap-v1.cfg + target/cw32l01x-flm.cfg)"
+                self.last_connect_error = msg
+                raise RuntimeError(msg)
         if iface:
             paths = ocd.OcdPaths(paths.exe, paths.scripts, iface, target or paths.target)
         if target:
@@ -1151,6 +1308,7 @@ class App:
         self.sampler.set_source(src)
         self.add_log("OpenOCD 已连接 (pid=%s, tcl_port=%d)" % (proc.pid, proc.port))
         self._probe_chip(src)
+        self._begin_recording()
         return {"ok": True, "source": src.info(), "chip": self.chip}
 
     def auto_connect(self) -> None:
@@ -1180,6 +1338,8 @@ class App:
             signals.append(s)
         rate = float(payload.get("rate") or 100)
         self.sampler.set_signals(signals, rate)
+        if self.sampler.recorder.active:
+            self.sampler.recorder.set_signals(signals)
         self.add_log("采样配置: %d 路, %.0f Hz" % (len(signals), rate))
         return {"ok": True, "signals": [s.to_dict() for s in signals], "rate": rate}
 
@@ -1319,13 +1479,37 @@ class Handler(BaseHTTPRequestHandler):
         if not axf or not axf[1]:
             return self._json({"ok": False, "error": "缺少 axf 文件"}, 400)
         header = files.get("header")
+        mode = files.get("expect")
+        mode = mode[1].decode("utf-8", "replace") if mode and mode[1] else "header"
+        if mode not in ("vars", "header"):
+            mode = "header"
         try:
             res = self.app.import_catalog(
                 axf[1], axf[0],
                 header[1] if header and header[1] else None,
                 header[0] if header else "",
+                import_mode=mode,
             )
             return self._json(res)
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)}, 500)
+
+    def _import_registers(self) -> None:
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype:
+            return self._json({"ok": False, "error": "需要 multipart/form-data"}, 400)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 32 * 1024 * 1024:
+            return self._json({"ok": False, "error": "文件为空或超过 32MB"}, 400)
+        files = parse_multipart(self.rfile.read(length), ctype)
+        table = files.get("table")
+        if not table or not table[1]:
+            return self._json({"ok": False, "error": "缺少寄存器表文件"}, 400)
+        try:
+            return self._json(self.app.import_register_table(table[1], table[0] or "table"))
         except Exception as exc:
             return self._json({"ok": False, "error": str(exc)}, 500)
 
@@ -1392,7 +1576,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/log":
                 return self._json({"log": self.app.log_tail(200)})
             if path == "/api/record.csv":
-                csv_text = self.app.sampler.recorder.csv()
+                qs = parse_qs(urlparse(self.path).query)
+                only = [x for x in (qs.get("ids") or [""])[0].split(",") if x]
+                csv_text = self.app.sampler.recorder.csv(only or None)
                 return self._bytes(csv_text.encode("utf-8-sig"), "text/csv; charset=utf-8",
                                    extra={"Content-Disposition": 'attachment; filename="motorscope.csv"'})
             if path == "/api/stream":
@@ -1411,10 +1597,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        payload = {} if path == "/api/catalog/import" else self._read_json()
+        payload = {} if path in ("/api/catalog/import", "/api/catalog/registers") else self._read_json()
         try:
             if path == "/api/catalog/import":
                 return self._import_catalog()
+            if path == "/api/catalog/registers":
+                return self._import_registers()
+            if path == "/api/record/reset":
+                return self._json(self.app.reset_recording())
             if path == "/api/connect":
                 return self._json(self.app.connect(payload))
             if path == "/api/disconnect":

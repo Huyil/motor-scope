@@ -85,6 +85,9 @@
     // 芯片型号 / 寄存器模板（与后端识别结果共用 web/mcu/index.json）
     chip: null,
     lastMode: 'openocd',
+    arch: 'cw32',
+    margin: { cur: '', thr: '' },
+    recordSel: new Set(),
     mcu: {
       models: [], active: '', detected: '', candidates: [], exact: false,
       expected: '', match: null, warning: '', loaded: false, periphs: [], manual: false,
@@ -123,7 +126,7 @@
       openPeriph: new Set(['ADC', 'ATIM', 'GPIOA']),
       openRegs: new Set(),
       overlayDismissed: false,
-      drawer: false,
+      panel: '',
       log: false,
       connecting: false,
       tableOpen: true,
@@ -187,8 +190,6 @@
     D.statLatency = $('#statLatency');
     D.statRecord = $('#statRecord');
     D.statMsg = $('#statMsg');
-    D.drawer = $('#drawer');
-    D.drawerBackdrop = $('#drawerBackdrop');
     D.calibModal = $('#calibModal');
     D.calibTarget = $('#calibTarget');
     D.calScale = $('#calScale');
@@ -205,10 +206,19 @@
     D.brandSub = $('#brandSub');
     D.cardProjectVal = $('#cardProjectVal');
     D.cardProjectSub = $('#cardProjectSub');
-    D.cardSymbolVal = $('#cardSymbolVal');
-    D.cardSymbolSub = $('#cardSymbolSub');
+    D.cardRecordVal = $('#cardRecordVal');
+    D.cardRecordSub = $('#cardRecordSub');
+    D.recCount = $('#recCount');
+    D.recSeconds = $('#recSeconds');
+    D.recStart = $('#recStart');
+    D.recLimit = $('#recLimit');
+    D.recHint = $('#recHint');
+    D.btnRecVars = $('#btnRecVars');
+    D.recVars = $('#recVars');
+    D.btnRecExport = $('#btnRecExport');
+    D.marginCur = $('#marginCur');
+    D.marginThr = $('#marginThr');
     D.cardSourceVal = $('#cardSourceVal');
-    D.btnSourceToggle = $('#btnSourceToggle');
     D.cardSourceSub = $('#cardSourceSub');
     D.cardRateVal = $('#cardRateVal');
     D.cardRateSub = $('#cardRateSub');
@@ -216,7 +226,9 @@
     D.cardRateBarText = $('#cardRateBarText');
     D.axfFile = $('#axfFile');
     D.hdrFile = $('#hdrFile');
-    D.btnImportAxf = $('#btnImportAxf');
+    D.btnImportVars = $('#btnImportVars');
+    D.btnImportRegs = $('#btnImportRegs');
+    D.btnRecReset = $('#btnRecReset');
     D.writeCard = $('#writeCard');
     D.writeList = $('#writeList');
     D.writeArmed = $('#writeArmed');
@@ -229,8 +241,8 @@
     D.toasts = $('#toasts');
     D.logPanel = $('#logPanel');
     D.logText = $('#logText');
-    D.btnRecord = $('#btnRecord');
     D.btnPause = $('#btnPause');
+    D.btnConnect = $('#btnConnect');
     D.srcHint = $('#srcHint');
     D.rateSel = $('#rateSel');
     D.winSel = $('#winSel');
@@ -410,26 +422,135 @@
     }
   }
 
+  function fmtDuration(sec) {
+    const n = Math.max(0, Math.round(Number(sec) || 0));
+    const h = Math.floor(n / 3600), m = Math.floor((n % 3600) / 60), s = n % 60;
+    const pad = (x) => String(x).padStart(2, '0');
+    return h ? h + ':' + pad(m) + ':' + pad(s) : pad(m) + ':' + pad(s);
+  }
+
+  function fmtClock(epoch) {
+    if (!epoch) return '--';
+    return new Date(epoch * 1000).toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  function ensureMarginDefaults() {
+    const rows = Array.from(S.rows.values()).filter((r) => !r.support && r.addr);
+    if (!rows.length) { S.margin.cur = ''; S.margin.thr = ''; return; }
+    if (!rows.some((r) => r.id === S.margin.cur)) {
+      S.margin.cur = (rows.find((r) => /current/i.test(r.name)) || rows[0]).id;
+    }
+    if (!rows.some((r) => r.id === S.margin.thr)) {
+      S.margin.thr = (rows.find((r) => /threshold/i.test(r.name)) || rows[1] || rows[0]).id;
+    }
+  }
+
+  function marginInfo() {
+    const last = latestSample();
+    if (!last) return null;
+    const cur = S.rows.get(S.margin.cur), thr = S.rows.get(S.margin.thr);
+    if (!cur || !thr) return null;
+    const c = rowValue(cur, last[1]);
+    const t = rowValue(thr, last[1]);
+    if (c === null || t === null || !isFinite(c) || !isFinite(t)) return null;
+    return { cur: c, thr: t, margin: t - c };
+  }
+
+  function renderMarginSelects() {
+    ensureMarginDefaults();
+    const rows = Array.from(S.rows.values()).filter((r) => !r.support && r.addr);
+    for (const [el, key] of [[D.marginCur, 'cur'], [D.marginThr, 'thr']]) {
+      if (!el) continue;
+      el.innerHTML = '';
+      for (const r of rows) {
+        const o = document.createElement('option');
+        o.value = r.id;
+        o.textContent = shortName(r.name);
+        el.appendChild(o);
+      }
+      el.value = S.margin[key] || '';
+    }
+  }
+
+  function renderRecordVars(signals) {
+    if (!D.recVars) return;
+    const list = (signals || []).filter((s) => s && s.id);
+    const ids = list.map((s) => String(s.id));
+    const sel = S.recordSel instanceof Set ? S.recordSel : (S.recordSel = new Set());
+    const keep = new Set(ids.filter((id) => sel.has(id)));
+    if (!sel.size) for (const id of ids) keep.add(id);
+    S.recordSel = keep;
+    D.recVars.innerHTML = '';
+    if (!list.length) {
+      D.recVars.innerHTML = '<div class="muted" style="font-size:11px">还没有录制列</div>';
+      return;
+    }
+    for (const s of list) {
+      const lab = document.createElement('label');
+      lab.className = 'rec-var';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = keep.has(s.id);
+      cb.addEventListener('change', () => {
+        if (cb.checked) S.recordSel.add(s.id); else S.recordSel.delete(s.id);
+        saveLocal();
+      });
+      const span = document.createElement('span');
+      span.textContent = s.name + (s.unit ? ' [' + s.unit + ']' : '');
+      lab.appendChild(cb);
+      lab.appendChild(span);
+      D.recVars.appendChild(lab);
+    }
+  }
+
+  function renderRecordPanel() {
+    const rec = S.record || {};
+    if (D.recCount) D.recCount.textContent = (rec.count || 0).toLocaleString('en-US');
+    if (D.recSeconds) D.recSeconds.textContent = fmtDuration(rec.seconds || 0);
+    if (D.recStart) D.recStart.textContent = fmtClock(rec.start_wall);
+    if (D.recLimit) D.recLimit.textContent = rec.limit ? Number(rec.limit).toLocaleString('en-US') : '--';
+    if (D.recHint) {
+      D.recHint.textContent = rec.active
+        ? '自动录制中；队列满后最旧样本被丢弃，起始时间会随之前移。'
+        : '连接后自动开始录制，断开即停止。';
+    }
+    const sig = (rec.signals || []).map((s) => s.id).join('|');
+    if (sig !== S.recordSig) {
+      S.recordSig = sig;
+      renderRecordVars(rec.signals || []);
+    }
+  }
+
+  function exportRecording() {
+    const ids = Array.from(S.recordSel || []);
+    if (!ids.length) { toast('至少选择一个变量', 'err'); return; }
+    window.location.href = '/api/record.csv?ids=' + encodeURIComponent(ids.join(','));
+  }
+
   function renderCards() {
     const p = readProjects();
     if (D.cardProjectVal) D.cardProjectVal.textContent = p.active || '默认';
     if (D.cardProjectSub) {
-      D.cardProjectSub.textContent = S.projectSavedAt
-        ? '已保存 ' + new Date(S.projectSavedAt).toLocaleTimeString('zh-CN', { hour12: false })
-        : '自动保存到浏览器';
-    }
-
-    const model = S.mcu.active || S.mcu.expected || '';
-    if (D.cardSymbolVal) D.cardSymbolVal.textContent = model || '—';
-    if (D.cardSymbolSub) {
+      const model = S.mcu.active || S.mcu.expected || '';
       const vars = (S.catalog.variables || []).length;
       const periphs = peripheralList().length;
       const bits = [];
+      if (model) bits.push(model);
       if (vars) bits.push(vars + ' 变量');
       if (periphs) bits.push(periphs + ' 外设');
-      if (S.mcu.detected) bits.push('检测 ' + S.mcu.detected);
-      D.cardSymbolSub.textContent = bits.join(' · ') || '导入 AXF / 选择型号';
-      D.cardSymbolSub.classList.toggle('warn', !!S.mcu.warning);
+      D.cardProjectSub.textContent = bits.join(' · ') || '自动保存到浏览器';
+      D.cardProjectSub.classList.toggle('warn', !!S.mcu.warning);
+    }
+
+    const rec = S.record || {};
+    if (D.cardRecordVal) D.cardRecordVal.textContent = (rec.count || 0).toLocaleString('en-US') + ' 点';
+    if (D.cardRecordSub) {
+      const connected = sourceConnected(S.source) && !S.sampler?.error;
+      if (rec.count) {
+        D.cardRecordSub.textContent = '已录 ' + fmtDuration(rec.seconds || 0) + ' · 起 ' + fmtClock(rec.start_wall);
+      } else {
+        D.cardRecordSub.textContent = connected ? '等待样本…' : '连接后自动录制';
+      }
     }
 
     const kind = S.source?.kind || 'none';
@@ -442,14 +563,16 @@
       const chip = S.mcu.detected || S.mcu.expected || '';
       D.cardSourceSub.textContent = connected
         ? (chip ? '已连接 · ' + chip : '已连接')
-        : 'OpenOCD / TCL / 仿真';
+        : (S.arch === 'riscv' ? 'CH32V203 · RISC-V' : 'CW32L0 · ARM');
       D.cardSourceSub.classList.toggle('warn', !!S.sampler?.error);
     }
-    if (D.btnSourceToggle) {
-      D.btnSourceToggle.textContent = connected ? '断开' : '连接';
-      D.btnSourceToggle.classList.toggle('on', !!connected);
-      D.btnSourceToggle.title = connected
-        ? '再次按下断开，释放 HID / SWD，可切给 MRS、Keil 等工具'
+    if (D.btnConnect) {
+      const label = D.btnConnect.querySelector('.btn-label');
+      if (label) label.textContent = connected ? '断开' : '连接';
+      D.btnConnect.classList.toggle('primary', !connected);
+      D.btnConnect.classList.toggle('danger', !!connected);
+      D.btnConnect.title = connected
+        ? '再次按下断开，彻底结束 OpenOCD 并释放 HID / SWD，可切给 MRS、Keil 等工具'
         : '连接当前信号源';
     }
 
@@ -457,10 +580,16 @@
     const actual = Number(S.sampler?.rate_actual) || 0;
     if (D.cardRateVal) D.cardRateVal.innerHTML = target + ' <i>Hz</i>';
     if (D.cardRateSub) D.cardRateSub.textContent = connected ? '实际 ' + actual.toFixed(1) + ' Hz' : '实际 --';
-    const pct = (connected && target > 0)
-      ? Math.max(0, Math.min(100, actual / target * 100)) : 0;
-    if (D.cardRateBar) D.cardRateBar.style.width = pct.toFixed(1) + '%';
-    if (D.cardRateBarText) D.cardRateBarText.textContent = connected ? actual.toFixed(0) + ' Hz' : '0%';
+    const mi = marginInfo();
+    const pct = mi && mi.thr > 0 ? Math.max(0, Math.min(100, mi.margin / mi.thr * 100)) : 0;
+    if (D.cardRateBar) {
+      D.cardRateBar.style.width = pct.toFixed(1) + '%';
+      D.cardRateBar.classList.toggle('neg', !!mi && mi.margin < 0);
+    }
+    if (D.cardRateBarText) {
+      D.cardRateBarText.textContent = mi ? '余量 ' + fmtTableNum(mi.margin) : '余量 --';
+    }
+    renderRecordPanel();
   }
 
   // 按 id 或名字找目录项（写入模块重绑地址、导入 AXF 后重解析都用到）
@@ -1378,6 +1507,7 @@
     renderLegend();
     renderValueTable();
     renderWriteMods();
+    renderMarginSelects();
     updateEmptyHint();
     saveLocal();
     sendConfig();
@@ -1392,6 +1522,7 @@
     await loadMcuIndex();
     await loadStatus();
     restoreConfig();
+    syncArchUI();
     renderCatalog();
     renderSelected();
     renderLegend();
@@ -1486,6 +1617,12 @@
         S.zeroLine = c.zeroLine !== false;
         S.glow = !!c.glow;
         if (['openocd', 'attach', 'sim'].includes(c.lastMode)) S.lastMode = c.lastMode;
+        if (c.arch === 'riscv' || c.arch === 'cw32') S.arch = c.arch;
+        if (c.margin && typeof c.margin === 'object') {
+          S.margin.cur = String(c.margin.cur || '');
+          S.margin.thr = String(c.margin.thr || '');
+        }
+        if (Array.isArray(c.recordSel)) S.recordSel = new Set(c.recordSel.map(String));
         S.ui.view = c.view === 'tree' ? 'tree' : 'list';
         S.ui.tableOpen = c.tableOpen !== false;
         if (c.sections && typeof c.sections === 'object') {
@@ -1569,6 +1706,7 @@
     updateViewSeg();
     syncTablePanel();
     syncSections();
+    renderMarginSelects();
     if (S.rows.size) sendConfig(true);
   }
 
@@ -1619,6 +1757,9 @@
         sections: Object.assign({ chart: true, table: true, write: true }, S.ui.sections || {}),
         mcu: S.mcu.active,
         lastMode: S.lastMode,
+        arch: S.arch,
+        margin: { cur: S.margin.cur, thr: S.margin.thr },
+        recordSel: Array.from(S.recordSel || []),
         wave: {
           seq: S.wave.seq,
           groups: S.wave.groups.map((g) => ({
@@ -1822,6 +1963,7 @@
     ensureWriteMods();
     syncChannels();
     renderWriteMods();
+    renderMarginSelects();
     if (rate) S.rate = Number(rate) || S.rate;
     syncToggles();
   }
@@ -2175,6 +2317,10 @@
     const kind = S.source.kind || 'none';
     const connected = sourceConnected(S.source) && !S.sampler.error;
     if (connected && kind !== 'none') S.lastMode = kind;
+    if (connected && (st.arch === 'riscv' || st.arch === 'cw32') && st.arch !== S.arch) {
+      S.arch = st.arch;
+      syncArchUI();
+    }
     if (!connected && S.write.armed) {
       disarmWrite('连接断开，写入已锁定');
       saveLocal();
@@ -2188,8 +2334,9 @@
     D.statRate.textContent = (S.sampler.rate_actual || 0).toFixed(1) + ' Hz';
     const lat = st.uptime != null && S.sampler.last_t ? Math.max(0, st.uptime * 1000 - S.sampler.last_t) : null;
     D.statLatency.textContent = lat === null ? '--' : (lat < 1000 ? Math.round(lat) + ' ms' : (lat / 1000).toFixed(1) + ' s');
-    D.statRecord.textContent = S.record.active ? ((S.record.count || 0).toLocaleString('en-US') + ' 点') : '关';
-    D.btnRecord.classList.toggle('active', !!S.record.active);
+    D.statRecord.textContent = S.record.active
+      ? ('自动 ' + ((S.record.count || 0).toLocaleString('en-US') + ' 点'))
+      : '关';
     let msg = '运行中';
     if (S.sampler.error) msg = brief(S.sampler.error);
     else if (S.source.kind === 'none') msg = brief(st.connect_error) || '等待连接';
@@ -2232,7 +2379,7 @@
   function updateOverlay() {
     const src = S.status?.source;
     const connected = sourceConnected(src);
-    const shouldShow = !connected && !S.ui.overlayDismissed && !S.ui.connecting && !S.ui.drawer;
+    const shouldShow = !connected && !S.ui.overlayDismissed && !S.ui.connecting && !S.ui.panel;
     D.overlay.classList.toggle('hidden', !shouldShow);
     if (S.ui.connecting) {
       D.overlayHint.textContent = '正在启动 OpenOCD 并读 CPUID 握手…';
@@ -2248,6 +2395,7 @@
     D.srcSegMode = mode;
     const payload = { mode };
     if (mode === 'openocd') {
+      payload.arch = S.arch;
       const p = ($('#inpOcd')?.value || '').trim();
       if (p) payload.openocd = p;
     } else if (mode === 'attach') {
@@ -2280,7 +2428,8 @@
     try {
       await post('/api/disconnect', {});
       disarmWrite('已断开，写入已锁定');
-      S.ui.overlayDismissed = false;
+      // 主动断开时不要把“连接目标”弹窗又顶出来
+      S.ui.overlayDismissed = true;
       S.lastChipKey = '';
       applyChip(null);
       toast('已断开，调试器已释放', 'ok');
@@ -3780,6 +3929,7 @@
 
   // ---------------------------------------------------------------- UI bindings
   function bindUI() {
+    initPanels();
     window.addEventListener('resize', () => { resizeChart(); fitTopbar(); });
     if (window.ResizeObserver) new ResizeObserver(resizeChart).observe(D.wrap);
     setupTopbarFit();
@@ -3792,18 +3942,13 @@
     $('#btnOverlayAdvanced')?.addEventListener('click', () => {
       S.ui.overlayDismissed = true;
       updateOverlay();
-      openDrawer();
+      togglePanel('source');
     });
 
     D.btnPause.addEventListener('click', togglePause);
+    $('#btnSidebar')?.addEventListener('click', () => D.sidebar?.classList.toggle('open'));
     $('#btnClear').addEventListener('click', clearAll);
-    D.btnRecord.addEventListener('click', toggleRecord);
-    $('#btnCsv').addEventListener('click', downloadCsv);
     $('#btnShot').addEventListener('click', snapshot);
-    $('#btnSettings').addEventListener('click', () => openDrawer());
-    $('#btnSidebar').addEventListener('click', () => D.sidebar.classList.toggle('open'));
-    $('#btnDrawerClose').addEventListener('click', closeDrawer);
-    D.drawerBackdrop.addEventListener('click', closeDrawer);
     $('#btnLog').addEventListener('click', () => { S.ui.log = true; D.logPanel.classList.remove('hidden'); refreshLog(); });
     $('#btnLogClose').addEventListener('click', () => { S.ui.log = false; D.logPanel.classList.add('hidden'); });
 
@@ -3841,25 +3986,25 @@
     $('#glowOn').addEventListener('change', (e) => { S.glow = e.target.checked; saveLocal(); S.dirty = true; });
 
     // drawer
+    $$('#archSeg button').forEach((b) => b.addEventListener('click', () => {
+      S.arch = b.dataset.arch === 'riscv' ? 'riscv' : 'cw32';
+      syncArchUI();
+      saveLocal();
+    }));
     $$('#srcSeg button').forEach((b) => b.addEventListener('click', () => {
       $$('#srcSeg button').forEach((x) => x.classList.toggle('active', x === b));
       const mode = b.dataset.mode;
       $('#fieldOpenocd').classList.toggle('hidden', mode !== 'openocd');
       $('#fieldAttach').classList.toggle('hidden', mode !== 'attach');
-      D.srcHint.textContent = mode === 'sim'
-        ? '不连硬件，用脚本电流/阈值演示全部 UI 与堵转判定。'
-        : mode === 'attach'
-          ? '连到已经在跑的 OpenOCD tcl_port（例如手工启动的 openocd -c "tcl_port 6666"）。'
-          : '启动 openocd.exe（tcl_port 自动选空闲端口），读 CPUID 0x410CC601 握手。';
       D.srcSegMode = mode;
+      updateSourceHint();
     }));
     $('#btnDoConnect').addEventListener('click', () => {
       const mode = D.srcSegMode || 'openocd';
       doConnect(mode);
     });
     $('#btnDisconnect').addEventListener('click', disconnectSource);
-    D.btnSourceToggle?.addEventListener('click', async (e) => {
-      e.stopPropagation();
+    D.btnConnect?.addEventListener('click', async () => {
       if (sourceConnected(S.source) && !S.sampler?.error) {
         await disconnectSource();
         return;
@@ -3893,7 +4038,7 @@
 
     // 顶部 4 张控制卡：工程 / 符号 / 信号源 / 采样率
     for (const card of $$('.ctl-card')) {
-      const go = () => openDrawer(card.dataset.go);
+      const go = () => togglePanel(card.dataset.go);
       card.addEventListener('click', go);
       card.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
@@ -3901,7 +4046,7 @@
     }
     D.mcuSel?.addEventListener('change', () => selectMcu(D.mcuSel.value, true));
     $('#btnChipProbe')?.addEventListener('click', probeChipNow);
-    $('#btnChipBannerFix')?.addEventListener('click', () => openDrawer('symbol'));
+    $('#btnChipBannerFix')?.addEventListener('click', () => togglePanel('symbol'));
 
     // 工程
     D.projectSel?.addEventListener('change', () => switchProject(D.projectSel.value));
@@ -3930,11 +4075,31 @@
         saveLocal();
       });
     });
+    D.btnRecVars?.addEventListener('click', () => {
+      D.recVars?.classList.toggle('hidden');
+    });
+    D.btnRecExport?.addEventListener('click', exportRecording);
+    for (const [el, key] of [[D.marginCur, 'cur'], [D.marginThr, 'thr']]) {
+      el?.addEventListener('change', () => {
+        S.margin[key] = el.value;
+        saveLocal();
+        S.dirty = true;
+        renderCards();
+      });
+    }
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
-    $('#btnImportAxf').addEventListener('click', importAxf);
-    $('#btnRecordCsv').addEventListener('click', () => {
-      if (!S.record.active && !(S.record.count > 0)) { toast('先点录制，再下载', 'err'); return; }
-      window.location.href = '/api/record.csv';
+    $('#btnImportVars').addEventListener('click', importAxf);
+    $('#btnImportRegs').addEventListener('click', importRegisters);
+    D.btnRecReset?.addEventListener('click', async () => {
+      if (!confirm('确定丢弃当前录制数据并重新计时？')) return;
+      try {
+        const r = await post('/api/record/reset', {});
+        S.record = r.record || {};
+        toast('录制已重置', 'ok');
+        await refreshStatus();
+      } catch (e) {
+        toast('重置失败: ' + e.message, 'err');
+      }
     });
 
     // keyboard
@@ -3943,14 +4108,15 @@
       const typing = tag === 'input' || tag === 'textarea' || tag === 'select';
       if (e.key === 'Escape') {
         if (D.calibModal && !D.calibModal.classList.contains('hidden')) { closeCalibModal(); return; }
-        if (S.ui.drawer) closeDrawer();
+        if (S.ui.panel) closePanels();
         else if (S.ui.log) { S.ui.log = false; D.logPanel.classList.add('hidden'); }
         return;
       }
       if (typing) return;
+      // Ctrl/Cmd/Alt 组合键交给浏览器（尤其是 Ctrl+C 复制），不要抢
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.code === 'Space') { e.preventDefault(); togglePause(); }
       else if (e.key === 'c' || e.key === 'C') clearAll();
-      else if (e.key === 'r' || e.key === 'R') toggleRecord();
       else if (e.key === '/') { e.preventDefault(); D.search.focus(); }
     });
   }
@@ -4027,27 +4193,103 @@
     addSignal(id, { table: true, plot: true });
   }
 
-  function openDrawer(section) {
-    S.ui.drawer = true;
-    S.ui.overlayDismissed = true;
-    D.drawer.classList.add('open');
-    D.drawerBackdrop.classList.remove('hidden');
-    updateOverlay();
-    renderChipUI();
-    const mode = S.source.kind === 'sim' ? 'sim' : S.source.kind === 'attach' ? 'attach' : 'openocd';
-    D.srcSegMode = mode;
-    $$('#srcSeg button').forEach((x) => x.classList.toggle('active', x.dataset.mode === mode));
-    $('#fieldOpenocd').classList.toggle('hidden', mode !== 'openocd');
-    $('#fieldAttach').classList.toggle('hidden', mode !== 'attach');
-    const map = { project: '#secProject', source: '#secSource', rate: '#secRate', symbol: '#secSymbol' };
-    const target = section && map[section] ? document.querySelector(map[section]) : null;
-    if (target) setTimeout(() => target.scrollIntoView({ block: 'start', behavior: 'smooth' }), 60);
+  // ---------------------------------------------------------------- 卡片悬浮面板
+  const PANEL_NAMES = ['project', 'record', 'source', 'rate'];
+
+  function panelFor(name) {
+    return document.getElementById('panel' + name.charAt(0).toUpperCase() + name.slice(1));
   }
 
-  function closeDrawer() {
-    S.ui.drawer = false;
-    D.drawer.classList.remove('open');
-    D.drawerBackdrop.classList.add('hidden');
+  function closePanels() {
+    for (const n of PANEL_NAMES) {
+      const el = panelFor(n);
+      if (el) el.hidden = true;
+    }
+    document.querySelectorAll('.ctl-card.active').forEach((c) => c.classList.remove('active'));
+    S.ui.panel = '';
+  }
+
+  function placePanel(el, card) {
+    const r = card.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    el.style.visibility = 'hidden';
+    el.hidden = false;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    let left = Math.max(8, Math.min(r.left, vw - w - 8));
+    let top = r.bottom + 8;
+    const maxH = vh - top - 10;
+    el.style.maxHeight = Math.max(220, maxH) + 'px';
+    if (h > maxH) {
+      top = Math.max(8, vh - Math.max(220, maxH) - 10);
+    }
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+    el.style.visibility = '';
+  }
+
+  function togglePanel(name) {
+    const el = panelFor(name);
+    const card = document.querySelector('.ctl-card[data-go="' + name + '"]');
+    if (!el) return;
+    const isOpen = !el.hidden;
+    closePanels();
+    if (isOpen) return;
+    el.hidden = false;
+    S.ui.panel = name;
+    if (card) {
+      card.classList.add('active');
+      placePanel(el, card);
+    } else {
+      el.style.left = '50%';
+      el.style.top = '80px';
+      el.style.transform = 'translateX(-50%)';
+    }
+    el.style.visibility = '';
+  }
+
+  function updateSourceHint() {
+    if (!D.srcHint) return;
+    const mode = D.srcSegMode || 'openocd';
+    if (mode === 'sim') {
+      D.srcHint.textContent = '不连硬件，用脚本信号演示全部 UI。';
+    } else if (mode === 'attach') {
+      D.srcHint.textContent = '连到已经在跑的 OpenOCD tcl_port（如手工启动的 openocd -c "tcl_port 6666"），RISC-V / ARM 都可。';
+    } else if (S.arch === 'riscv') {
+      D.srcHint.textContent = '启动 WCH OpenOCD（wlinke + sdi）连接 CH32V203；需要 MounRiver Studio 自带的 OpenOCD。';
+    } else {
+      D.srcHint.textContent = '启动 ARM OpenOCD（cmsis-dap + SWD）连接 CW32L0，读芯片 ID 自动识别型号。';
+    }
+  }
+
+  function syncArchUI() {
+    $$('#archSeg button').forEach((b) => {
+      b.classList.toggle('active', (b.dataset.arch === 'riscv') === (S.arch === 'riscv'));
+    });
+    const label = $('#fieldOpenocd label');
+    const inp = $('#inpOcd');
+    if (S.arch === 'riscv') {
+      if (label) label.textContent = 'WCH OpenOCD 根目录（留空自动）';
+      if (inp) inp.placeholder = 'C:\\MounRiver\\MounRiver_Studio3\\...\\WCH\\OpenOCD\\OpenOCD';
+    } else {
+      if (label) label.textContent = 'OpenOCD 根目录（留空自动）';
+      if (inp) inp.placeholder = 'D:\\Code\\DR2159\\tools\\openocd';
+    }
+    updateSourceHint();
+  }
+
+  function initPanels() {
+    document.querySelectorAll('[data-panel-close]').forEach((b) => {
+      b.addEventListener('click', closePanels);
+    });
+    document.addEventListener('pointerdown', (e) => {
+      if (!S.ui.panel) return;
+      if (e.target.closest('.float-panel') || e.target.closest('.ctl-card')) return;
+      if (e.target.closest('#chipBanner')) return;
+      closePanels();
+    });
+    window.addEventListener('resize', () => closePanels());
   }
 
   function togglePause() {
@@ -4097,16 +4339,6 @@
     toast('已清空缓冲', 'ok');
   }
 
-  async function toggleRecord() {
-    try {
-      const res = await post('/api/record', { active: !S.record.active });
-      S.record = res.record || {};
-      D.btnRecord.classList.toggle('active', !!S.record.active);
-      toast(S.record.active ? '开始录制（后端缓存）' : '已停止录制', 'ok');
-      await refreshStatus();
-    } catch (e) { toast(e.message, 'err'); }
-  }
-
   function snapshot() {
     try {
       const url = D.chart.toDataURL('image/png');
@@ -4115,31 +4347,6 @@
       a.download = 'motorscope_' + stamp() + '.png';
       a.click();
     } catch (e) { toast('截图失败: ' + e.message, 'err'); }
-  }
-
-  function downloadCsv() {
-    if (!S.samples.length) { toast('没有数据', 'err'); return; }
-    const rows = [];
-    for (const r of S.rows.values()) if (r.table || r.plot) rows.push(r);
-    for (const v of S.virtuals) if (v.table || v.plot) rows.push(v);
-    if (!rows.length) { toast('没有可导出的通道', 'err'); return; }
-    const lines = [];
-    lines.push(['t_s'].concat(rows.map((r) => r.name + (r.unit ? ' [' + r.unit + ']' : ''))).map(csvCell).join(','));
-    const t0 = S.samples[0][0];
-    for (const [t, vals] of S.samples) {
-      const line = [((t - t0) / 1000).toFixed(3)];
-      for (const row of rows) {
-        const v = rowValue(row, vals);
-        line.push(v === null || !isFinite(v) ? '' : String(Number(v.toFixed(4))));
-      }
-      lines.push(line.join(','));
-    }
-    const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'motorscope_' + stamp() + '.csv';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   }
 
   function csvCell(v) {
@@ -4207,26 +4414,47 @@
   async function importAxf() {
     const axf = D.axfFile?.files?.[0];
     if (!axf) { toast('先选择 .axf / .elf 文件', 'err'); return; }
-    const hdr = D.hdrFile?.files?.[0];
     const fd = new FormData();
     fd.append('axf', axf, axf.name || 'firmware.axf');
-    if (hdr) fd.append('header', hdr, hdr.name || 'cw32l011.h');
-    const btn = D.btnImportAxf;
+    fd.append('expect', 'vars');
+    const btn = D.btnImportVars;
     const old = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
-    toast('正在解析 AXF…');
+    toast('正在解析 AXF/ELF…');
     try {
       const res = await fetch('/api/catalog/import', { method: 'POST', body: fd });
       const data = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
       if (!res.ok || !data.ok) throw new Error(data.error || '导入失败');
       applyCatalog(data.catalog);
-      toast('AXF 已导入：' + data.counts.variables + ' 变量 / ' +
-        data.counts.peripherals + ' 外设', 'ok');
+      toast('AXF/ELF 已导入：' + data.counts.variables + ' 变量', 'ok');
       if (data.warning) toast(data.warning, 'err');
     } catch (e) {
       toast('导入失败: ' + e.message, 'err');
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = old || '导入并重建符号'; }
+      if (btn) { btn.disabled = false; btn.textContent = old || '导入 AXF/ELF'; }
+    }
+  }
+
+  async function importRegisters() {
+    const f = D.hdrFile?.files?.[0];
+    if (!f) { toast('先选择寄存器表（.h / .svd / .json）', 'err'); return; }
+    const fd = new FormData();
+    fd.append('table', f, f.name || 'registers.svd');
+    const btn = D.btnImportRegs;
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '解析中…'; }
+    toast('正在解析寄存器表…');
+    try {
+      const res = await fetch('/api/catalog/registers', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
+      if (!res.ok || !data.ok) throw new Error(data.error || '导入失败');
+      applyCatalog(data.catalog);
+      toast('寄存器表已导入：' + data.counts.peripherals + ' 外设' +
+        (data.source ? '（' + data.source + '）' : ''), 'ok');
+    } catch (e) {
+      toast('导入失败: ' + e.message, 'err');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = old || '导入寄存器表'; }
     }
   }
 
@@ -4248,15 +4476,44 @@
   }
 
   function toast(msg, kind = '') {
+    if (!D.toasts) return null;
+    const key = kind + '|' + msg;
+    // 同一条消息不重复堆叠：先移除旧的，再放一条新的
+    for (const old of Array.from(D.toasts.children)) {
+      if (old.dataset.key === key) {
+        clearTimeout(old._timer);
+        old.remove();
+      }
+    }
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
-    el.textContent = msg;
+    el.dataset.key = key;
+    const text = document.createElement('span');
+    text.className = 'toast-msg';
+    text.textContent = msg;
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.className = 'toast-x';
+    x.title = '关闭';
+    x.textContent = '×';
+    el.appendChild(text);
+    el.appendChild(x);
+
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(el._timer);
+      el.classList.add('out');
+      setTimeout(() => el.remove(), 200);
+    };
+    x.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+    el.addEventListener('click', close);
+
     D.toasts.appendChild(el);
-    setTimeout(() => {
-      el.style.opacity = '0';
-      el.style.transition = 'opacity .2s';
-      setTimeout(() => el.remove(), 220);
-    }, kind === 'err' ? 6000 : 3200);
+    while (D.toasts.children.length > 4) D.toasts.firstElementChild.remove();
+    el._timer = setTimeout(close, kind === 'err' ? 6000 : 3200);
+    return el;
   }
 
   // ---------------------------------------------------------------- go

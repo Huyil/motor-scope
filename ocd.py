@@ -196,6 +196,36 @@ def find_openocd(project_dir: str, override: Optional[str] = None) -> Optional[O
     return None
 
 
+def find_wch_openocd(project_dir: str, override: Optional[str] = None) -> Optional[OcdPaths]:
+    """找 WCH/MounRiver 的 RISC-V OpenOCD (wlinke + wch_riscv)."""
+    roots: List[str] = []
+    if override:
+        roots.append(override)
+    here = os.path.dirname(os.path.abspath(__file__))
+    roots += [
+        os.path.join(project_dir, "tools", "openocd-wch"),
+        os.path.join(os.path.dirname(os.path.abspath(project_dir)), "tools", "openocd-wch"),
+        os.path.join(here, "..", "openocd-wch"),
+        r"C:\MounRiver\MounRiver_Studio3\resources\app\resources\win32\components\WCH\OpenOCD\OpenOCD",
+    ]
+    seen = set()
+    for root in roots:
+        root = os.path.abspath(os.path.expanduser(root))
+        if root in seen:
+            continue
+        seen.add(root)
+        exe = os.path.join(root, "bin", "openocd.exe" if os.name == "nt" else "openocd")
+        if not _exists(exe) and os.name == "nt":
+            exe2 = os.path.join(root, "bin", "openocd")
+            if _exists(exe2):
+                exe = exe2
+        scripts = os.path.join(root, "share", "openocd", "scripts")
+        cfg = os.path.join(root, "bin", "wch-riscv.cfg")
+        if _exists(exe) and _exists(cfg):
+            return OcdPaths(exe=exe, scripts=scripts, iface=cfg, target="")
+    return None
+
+
 def free_port() -> int:
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -237,11 +267,10 @@ class OcdProcess:
     def start(self, timeout: float = 15.0) -> TclClient:
         if self.proc is not None:
             raise OcdError("OpenOCD 进程已在运行")
-        cmd = [
-            self.paths.exe,
-            "-s", self.paths.scripts,
-            "-f", self.paths.iface,
-            "-f", self.paths.target,
+        cmd = [self.paths.exe, "-s", self.paths.scripts, "-f", self.paths.iface]
+        if self.paths.target:
+            cmd += ["-f", self.paths.target]
+        cmd += [
             "-c", "tcl_port %d" % self.port,
             "-c", "telnet_port disabled",
             "-c", "gdb_port disabled",
@@ -279,7 +308,9 @@ class OcdProcess:
                 client.install_reader()
                 # 握手: 读 CPUID, 同时确认 read_memory 通路可用
                 cpuid = client.read_words(0xE000ED00, 1)[0]
-                if cpuid != 0x410CC601:
+                if cpuid == 0:
+                    self._append_log("INFO: 目标不是 Cortex-M (CPUID=0)，按 RISC-V / 其它架构继续")
+                elif cpuid != 0x410CC601:
                     self._append_log("WARN: CPUID=0x%08x (期望 0x410CC601, 可能不是 M0+)" % cpuid)
                 self.client = client
                 self._append_log("TCL 已连接 127.0.0.1:%d, CPUID=0x%08x" % (self.port, cpuid))
