@@ -118,8 +118,17 @@
 
 
       <section class="float-panel" id="panelProject" data-panel="project" hidden>
-        <div class="fp-head"><b>工程配置</b><button class="fp-x" data-panel-close="project" title="关闭">×</button></div>
+        <div class="fp-head"><b>工程配置</b><span class="badge" id="profileBadge">机型</span><button class="fp-x" data-panel-close="project" title="关闭">×</button></div>
         <div class="fp-body">
+          <h4 class="fp-h4">机型（符号 + 芯片 + 连接）</h4>
+          <div id="machineList" class="machine-grid"></div>
+          <div class="row2" style="margin-top:8px">
+            <button id="btnProfileBuild" class="btn">重建当前机型符号</button>
+            <button id="btnProfileSave" class="btn primary">保存配置</button>
+          </div>
+          <p class="hint" id="profileState">自动保存到 profiles/&lt;机型&gt;/config.json</p>
+          <div class="fp-sep"></div>
+          <h4 class="fp-h4">工程副本（当前机型内）</h4>
           <div class="row2">
         <select id="projectSel2"></select>
         <button id="btnProjectNew" class="btn">新建（复制当前）</button>
@@ -184,8 +193,8 @@
           <div class="field">
             <label>目标架构</label>
             <div class="seg" id="archSeg">
-              <button data-arch="cw32" class="active">CW32L0 · ARM</button>
-              <button data-arch="riscv">CH32V203 · RISC-V</button>
+              <button data-arch="cw32" class="active">ARM · Cortex-M</button>
+              <button data-arch="riscv">RISC-V</button>
             </div>
           </div>
           <div class="seg" id="srcSeg">
@@ -247,7 +256,7 @@
           <select id="marginThr" title="阈值信号"></select>
         </div>
       </div>
-      <p class="hint">顶部采样率卡片底部进度条显示余量（阈值 − 电流）。RISC-V 读取需要短暂 halt：可选 1 / 2 / 5 / 10 / 20 Hz，越低对程序干扰越小。</p>
+      <p class="hint">顶部采样率卡片底部进度条显示余量（阈值 − 电流）。RISC-V 读取需要短暂 halt：可选 1 / 2 / 5 / 10 / 20 / 50 Hz；50 Hz 约一半时间在 halt，越低干扰越小。</p>
         </div>
       </section>
 

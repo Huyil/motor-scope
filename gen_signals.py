@@ -441,11 +441,38 @@ def _infer_mcu(machine: str, header: str) -> str:
     return "CW32L011"
 
 
-def build(axf: str, header: str, map_path: Optional[str] = None) -> Dict[str, Any]:
+def _svd_peripherals(path: str) -> List[Dict[str, Any]]:
+    """用 tools/build_mcu_tables.py 的 SVD 解析器展开外设（derivedFrom/dim/cluster）。"""
+    import importlib.util
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "tools", "build_mcu_tables.py")
+    spec = importlib.util.spec_from_file_location("build_mcu_tables", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod.build_ch32(path)
+
+
+def build(axf: str, header: str, map_path: Optional[str] = None, *,
+          svd: Optional[str] = None, mcu: str = "",
+          ram: Optional[Tuple[int, int]] = None,
+          defaults: Optional[List[str]] = None,
+          stall: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """从 AXF/ELF 生成信号目录。
+
+    header  非空且存在时: 从 CW32 头文件解析外设（*_TypeDef + CW_xxx 宏）。
+    svd     非空且存在时: 从 CMSIS-SVD 解析外设（CH32 / LKS 等无头文件型号）。
+            两者同时给出时 header 优先。
+    mcu     显式型号（写入 meta.mcu，供芯片识别比对）；留空按架构/头文件推断。
+    ram     (start, end) RAM 地址范围；留空按架构取默认。
+    defaults / stall  覆盖默认信号与堵转判定信号（由工程配置提供）。
+    """
+    header = header or ""
     with open(axf, "rb") as f:
         elf = ELFFile(f)
         machine = str(elf.header.get("e_machine", ""))
-        if "RISCV" in machine.upper():
+        if ram:
+            ram_min, ram_max = int(ram[0]), int(ram[1])
+        elif "RISCV" in machine.upper():
             ram_min, ram_max = 0x20000000, 0x20005000   # CH32V203: 20KB
         else:
             ram_min, ram_max = RAM_MIN, RAM_MAX
@@ -454,7 +481,11 @@ def build(axf: str, header: str, map_path: Optional[str] = None) -> Dict[str, An
         dwarf = elf.get_dwarf_info()
         types = _collect_typedefs(dwarf)
         variables = _collect_variables(dwarf, ram_min, ram_max)
-        peripherals = _collect_peripherals(header, types) if os.path.isfile(header) else []
+        peripherals: List[Dict[str, Any]] = []
+        if os.path.isfile(header):
+            peripherals = _collect_peripherals(header, types)
+        elif svd and os.path.isfile(svd):
+            peripherals = _svd_peripherals(svd)
 
     def find(fragment: str) -> Optional[str]:
         for v in variables:
@@ -462,23 +493,28 @@ def build(axf: str, header: str, map_path: Optional[str] = None) -> Dict[str, An
                 return fragment
         return None
 
-    defaults = [n for n in (
+    picked = list(defaults or [n for n in (
         "motor.over.current",
         "motor.over.thresholdLast",
         "adc.RES[0]",
         "motor.Scfg.vol",
-    ) if find(n)]
-    stall_current = find("motor.over.current") or (variables[0]["name"] if variables else "")
-    stall_threshold = find("motor.over.thresholdLast") or find("motor.over.threshold") or ""
+    ) if find(n)])
+    picked = [n for n in picked if find(n)]
+    # 没有明确的堵转信号就留空: 不要拿第一个变量凑数（只有 CW32 DR2159 那套
+    # 固件有 motor.over.*；DR1152/LKS 的堵转判定由 profile.stall 显式指定）。
+    stall_current = (stall or {}).get("current") or find("motor.over.current") or ""
+    stall_threshold = (stall or {}).get("threshold") \
+        or find("motor.over.thresholdLast") or find("motor.over.threshold") or ""
 
     meta = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "axf": os.path.basename(axf),
         "axf_mtime": int(os.path.getmtime(axf)),
         "axf_size": os.path.getsize(axf),
-        "header": os.path.basename(header),
+        "header": os.path.basename(header) if header else "",
+        "svd": os.path.basename(svd) if svd else "",
         "map": os.path.basename(map_path) if map_path else "",
-        "mcu": _infer_mcu(machine, header),
+        "mcu": mcu or _infer_mcu(machine, header),
         "ram": [ram_min, ram_max],
         "variable_count": len(variables),
         "peripheral_count": len(peripherals),
@@ -487,7 +523,7 @@ def build(axf: str, header: str, map_path: Optional[str] = None) -> Dict[str, An
         "meta": meta,
         "variables": variables,
         "peripherals": peripherals,
-        "defaults": defaults,
+        "defaults": picked,
         "stall": {"current": stall_current, "threshold": stall_threshold},
     }
 
@@ -499,12 +535,20 @@ def main(argv=None) -> int:
     ap.add_argument("--axf", default=os.path.join(proj, "MDK", "Objects", "DR2159.axf"))
     ap.add_argument("--header", default=os.path.join(proj, "Libraries", "inc", "cw32l011.h"))
     ap.add_argument("--map", default=os.path.join(proj, "MDK", "Objects", "DR2159.map"))
+    ap.add_argument("--svd", default="", help="CMSIS-SVD（无头文件型号用它解析外设）")
+    ap.add_argument("--mcu", default="", help="显式型号，写入 meta.mcu")
+    ap.add_argument("--ram", default="", help="RAM 范围 START:END（十六进制，如 20000000:20003000）")
     ap.add_argument("--out", default=os.path.join(here, "signals.json"))
     args = ap.parse_args(argv)
     if not os.path.isfile(args.axf):
         sys.stderr.write("找不到 AXF: %s\n" % args.axf)
         return 1
-    data = build(args.axf, args.header, args.map)
+    ram = None
+    if args.ram:
+        a, _, b = args.ram.partition(":")
+        ram = (int(a, 16), int(b, 16))
+    data = build(args.axf, args.header if args.header and os.path.isfile(args.header) else "",
+                 args.map, svd=args.svd, mcu=args.mcu, ram=ram)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
     print("wrote %s" % args.out)

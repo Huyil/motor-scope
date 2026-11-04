@@ -1,0 +1,43 @@
+{
+  "id": "LKS32-FOC",
+  "name": "LKS32-FOC",
+  "mcu": "LKS32MC07x",
+  "arch": "cw32",
+  "core": "cortex-m0",
+  "note": "LKS32MC07x 无感 FOC（Linko）",
+  "ram": [
+    536870912,
+    536883200
+  ],
+  "target": "profiles/targets/lks32mc07x.cfg",
+  "interface": "",
+  "source": {
+    "axf": "D:\\Code\\lll\\lks07x_Project.axf",
+    "header": "",
+    "map": "",
+    "svd": "C:\\Keil_v5\\ARM\\Packs\\Linko\\LKS07x\\1.2.0\\SVD\\LKS32MC07x.svd"
+  },
+  "defaults": [
+    "limitpowerhandle.ibus_fir",
+    "limitpowerhandle.ibus_range",
+    "speed",
+    "power_cmd",
+    "gS_DcBusVolM[0].nUdc",
+    "sS_MACtrProc[0].m_nQCurrentSet"
+  ],
+  "stall": {
+    "current": "limitpowerhandle.ibus_fir",
+    "threshold": "limitpowerhandle.ibus_range"
+  },
+  "created_at": "2026-11-04 08:48:38",
+  "updated_at": "2026-11-04 08:52:25",
+  "counts": {
+    "variables": 1006,
+    "peripherals": 30,
+    "generated_at": "2026-11-04 08:52:25"
+  },
+  "scan": {
+    "max_gap": 2048,
+    "max_words": 512
+  }
+}

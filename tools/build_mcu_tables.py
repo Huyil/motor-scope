@@ -139,6 +139,36 @@ CH32_IDENTIFY = {
     "source": "CH32FV2x_V3xRM V2.5 §31.2, p.527 (PDF p.530-531)",
 }
 
+# LKS32MC07x: 只有厂商 SVD (无 C 头文件), 直接按 SVD 展开
+LKS_SVD = r"C:\Keil_v5\ARM\Packs\Linko\LKS07x\1.2.0\SVD\LKS32MC07x.svd"
+
+LKS_MODELS: List[Dict[str, Any]] = [
+    {"id": "LKS32MC07x", "package": None, "pins": None},
+]
+
+LKS_IDENTIFY = {
+    "kind": "lks-afe",
+    "family": "LKS32MC07x",
+    # SYS_AFE_INFO @0x4000_0004: Series[7:4] / Version[3:0]
+    "info_addr": "0x40000004",
+    "series_shift": 4,
+    "series_mask": 15,
+    "expected_series": 7,
+    "version_shift": 0,
+    "version_mask": 15,
+    # FLASH_SIZE @0x0002_001C: FLASH_SIZE[7:6] -> 0=32K 1=64K 2=128K 3=128K
+    "flash_size_addr": "0x0002001C",
+    "flash_code_shift": 6,
+    "flash_code_mask": 3,
+    "flash_kb_table": [32, 64, 128, 128],
+    "uid_addr": "",
+    "uid_len": 0,
+    "exact": False,
+    "note": "AFE_INFO.Series=7 只能识别到 07x 系列, 区分不了具体料号; "
+            "Flash 容量由 FLASH_SIZE[7:6] 解码 (0/1/2/3 -> 32/64/128/128KB)",
+    "source": "LKS32MC07x User Manual v1.69 §5.2.2 (p.15) / §7.3.9 (p.55)",
+}
+
 WARNINGS: List[str] = []
 
 
@@ -644,8 +674,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             results.append((mid, np_, nr, nb, size))
             print("  %s: peripherals=%d regs=%d bits=%d bytes=%d" % (mid, np_, nr, nb, size))
 
+    lks_ids = [m for m in LKS_MODELS if want(m["id"])]
+    if lks_ids:
+        svd = host_path(LKS_SVD)
+        if not os.path.isfile(svd):
+            raise FileNotFoundError("找不到 LKS SVD: %s" % svd)
+        print("[LKS] %s" % os.path.basename(svd))
+        periphs = build_ch32(svd)
+        for m in lks_ids:
+            mid = m["id"]
+            data = {"id": mid, "peripherals": periphs}
+            np_, nr, nb = validate(mid, data)
+            fname = "%s.json" % mid
+            size = write_json(os.path.join(out_dir, fname), data)
+            index["models"].append({
+                "id": mid,
+                "aliases": ["LKS32MC071CBT8", "LKS32MC071", "LKS32MC07x"],
+                "vendor": "Linko",
+                "core": "cortex-m0",
+                "flash_kb": 128,
+                "ram_kb": 12,
+                "package": m["package"],
+                "file": fname,
+                "identify": dict(LKS_IDENTIFY),
+                "peripheral_count": np_,
+                "register_count": nr,
+                "bitfield_count": nb,
+            })
+            results.append((mid, np_, nr, nb, size))
+            print("  %s: peripherals=%d regs=%d bits=%d bytes=%d" % (mid, np_, nr, nb, size))
+
     order = {m["id"]: i for i, m in enumerate(
-        [{"id": s["id"]} for s in CW32_MODELS] + [{"id": m["id"]} for m in CH32_MODELS])}
+        [{"id": s["id"]} for s in CW32_MODELS] + [{"id": m["id"]} for m in CH32_MODELS]
+        + [{"id": m["id"]} for m in LKS_MODELS])}
     index["models"].sort(key=lambda m: order.get(m["id"], 999))
 
     if only:

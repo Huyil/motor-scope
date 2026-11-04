@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-10-29 16:08:12",
+  "generated_at": "2026-11-04 08:47:13",
   "models": [
     {
       "id": "CW32L010",
@@ -135,6 +135,47 @@
       "peripheral_count": 51,
       "register_count": 1090,
       "bitfield_count": 5764
+    },
+    {
+      "id": "LKS32MC07x",
+      "aliases": [
+        "LKS32MC071CBT8",
+        "LKS32MC071",
+        "LKS32MC07x"
+      ],
+      "vendor": "Linko",
+      "core": "cortex-m0",
+      "flash_kb": 128,
+      "ram_kb": 12,
+      "package": null,
+      "file": "LKS32MC07x.json",
+      "identify": {
+        "kind": "lks-afe",
+        "family": "LKS32MC07x",
+        "info_addr": "0x40000004",
+        "series_shift": 4,
+        "series_mask": 15,
+        "expected_series": 7,
+        "version_shift": 0,
+        "version_mask": 15,
+        "flash_size_addr": "0x0002001C",
+        "flash_code_shift": 6,
+        "flash_code_mask": 3,
+        "flash_kb_table": [
+          32,
+          64,
+          128,
+          128
+        ],
+        "uid_addr": "",
+        "uid_len": 0,
+        "exact": false,
+        "note": "AFE_INFO.Series=7 只能识别到 07x 系列, 区分不了具体料号; Flash 容量由 FLASH_SIZE[7:6] 解码 (0/1/2/3 -> 32/64/128/128KB)",
+        "source": "LKS32MC07x User Manual v1.69 §5.2.2 (p.15) / §7.3.9 (p.55)"
+      },
+      "peripheral_count": 30,
+      "register_count": 410,
+      "bitfield_count": 1542
     }
   ]
 }

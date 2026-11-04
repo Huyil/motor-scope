@@ -82,7 +82,8 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | 接口 | 用途 |
 | --- | --- |
 | `GET /api/status` | 连接状态、实际采样率、`generation`、`history` 点数、`oldest_t`/`latest_t`、`config.signals` |
-| `GET /api/catalog` | 444 个变量 / 27 个外设，地址/类型/位域/默认堵转信号 |
+| `GET /api/catalog` | 当前机型的变量/外设，地址/类型/位域/默认堵转信号 |
+| `GET /api/profiles` | 机型列表：`id/name/mcu/arch/available/variables/peripherals/source_axf` + `active` |
 | `GET /api/log` | 服务 + OpenOCD 尾部日志 |
 | `GET /api/record.csv` | 后端录制 CSV（需要先 POST `/api/record` 开启） |
 | `GET /api/stream` | SSE：`hello` / `status` / `s`；浏览器实时用 |
@@ -95,7 +96,10 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `POST /api/record` | `{"active":true}` 开始后端录制 |
 | `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach"}` 重新连 |
 | `POST /api/disconnect` | 断开并释放 OpenOCD/H7-TOOL |
-| `POST /api/catalog/reload` | 从当前 AXF 重建 signals.json |
+| `POST /api/catalog/reload` | 从当前机型的源 AXF/SVD 重建 signals.json |
+| `POST /api/profiles/switch` | `{"id":"LKS32-FOC"}` 切换机型；返回 `catalog/config/profile(s)`，会断开调试源 |
+| `POST /api/profiles/config` | `{"config":{...},"manual":true}` 保存前端工程快照到 `profiles/<ID>/config.json` |
+| `POST /api/profiles/build` | `{"id":"LKS32-FOC"}` 重建该机型符号表；返回新 `catalog/counts` |
 | `POST /api/catalog/import` | multipart：`axf`（必填）+ `header`（可选 cw32l011.h），导入任意 AXF/ELF 并重建 |
 | `POST /api/probe` | 一次性 TCL 握手，读 CPUID |
 | `POST /api/write` | **会改目标内存**；写 RAM/SFR 并回读，见 5.1 |

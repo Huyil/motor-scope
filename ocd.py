@@ -231,6 +231,10 @@ def find_wch_openocd(project_dir: str, override: Optional[str] = None) -> Option
         roots.append(override)
     here = os.path.dirname(os.path.abspath(__file__))
     roots += [
+        # 工程内自带的快读版 OpenOCD（tools/openocd-wch-fast）
+        os.path.join(project_dir, "tools", "openocd-wch-fast"),
+        os.path.join(os.path.dirname(os.path.abspath(project_dir)), "tools", "openocd-wch-fast"),
+        os.path.join(here, "..", "openocd-wch-fast"),
         os.path.join(project_dir, "tools", "openocd-wch"),
         os.path.join(os.path.dirname(os.path.abspath(project_dir)), "tools", "openocd-wch"),
         os.path.join(here, "..", "openocd-wch"),
@@ -282,6 +286,9 @@ class OcdProcess:
         line = line.rstrip("\r\n")
         if not line:
             return
+        # LKS/长块读时 openocd 会把整块数据回显到 stdout, 截断避免日志爆内存
+        if len(line) > 400:
+            line = line[:400] + " …(%d chars)" % len(line)
         with self._lock:
             self.log.append(line)
         if self.verbose:
@@ -344,8 +351,9 @@ class OcdProcess:
                     self._append_log("INFO: CPUID 读取失败（RISC-V 可能在运行），继续: %s" % exc)
                 if cpuid == 0:
                     self._append_log("INFO: 目标不是 Cortex-M (CPUID=0)，按 RISC-V / 其它架构继续")
-                elif cpuid is not None and cpuid != 0x410CC601:
-                    self._append_log("WARN: CPUID=0x%08x (期望 0x410CC601, 可能不是 M0+)" % cpuid)
+                elif cpuid is not None and cpuid not in (0x410CC200, 0x410CC601):
+                    self._append_log("WARN: CPUID=0x%08x (期望 M0=0x410CC200 / M0+=0x410CC601，"
+                                     "可能不是 Cortex-M)" % cpuid)
                 self.client = client
                 self._append_log("TCL 已连接 127.0.0.1:%d, CPUID=%s" % (
                     self.port, "0x%08x" % cpuid if cpuid is not None else "?"))

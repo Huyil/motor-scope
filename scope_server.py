@@ -40,10 +40,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+import profiles
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DEFAULT = os.path.abspath(os.path.join(HERE, "..", ".."))
 WEB_DIR = os.path.join(HERE, "web")
 SIGNALS_JSON = os.path.join(HERE, "signals.json")
+PROFILES_DIR = os.path.join(HERE, "profiles")
 VERSION = "0.1.0"
 
 _AXIS_RIGHT = re.compile(
@@ -76,7 +79,11 @@ CW32_SIGNATURE_ADDR = 0x001007E0   # 16 字节 ASCII 型号
 CW32_SIGNATURE_LEN = 16
 CH32_ESIG_FLASH_ADDR = 0x1FFFF7E0  # 低 16 位 = Flash KB
 CH32_ESIG_UID_ADDR = 0x1FFFF7E8    # 96-bit UID
-CORTEX_M0PLUS_CPUID = 0x410CC601
+CORTEX_M0_CPUID = 0x410CC200       # Cortex-M0
+CORTEX_M0PLUS_CPUID = 0x410CC601   # Cortex-M0+
+ARM_CPUID = (CORTEX_M0_CPUID, CORTEX_M0PLUS_CPUID)
+LKS_AFE_INFO_ADDR = 0x40000004     # SYS_AFE_INFO: Series[7:4] / Version[3:0]
+LKS_SERIES = 7                     # 0x7 = LKS32MC07x
 
 
 def load_mcu_index() -> Dict[str, Any]:
@@ -123,12 +130,23 @@ def _read_bytes(source: Any, addr: int, length: int) -> bytes:
     return bytes(buf[:length])
 
 
+def _decode_lks_flash(code: int, ident: Dict[str, Any]) -> int:
+    table = ident.get("flash_kb_table") or [32, 64, 128, 128]
+    try:
+        return int(table[code & 0x3])
+    except Exception:
+        return 0
+
+
 def probe_chip(source: Any, index: Dict[str, Any],
                expected: str = "") -> Optional[Dict[str, Any]]:
     """按芯片 ID 区识别型号，并与符号表/固件里的型号比对。
 
-    CW32L0x: CPUID=0x410CC601（Cortex-M0+），型号在 0x001007E0 起 16 字节 ASCII。
-    CH32V203: RISC-V，无 Cortex-M CPUID；Flash 容量在 0x1FFFF7E0（KB），
+    同一颗 ARM Cortex-M 上要区分两家:
+      * CW32L0x: CPUID 0x410CC601/0x410CC200，型号在 0x001007E0 起 16 字节 ASCII；
+      * LKS32MC07x: SYS_AFE_INFO @0x4000_0004，Series[7:4]=7，Version[3:0]；
+        Flash 容量在 FLASH_SIZE @0x0002_001C 的 [7:6]（0/1/2/3 -> 32/64/128/128KB）。
+    非 ARM（CH32V203 RISC-V）: 无 Cortex-M CPUID; Flash 容量在 0x1FFFF7E0（KB），
               UID 在 0x1FFFF7E8。C8/K8 同 die，只能识别到系列。
     """
     if source is None or getattr(source, "kind", "none") == "sim":
@@ -148,19 +166,84 @@ def probe_chip(source: Any, index: Dict[str, Any],
     except Exception as exc:
         out["evidence"]["cpuid_error"] = str(exc)
 
-    if cpuid == CORTEX_M0PLUS_CPUID:
+    if cpuid in ARM_CPUID:
+        # --- 先试 CW32 签名区: 读失败/不是 "CW32" 就落到 LKS ---
+        cw32_type = ""
         try:
             raw = _read_bytes(source, CW32_SIGNATURE_ADDR, CW32_SIGNATURE_LEN)
             text = raw.split(b"\x00", 1)[0].decode("ascii", "replace").strip()
+            # LKS 的同地址可能是随机数据: 只保留可打印字符, 避免把乱码写进 evidence
+            text = "".join(ch for ch in text if 32 <= ord(ch) < 127)
             out["evidence"]["cw32_type"] = text
             if text.upper().startswith("CW32"):
-                out["detected"] = text
-                out["vendor"] = "CW"
-                out["family"] = "CW32L0"
-                out["exact"] = True
+                cw32_type = text
         except Exception as exc:
             out["evidence"]["cw32_error"] = str(exc)
+
+        if cw32_type:
+            out["detected"] = cw32_type
+            out["vendor"] = "CW"
+            out["family"] = "CW32L0"
+            out["exact"] = True
+            up = cw32_type.upper()
+            cands = []
+            for m in models:
+                ident = m.get("identify") or {}
+                if ident.get("kind") != "cw32-signature":
+                    continue
+                names = [str(m.get("id") or "").upper()]
+                names += [str(a).upper() for a in (m.get("aliases") or [])]
+                names += [str(ident.get("expected_type") or "").upper()]
+                # 签名区可能带封装/温度后缀 (CW32L011K8U6), 按型号前缀归属
+                if any(n and (up == n or up.startswith(n) or n.startswith(up)) for n in names):
+                    cands.append(str(m.get("id")))
+            out["candidates"] = cands or [cw32_type]
+        else:
+            # --- Linko LKS32MC07x ---
+            for m in models:
+                ident = m.get("identify") or {}
+                if ident.get("kind") != "lks-afe":
+                    continue
+                addr = int(str(ident.get("info_addr") or "0x40000004"), 0)
+                try:
+                    info = int(source.read_word(addr)) & 0xFFFFFFFF
+                except Exception as exc:
+                    out["evidence"]["lks_error"] = str(exc)
+                    break
+                series = (info >> int(ident.get("series_shift", 4))) & int(
+                    ident.get("series_mask", 0xF))
+                version = (info >> int(ident.get("version_shift", 0))) & int(
+                    ident.get("version_mask", 0xF))
+                out["evidence"]["lks_afe_info"] = info
+                out["evidence"]["lks_series"] = series
+                out["evidence"]["lks_version"] = version
+                if series != int(ident.get("expected_series", LKS_SERIES)):
+                    break
+                fam = str(ident.get("family") or m.get("id") or "LKS32MC07x")
+                out["detected"] = fam
+                out["vendor"] = str(m.get("vendor") or "Linko")
+                out["family"] = fam
+                out["exact"] = False
+                out["candidates"] = [
+                    str(x.get("id")) for x in models
+                    if (x.get("identify") or {}).get("kind") == "lks-afe"
+                    and str((x.get("identify") or {}).get("family") or x.get("id")) == fam
+                ]
+                flash_addr = str(ident.get("flash_size_addr") or "")
+                if flash_addr:
+                    try:
+                        reg = int(source.read_word(int(flash_addr, 0))) & 0xFFFFFFFF
+                        code = (reg >> int(ident.get("flash_code_shift", 6))) & int(
+                            ident.get("flash_code_mask", 0x3))
+                        out["evidence"]["flash_size_code"] = code
+                        kb = _decode_lks_flash(code, ident)
+                        if kb:
+                            out["evidence"]["flash_kb"] = kb
+                    except Exception as exc:
+                        out["evidence"]["flash_size_error"] = str(exc)
+                break
     else:
+        # --- CH32V203 (RISC-V ESIG) ---
         try:
             flash_kb = int(source.read_word(CH32_ESIG_FLASH_ADDR)) & 0xFFFF
             out["evidence"]["flash_kb"] = flash_kb
@@ -191,7 +274,8 @@ def probe_chip(source: Any, index: Dict[str, Any],
             names.update(str(a).upper() for a in (m.get("aliases") or []))
         match = expected.upper() in names or expected.upper() == out["detected"].upper()
         if not match and out["family"]:
-            match = expected.upper().startswith(out["family"].upper())
+            match = expected.upper().startswith(out["family"].upper()) or \
+                out["family"].upper().startswith(expected.upper())
         out["match"] = bool(match)
         if not match:
             out["warning"] = "芯片型号不一致：检测到 %s，符号表/固件为 %s" % (
@@ -306,12 +390,23 @@ class OpenOcdSource(Source):
         self.cpuid: Optional[int] = None
         self.riscv = False
         self.try_nohalt = False
+        # 区域合并参数: 机型 profile.scan 可覆盖 (地址跨度大时减少往返次数)
+        self.max_gap = 64
+        self.max_words = 64
 
     def _prepare(self, signals: Sequence[Signal]) -> None:
         key = tuple((s.addr, s.span()[1]) for s in signals)
         if key == self._region_key:
             return
-        self.regions = ocd.plan_regions([s.span() for s in signals])
+        self.regions = ocd.plan_regions([s.span() for s in signals],
+                                        max_words=self.max_words,
+                                        max_gap=self.max_gap)
+        try:
+            self.proc._append_log("采样区域: %d 块 / %d 字 (gap<=%d, max=%d)" % (
+                len(self.regions), sum(r.words for r in self.regions),
+                self.max_gap, self.max_words))
+        except Exception:
+            pass
         self._starts = []
         total = 0
         for r in self.regions:
@@ -953,6 +1048,11 @@ class App:
         self.header = os.path.abspath(args.header or os.path.join(self.project, "Libraries", "inc", "cw32l011.h"))
         self.signals_path = os.path.abspath(args.signals or SIGNALS_JSON)
         self.import_dir = os.path.join(HERE, "imports")
+        # 机型工程: 一个机型 = 一套符号表 + 芯片/连接参数 + 前端配置
+        self.profiles_root = PROFILES_DIR
+        self.profile: Optional[Dict[str, Any]] = None
+        self.profile_error = ""
+        self.mcu = ""
         self.hub = Hub()
         self.sampler = Sampler(self.hub)
         self.source: Optional[Source] = None
@@ -970,6 +1070,7 @@ class App:
         self.chip: Optional[Dict[str, Any]] = None
         self.arch = "cw32"
         self.log: Deque[str] = deque(maxlen=300)
+        self._init_profile(args)
         self._auto_thread: Optional[threading.Thread] = None
         self.load_catalog(auto_regen=True)
         # 先装一套默认信号: 这样服务器一起来就开始采样, 页面刷新/后开浏览器
@@ -979,6 +1080,128 @@ class App:
             self.sampler.set_signals([Signal(x) for x in cfg["signals"]], cfg["rate"])
         except Exception as exc:
             self.add_log("默认信号初始化失败: %s" % exc)
+
+    # ---- 机型工程 ----
+    def _apply_profile_meta(self, meta: Dict[str, Any]) -> None:
+        self.profile = dict(meta or {})
+        src = (meta or {}).get("source") or {}
+        axf = profiles.host_path(str(src.get("axf") or ""))
+        if axf:
+            self.axf = axf
+        self.header = profiles.host_path(str(src.get("header") or ""))
+        self.arch = "riscv" if str((meta or {}).get("arch") or "").lower() == "riscv" else "cw32"
+        self.mcu = str((meta or {}).get("mcu") or "")
+
+    def _init_profile(self, args) -> None:
+        try:
+            profiles.ensure(self.profiles_root)
+            pid = profiles.get_active(self.profiles_root)
+            if not pid:
+                return
+            meta = profiles.read_profile(pid, self.profiles_root)
+            if meta is None:
+                return
+            self._apply_profile_meta(meta)
+            if getattr(args, "signals", ""):
+                # 兼容旧用法: --signals 显式指定符号表时不动它
+                self.add_log("使用 --signals 指定的符号表（机型连接参数仍生效）")
+                return
+            self.signals_path = profiles.signals_path(pid, self.profiles_root)
+        except Exception as exc:
+            self.profile_error = str(exc)
+
+    def profile_summary(self) -> Dict[str, Any]:
+        meta = self.profile or {}
+        if not meta:
+            return {}
+        out = profiles.summary(meta, self.profiles_root)
+        out["active"] = True
+        return out
+
+    def profiles_payload(self) -> Dict[str, Any]:
+        index = profiles.load_index(self.profiles_root)
+        items = [profiles.summary(m, self.profiles_root)
+                 for m in profiles.list_profiles(self.profiles_root)]
+        active = str((self.profile or {}).get("id") or index.get("active") or "")
+        for it in items:
+            it["active"] = it["id"] == active
+        return {"schema": index.get("schema", 1), "active": active, "items": items,
+                "error": self.profile_error}
+
+    def switch_profile(self, pid: str) -> Dict[str, Any]:
+        pid = str(pid or "").strip()
+        meta = profiles.read_profile(pid, self.profiles_root)
+        if meta is None:
+            raise RuntimeError("未知机型: %s" % (pid or "?"))
+        data = profiles.load_catalog(pid, self.profiles_root)
+        if data is None:
+            data = profiles.build_catalog(meta)
+            profiles.save_catalog(pid, data, self.profiles_root)
+            meta = profiles.apply_counts(meta, data)
+            meta = profiles.write_profile(meta, self.profiles_root)
+        was_connected = self.source is not None
+        # 地址整体变了, 不能拿旧连接继续采; 断开并由前端决定是否重连
+        self.disconnect()
+        self.chip = None
+        self.catalog_error = ""
+        self._apply_profile_meta(meta)
+        self.signals_path = profiles.signals_path(pid, self.profiles_root)
+        with self.catalog_lock:
+            self.catalog = data
+        try:
+            self.sampler.set_signals([], self.sampler.rate)
+        except Exception:
+            pass
+        profiles.set_active(pid, self.profiles_root)
+        saved = profiles.read_config(pid, self.profiles_root)
+        self.add_log("切换机型: %s（%d 变量 / %d 外设）"
+                     % (pid, len(data.get("variables") or []),
+                        len(data.get("peripherals") or [])))
+        return {
+            "ok": True,
+            "profile": profiles.summary(meta, self.profiles_root),
+            "profiles": self.profiles_payload(),
+            "catalog": data,
+            "config": saved.get("config") if isinstance(saved.get("config"), dict) else {},
+            "config_saved_at": str(saved.get("saved_at") or ""),
+            "was_connected": was_connected,
+        }
+
+    def save_profile_config(self, payload: Dict[str, Any],
+                            manual: bool = False) -> Dict[str, Any]:
+        meta = self.profile or {}
+        pid = str(meta.get("id") or "")
+        if not pid:
+            raise RuntimeError("当前没有激活的机型")
+        cfg = payload.get("config")
+        if not isinstance(cfg, dict):
+            cfg = {k: v for k, v in payload.items() if k not in ("config",)}
+        saved = profiles.save_config(pid, cfg, self.profiles_root)
+        if manual:
+            self.add_log("已保存工程配置: %s（%s）" % (pid, saved.get("saved_at")))
+        return {"ok": True, "profile": pid, "saved_at": saved.get("saved_at"),
+                "bytes": len(json.dumps(cfg, ensure_ascii=False))}
+
+    def build_profile(self, pid: str) -> Dict[str, Any]:
+        pid = str(pid or (self.profile or {}).get("id") or "").strip()
+        if not pid:
+            raise RuntimeError("未指定机型")
+        res = profiles.rebuild(pid, self.profiles_root)
+        if pid == str((self.profile or {}).get("id") or ""):
+            self._apply_profile_meta(res["profile"])
+            with self.catalog_lock:
+                self.catalog = res["catalog"]
+            try:
+                self.sampler.set_signals([], self.sampler.rate)
+            except Exception:
+                pass
+        self.add_log("已重建机型符号: %s（%d 变量 / %d 外设）"
+                     % (pid, res["counts"].get("variables", 0),
+                        res["counts"].get("peripherals", 0)))
+        return {"ok": True, "profile": profiles.summary(res["profile"], self.profiles_root),
+                "profiles": self.profiles_payload(),
+                "catalog": res["catalog"] if pid == (self.profile or {}).get("id") else None,
+                "counts": res["counts"]}
 
     # ---- 日志 ----
     def add_log(self, line: str) -> None:
@@ -1022,9 +1245,17 @@ class App:
             import gen_signals  # 同目录, 依赖 pyelftools
         except Exception as exc:
             raise RuntimeError("需要 pyelftools 才能从 AXF 生成信号表: %s" % exc)
-        header = self.header if os.path.isfile(self.header) else ""
-        map_path = os.path.join(os.path.dirname(self.axf), "DR2159.map")
-        data = gen_signals.build(self.axf, header, map_path if os.path.isfile(map_path) else None)
+        if self.profile:
+            # 机型工程: 头文件 / SVD / RAM 范围 / 默认信号都从 profile.json 来
+            data = profiles.build_catalog(self.profile)
+            self.profile = profiles.apply_counts(self.profile, data)
+            profiles.write_profile(self.profile, self.profiles_root)
+        else:
+            header = self.header if os.path.isfile(self.header) else ""
+            map_path = os.path.join(os.path.dirname(self.axf), "DR2159.map")
+            data = gen_signals.build(self.axf, header,
+                                     map_path if os.path.isfile(map_path) else None)
+        os.makedirs(os.path.dirname(self.signals_path) or ".", exist_ok=True)
         tmp = self.signals_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
@@ -1067,7 +1298,32 @@ class App:
             with open(header_path, "wb") as f:
                 f.write(header_bytes)
         map_path = os.path.join(os.path.dirname(axf_path), "DR2159.map")
-        data = gen_signals.build(axf_path, header_path, map_path if os.path.isfile(map_path) else None)
+        prof = self.profile or {}
+        psrc = prof.get("source") or {}
+        svd = profiles.host_path(str(psrc.get("svd") or ""))
+        ram = prof.get("ram") or None
+        if isinstance(ram, list) and len(ram) == 2:
+            ram = (int(ram[0]), int(ram[1]))
+        else:
+            ram = None
+        data = gen_signals.build(
+            axf_path, header_path,
+            map_path if os.path.isfile(map_path) else None,
+            svd=svd if svd and os.path.isfile(svd) else None,
+            mcu=str(prof.get("mcu") or ""), ram=ram,
+            defaults=list(prof.get("defaults") or []),
+            stall=dict(prof.get("stall") or {}),
+        )
+        if self.profile:
+            meta = dict(self.profile)
+            src = dict(psrc)
+            src["axf"] = axf_path
+            if header_bytes:
+                src["header"] = header_path
+            meta["source"] = src
+            meta = profiles.apply_counts(meta, data)
+            self.profile = profiles.write_profile(meta, self.profiles_root)
+        os.makedirs(os.path.dirname(self.signals_path) or ".", exist_ok=True)
         tmp = self.signals_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
@@ -1143,6 +1399,12 @@ class App:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.catalog, f, ensure_ascii=False, separators=(",", ":"))
             os.replace(tmp, self.signals_path)
+        if self.profile:
+            try:
+                meta = profiles.apply_counts(dict(self.profile), self.catalog)
+                self.profile = profiles.write_profile(meta, self.profiles_root)
+            except Exception:
+                pass
         self.add_log("寄存器表已导入: %s (%d 外设, 来源 %s)" % (
             os.path.basename(name or ""), len(periphs), source))
         return {"ok": True, "catalog": self.catalog,
@@ -1186,7 +1448,10 @@ class App:
             "version": VERSION,
             "source": info,
             "arch": self.arch,
+            "mcu": self.mcu,
             "chip": self.chip,
+            "profile": self.profile_summary(),
+            "profiles": self.profiles_payload(),
             "sampler": self.sampler.status(),
             "record": self.sampler.recorder.info(),
             "catalog": {
@@ -1307,11 +1572,15 @@ class App:
             return {"ok": True, "source": src.info(), "chip": self.chip}
 
         # 本地拉起 openocd
-        arch = str(payload.get("arch") or "cw32").lower()
+        prof = self.profile or {}
+        arch = str(payload.get("arch") or prof.get("arch") or "cw32").lower()
         self.arch = "riscv" if arch in ("riscv", "ch32", "ch32v203", "rv32") else "cw32"
         exe = payload.get("openocd") or self.openocd_override
-        iface = payload.get("iface") or self.iface_override
-        target = payload.get("target") or self.target_override
+        iface = payload.get("iface") or self.iface_override or prof.get("interface") or ""
+        target = payload.get("target") or self.target_override or prof.get("target") or ""
+        target = profiles.host_path(str(target))
+        if target and not os.path.isabs(target):
+            target = os.path.abspath(os.path.join(HERE, target))
         if self.arch == "riscv":
             paths = ocd.find_wch_openocd(self.project, exe)
             if paths is None:
@@ -1346,6 +1615,14 @@ class App:
             raise
         src = OpenOcdSource(proc, client)
         src.riscv = (self.arch == "riscv")
+        scan = prof.get("scan") if isinstance(prof.get("scan"), dict) else {}
+        try:
+            if scan.get("max_gap"):
+                src.max_gap = max(0, int(scan["max_gap"]))
+            if scan.get("max_words"):
+                src.max_words = max(1, int(scan["max_words"]))
+        except Exception:
+            pass
         if src.riscv:
             client.install_halt_reader()
             try:
@@ -1353,9 +1630,9 @@ class App:
             except Exception:
                 pass
             src.try_nohalt = True
-            if self.sampler.rate > 20:
-                self.sampler.set_rate(20)
-                self.add_log("RISC-V 读取需要 halt，采样率默认降到 20 Hz")
+            if self.sampler.rate > 50:
+                self.sampler.set_rate(50)
+                self.add_log("RISC-V 读取需要 halt，采样率上限 50 Hz")
         try:
             if src.riscv:
                 src.cpuid = client.read_regions_halt([(0xE000ED00, 1)])[0]
@@ -1401,9 +1678,9 @@ class App:
             seen.add(key)
             signals.append(s)
         rate = float(payload.get("rate") or 100)
-        if getattr(self.source, "riscv", False) and rate > 20:
-            self.add_log("RISC-V 读取需要 halt，采样率限制为 20 Hz")
-            rate = 20.0
+        if getattr(self.source, "riscv", False) and rate > 50:
+            self.add_log("RISC-V 读取需要 halt，采样率限制为 50 Hz")
+            rate = 50.0
         self.sampler.set_signals(signals, rate)
         if self.sampler.recorder.active:
             self.sampler.recorder.set_signals(signals)
@@ -1596,6 +1873,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.app.status_payload())
             if path == "/api/catalog":
                 return self._json(self.app.catalog)
+            if path == "/api/profiles":
+                return self._json(self.app.profiles_payload())
             if path == "/api/history/next":
                 qs = parse_qs(urlparse(self.path).query)
                 after = None
@@ -1679,6 +1958,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "status": self.app.status_payload()})
             if path == "/api/config":
                 return self._json(self.app.apply_config(payload))
+            if path == "/api/profiles/switch":
+                return self._json(self.app.switch_profile(payload.get("id")))
+            if path == "/api/profiles/config":
+                return self._json(self.app.save_profile_config(
+                    payload, manual=bool(payload.get("manual"))))
+            if path == "/api/profiles/build":
+                return self._json(self.app.build_profile(payload.get("id")))
             if path == "/api/chip/probe":
                 return self._json(self.app.probe_chip_now())
             if path == "/api/write":

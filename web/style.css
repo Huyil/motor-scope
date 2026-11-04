@@ -850,6 +850,32 @@ input[type="checkbox"]:checked::before { transform: rotate(-45deg) scale(1); }
 #panelProject { width: 520px; }
 .fp-sep { height: 1px; background: var(--line); margin: 12px 0; }
 .fp-h4 { margin: 0 0 8px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+
+/* 机型卡片: 一键切换符号表 + 芯片 + 连接参数 */
+.machine-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.machine-card {
+  position: relative; display: flex; flex-direction: column; gap: 2px;
+  padding: 9px 10px; min-width: 0; text-align: left; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 9px;
+  background: linear-gradient(180deg, rgba(16,28,48,.65), rgba(9,16,28,.55));
+  color: var(--text); font-family: var(--sans);
+  transition: border-color .12s ease, background .12s ease, transform .12s ease;
+}
+.machine-card:hover { border-color: var(--line2); background: rgba(20,34,56,.8); }
+.machine-card.active {
+  border-color: rgba(34,211,238,.6);
+  background: linear-gradient(180deg, rgba(34,211,238,.14), rgba(9,20,32,.7));
+  box-shadow: inset 0 0 0 1px rgba(34,211,238,.12);
+}
+.machine-card b { font-size: 12.5px; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.machine-card .mc-mcu { font-family: var(--mono); font-size: 10.5px; color: #bdeef7; }
+.machine-card .mc-sub { font-size: 10px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.machine-card .mc-dot {
+  position: absolute; top: 8px; right: 8px; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--green); box-shadow: 0 0 8px rgba(52,211,153,.8);
+}
+.machine-card.unavailable .mc-dot { background: var(--muted2); box-shadow: none; }
+.machine-card.busy { opacity: .55; pointer-events: none; }
 .rec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .rec-grid > div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: rgba(8,14,26,.45); min-width: 0; }
 .rec-grid span { display: block; font-size: 10px; color: var(--muted2); }

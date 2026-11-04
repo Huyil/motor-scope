@@ -13,6 +13,7 @@ HTTP 读取（`scope_server` 静态目录就是 `web/`）：
 | `GET /mcu/CW32L012.json` | CW32L012 |
 | `GET /mcu/CH32V203C8T6.json` | CH32V203C8T6（LQFP48） |
 | `GET /mcu/CH32V203K8T6.json` | CH32V203K8T6（LQFP32） |
+| `GET /mcu/LKS32MC07x.json` | LKS32MC07x（Linko Cortex-M0） |
 
 后端 `scope_server.load_mcu_index()` 读同一个 `index.json`，`/api/chip/probe` 用其中的
 `identify` 与 `flash_kb` 做型号识别；`web/app.js` 的 `peripheralList()` 按
@@ -27,8 +28,9 @@ HTTP 读取（`scope_server` 静态目录就是 `web/`）：
 | CW32L012 | `CW32L012.json` | 188,810 B (184.4 KiB) | 50 | 562 | 3680 | — |
 | CH32V203C8T6 | `CH32V203C8T6.json` | 315,302 B (307.9 KiB) | 51 | 1090 | 5764 | LQFP48 |
 | CH32V203K8T6 | `CH32V203K8T6.json` | 315,302 B (307.9 KiB) | 51 | 1090 | 5764 | LQFP32 |
-| 索引 | `index.json` | 3,996 B | — | — | — | — |
-| **合计** | | **~1.0 MB** | **203** | **3300** | **18727** | |
+| LKS32MC07x | `LKS32MC07x.json` | 96,934 B (94.7 KiB) | 30 | 410 | 1542 | — |
+| 索引 | `index.json` | 5,142 B | — | — | — | — |
+| **合计** | | **~1.1 MB** | **233** | **3710** | **20269** | |
 
 CH32 两个型号是同一 die、同一份寄存器表，两个文件只有顶层 `id` 不同（`peripherals`
 数组逐字节相同）；封装/引脚信息只写在 `index.json` 的 `package` 字段里。
@@ -139,13 +141,14 @@ CH32 两个型号是同一 die、同一份寄存器表，两个文件只有顶�
 | CW32L011 | `/mnt/d/Code/motor-scope/imports/20261028_081923_777500_cw32l011.h` | `/mnt/d/Code/motor-scope/imports/20261028_081923_777500_DR2159.axf` | `CW32L011_DFP/1.0.0/SVD/CW32L011.svd` |
 | CW32L012 | `/mnt/d/Code/ble/BLECar/Libraries/inc/cw32l012.h` | `/mnt/d/Code/CW32L012_FLASH_Programming/CW32L012_FLASH_Programming/build/Project/flash_Programming.axf` | `CW32L012_DFP/1.0.2/SVD/CW32L012.svd` |
 | CH32V203C8T6 / K8T6 | — | — | `/mnt/c/MounRiver/MounRiver_Studio3/resources/app/resources/win32/components/WCH/SDK/default/RISC-V/CH32V203/NoneOS/CH32V203xx.svd` |
+| LKS32MC07x | — | — | `C:\Keil_v5\ARM\Packs\Linko\LKS07x\1.2.0\SVD\LKS32MC07x.svd` |
 
 CW32 侧的解析**没有另写一套**：脚本 `import gen_signals`，直接复用仓库里已经跑通的
 `_parse_header()`、`_collect_typedefs()`、`_collect_peripherals()`（结构体/位域展开），
 再按本目录的 schema 做去重、越界校验与排序。因此头文件里 `CW_ADC ((ADC_TypeDef*)ADC_BASE)`
 这类宏和 AXF 里的 typedef 布局是唯一事实来源。
 
-CH32 侧直接解析 CMSIS-SVD：`peripheral/baseAddress`、`register/addressOffset/size/access`、
+CH32/LKS 侧直接解析 CMSIS-SVD：`peripheral/baseAddress`、`register/addressOffset/size/access`、
 `fields/bitOffset|bitRange/bitWidth`，并展开：
 
 * `derivedFrom`（GPIOB–E ← GPIOA，TIM3–5 ← TIM2，TIM8–10 ← TIM1，I2C2 ← I2C1，
@@ -216,11 +219,13 @@ CW32L010 使用同一家族布局；CW32L012 的 `note` 已注明“未逐型号
 
 | 字段 | 适用 | 说明 |
 |---|---|---|
-| `kind` | 全部 | `cw32-signature` / `ch32-esig` |
+| `kind` | 全部 | `cw32-signature` / `ch32-esig` / `lks-afe` |
 | `type_addr`/`type_len`/`type_ascii`/`expected_type` | CW32 | 型号串地址、长度、是否 ASCII、期望值 |
 | `pin_count_addr`/`flash_kb_addr`/`ram_kb_addr` | CW32 | 签名区各字段地址 |
 | `uid_addr`/`uid_len` | 全部 | UID 地址与字节数 |
-| `family` | CH32 | 只能识别到的系列 |
+| `family` | CH32 / LKS | 只能识别到的系列 |
+| `info_addr` / `series_*` / `version_*` | LKS | `SYS_AFE_INFO` 地址与 Series/Version 位段 |
+| `flash_size_addr` / `flash_code_*` / `flash_kb_table` | LKS | `FLASH_SIZE` 的容量编码与 KB 表 |
 | `flash_kb` | CH32 | ESIG `F_SIZE` 的期望值（KB） |
 | `exact` | 全部 | 该型号是否能被唯一确定（CH32 两型号为 `false`） |
 | `note`/`source` | 可选 | 局限说明与手册出处 |
@@ -237,6 +242,8 @@ CW32L010 使用同一家族布局；CW32L012 的 `note` 已注明“未逐型号
 | 4 | CH32V203 | `GPIOA.CFGLR` | SVD `GPIOA baseAddress=0x40010800`，`CFGLR addressOffset=0`；`MODE0` bitOffset 0、bitWidth 2，`CNF7` bitOffset 30 | `addr=1073809408 (0x40010800)`，16 个位域，`MODE0=(0,2)`、`CNF7=(30,2)` ✅ |
 | 5 | CH32V203 | `USART1.STATR` | SVD `USART1 baseAddress=0x40013800`，`STATR offset=0`；`RXNE` bit5、`TC` bit6 | `addr=1073821696 (0x40013800)`，`RXNE=(5,1)`、`TC=(6,1)` ✅ |
 | 6 | CH32V203 | ESIG Flash 容量 | 手册 §31.2 `R16_ESIG_FLACAP @0x1FFFF7E0` 低 16 位 = KB | `identify.flash_kb_addr=0x1FFFF7E0`，`flash_kb=64` ✅ |
+| 7 | LKS32MC07x | `SYS.AFE_INFO` | 手册 v1.69 §5.2.2：`0x4000_0004`，Series[7:4]=7，Version[3:0] | `info_addr=0x40000004`，`expected_series=7` ✅ |
+| 8 | LKS32MC07x | Flash 容量 | 手册 §7.3.9：`0x0002_001C` 的 FLASH_SIZE[7:6]（0/1/2/3→32/64/128/128KB） | 上机读 `0x79`：Series=7、Version=9、FLASH_SIZE=3 → 128KB ✅ |
 
 补充：CW32 三型还用本机 Keil DFP 的 `CW32L010/011/012.svd` 做了独立交叉核对，
 抽查的 `ADC.CR`、`GPIOA.DIR`、`SYSCTRL.CR0/CR1/CR2` 地址与位宽全部一致
@@ -283,13 +290,14 @@ cmd.exe /c 'cd /d D:\Code\motor-scope && runtime\python\python.exe tools\build_m
 | `--out DIR` | 输出目录，默认 `web/mcu` |
 | `--only ID[,ID]` | 只重建指定型号的 `<ID>.json`；**不会更新 `index.json`**（避免索引只剩部分型号） |
 
-只重建 CH32（不需要 pyelftools，可直接用 WSL `python3`）：
+只重建 CH32 / LKS（不需要 pyelftools，可直接用 WSL `python3`）：
 
 ```bash
 python3 tools/build_mcu_tables.py --only CH32V203C8T6,CH32V203K8T6
+python3 tools/build_mcu_tables.py --only LKS32MC07x
 ```
 
-脚本顶部的 `CW32_MODELS` / `CH32_SVD` 是源文件绝对路径；换机器或换 SDK 时改这里。
+脚本顶部的 `CW32_MODELS` / `CH32_SVD` / `LKS_SVD` 是源文件绝对路径；换机器或换 SDK 时改这里。
 运行时会打印每个型号的 `peripherals/regs/bits/bytes`，并对以下情况告警：
 
 * AXF 候选里没有外设 typedef（自动换下一个候选）；
@@ -331,3 +339,8 @@ python3 tools/build_mcu_tables.py --only CH32V203C8T6,CH32V203K8T6
 9. **CH32 寄存器命名是 WCH 风格**（`CTLR1`、`STATR`、`CHCTLR1`），不是 STM32 的
    `CR1`/`SR`/`CCMR1`；跨厂脚本不要按名字硬套。
 10. **`generated_at` 每次重建都变**，做二进制比对时请忽略该字段；其余字段稳定。
+11. **LKS 只能识别到系列**：`SYS_AFE_INFO.Series=7` 是 07x 系列，不是具体料号；
+    `LKS32MC07x` 的 `identify.exact=false`，`aliases` 里放了 `LKS32MC071CBT8` 等常见订货名。
+12. **LKS SVD 的 `AFE_INFO`/`FLASH_SIZE` 字段没有 bitOffset**（只有文字位段），
+    寄存器表里这两个寄存器可能只有寄存器级、没有位域；芯片识别直接按手册的位段解码，
+    不依赖 SVD 的 field 展开。

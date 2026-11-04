@@ -1,8 +1,10 @@
-# MotorScope · DR2159
+# MotorScope · 多机型波形台
 
-> 用 OpenOCD **活体**读 CW32L011 的 RAM / 外设寄存器，在浏览器里画时间轴波形，
-> 专门用来观察 **电机电流 vs 堵转阈值**。默认只读：不 halt、不 reset、不烧录；
-> 写入是显式解锁后的可选动作，仅限 RAM / SFR，写后立即回读。
+> 用 OpenOCD **活体**读目标 RAM / 外设寄存器，在浏览器里画时间轴波形。
+> 内置 **DR2159（CW32L011）**、**DR1152（CW32L012）**、**DR1152_CH（CH32V203）**、
+> **LKS32-FOC（LKS32MC07x）** 四套机型工程，一键切换符号表 + 芯片 + 连接参数。
+> 默认只读：不 halt、不 reset、不烧录；写入是显式解锁后的可选动作，
+> 仅限 RAM / SFR，写后立即回读。
 
 ![总览](docs/overview.png)
 
@@ -74,7 +76,18 @@ start_scope_sim.bat
 或者在连接卡片上点 **“先看仿真”**。仿真是一个 30 秒循环：
 升速 → 加负载跨阈值 → 卸载 → 巡航 → 降速，首尾连续，不会在窗口里跳变。
 
-### 2.3 已经有 openocd 在跑
+### 2.3 切换机型（DR2159 / DR1152 / DR1152_CH / LKS32-FOC）
+
+顶栏“工程配置”卡片打开后有四张机型卡，点一下即可切换：
+
+- 每张卡带 **MCU、变量/外设数量、`●` 当前机型**；
+- 切换会换用 `profiles/<机型>/signals.json` 并断开当前调试源（地址整体变了，
+  换板/换固件后请重新点“连接”）；
+- 面板里还有 **保存配置**（写 `profiles/<机型>/config.json`）和
+  **重建当前机型符号**（按该机型源 AXF/SVD 重新生成）；
+- 详细目录结构、字段、LKS 识别方式和新增机型步骤见 **[profiles/README.md](profiles/README.md)**。
+
+### 2.4 已经有 openocd 在跑
 
 如果手工起的 openocd 已经开了 `tcl_port 6666`：
 
@@ -151,12 +164,14 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 > 写入会真实改变固件行为。改 `motor.over.threshold` 前先确认电机处于安全状态；
 > 不要写读清零/读后触发类寄存器。
 
-### 3.2 工程存档（localStorage）
+### 3.2 工程存档（多机型 + localStorage + 服务器快照）
 
-顶栏和“设置 → 工程”共享同一份工程列表：
+顶栏和“设置 → 工程”共享同一份工程列表；每个工程绑定一个机型：
 
 - 自动保存到浏览器 `localStorage`（`ms.projects.v2` + 当前 `ms.cfg.v2`），
+  同时约 1.8s 防抖写一份到 `profiles/<机型>/config.json`（换浏览器也能恢复）；
   切换工程会恢复通道、窗口、标定、堵转判定、3 张监视卡和写入模块；
+- 工程绑定机型；切到别的机型的工程会先切后端符号/芯片，再恢复界面配置；
 - **新建（复制当前）**、**另存为**、**删除当前**、**导出 JSON**、**导入 JSON**；
 - 工程名支持中文；重名会弹确认；导入非法 JSON / 非 MotorScope JSON 会提示错误且不切换；
 - 切换工程会重新下发采样配置并刷新历史；SSE 保持连接；
@@ -168,24 +183,27 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 
 ### 4.1 来源
 
-`signals.json` 由 `gen_signals.py` 生成：
+每个机型一套 `profiles/<机型>/signals.json`，由 `tools/build_profiles.py`
+（内部调用 `gen_signals.py`）生成：
 
-- **固件变量**：`MDK/Objects/DR2159.axf` 的 DWARF（变量、结构体、数组、位域）；
-- **外设寄存器**：同一份 DWARF 里的 `*_TypeDef`，地址来自
-  `Libraries/inc/cw32l011.h` 的 `CW_xxx` 宏；
-- **参考**：`MDK/Objects/DR2159.map` 只用于元信息。
+- **固件变量**：该机型源 AXF/ELF 的 DWARF（变量、结构体、数组、位域）；
+- **外设寄存器**：CW32 用头文件 `cw32l0xx.h` 的 `*_TypeDef` + `CW_xxx` 宏；
+  CH32V203 / LKS32MC07x 没有可用头文件，直接解析厂商 **CMSIS-SVD**；
+- **参考**：`.map` 只用于元信息。
 
-当前生成结果：**444 个变量叶子 / 27 个外设**。
+当前四套：**DR2159 453/27**、**DR1152 503/50**、
+**DR1152_CH 350/51**、**LKS32-FOC 1006/30**（变量 / 外设）。
 
 固件重新编译后地址会变：
 
-- 启动时**只在 `signals.json` 缺失**时才自动生成；不会因为 AXF 比 JSON 新就静默重建
+- 启动时**只在当前机型 `signals.json` 缺失**时才自动生成；不会因为 AXF 比 JSON 新就静默重建
   （板子里可能还是旧固件，地址会整体错位）；固件更新后用“导入 AXF”或“从当前 AXF 重新生成”显式操作；
-- 也可以点界面上的 **“刷新”** 或设置里的 **“从 AXF 重新生成”**；
-- 或直接跑：
+- 也可以点界面上的 **“刷新”** 或机型面板的 **“重建当前机型符号”**；
+- 或直接跑（重建全部机型，或 `--only LKS32-FOC`）：
 
 ```bat
 regen_signals.bat
+runtime\python\python.exe tools\build_profiles.py --only LKS32-FOC
 ```
 
 > 自带 `runtime\python` 已含 `pyelftools`；只有改用系统 Python 时才需要
@@ -316,6 +334,10 @@ I(A) = counts × (Vref / 4095) / (Rshunt × Gain)
 **看不到 20kHz PWM 纹波**。这个链路是 SWD + Tcl，不是 RTT/DMA/逻辑分析仪；
 要看高频细节，用 `adc.RES[0]` 也只能看到采样率以内的包络。
 
+LKS32MC07x（H7-TOOL CMSIS-DAP v1、8MHz SWD、6 路默认信号）：采样区域会合并成
+1 块（`LKS32-FOC` 的 `scan.max_gap=2048`），100Hz 目标下实测约 **90Hz**；
+不合并（4 块）约 63Hz。地址越散、信号越多，实际速率越低。
+
 ---
 
 ## 7. 命令行 / 测试
@@ -327,7 +349,7 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 python scope_server.py --port 8790 --rate 50
 python scope_server.py --openocd D:\Code\DR2159\tools\openocd
 python gen_signals.py                          # 重建 signals.json
-python -m unittest tests.test_core tests.test_history -v   # 区域/位域/写入/历史游标单测（24 项）
+python -m unittest discover -s tests -v    # 区域/位域/写入/历史/机型/芯片识别（41 项）
 ```
 
 Agent / 脚本读取用的 HTTP API（`/api/history` 读之前、`/api/history/next` long-poll 读之后）见 **[API.md](API.md)**。
@@ -347,8 +369,11 @@ python scope_server.py --attach 127.0.0.1:6767 --open
 motor-scope/
 ├─ scope_server.py      HTTP/SSE 服务、采样线程、仿真源、录制
 ├─ ocd.py               OpenOCD Tcl-RPC 客户端、进程管理、区域规划
-├─ gen_signals.py       AXF/DWARF + cw32l011.h → signals.json
-├─ signals.json         生成的信号目录（当前 461 变量 / 27 外设）
+├─ gen_signals.py       AXF/DWARF + 头文件/SVD → signals.json（单机型引擎）
+├─ signals.json         旧版单机型符号目录（兼容回退；正常运行用 profiles/）
+├─ profiles.py          机型工程存储 / 生成 / 切换
+├─ profiles/            四套机型工程（symbols + chip + config，见 profiles/README.md）
+├─ tools/build_profiles.py  重建机型符号表
 ├─ start_scope.bat      一键启动（自动连 OpenOCD，优先用自带 Python）
 ├─ start_scope_sim.bat  一键仿真
 ├─ regen_signals.bat    重新生成符号
@@ -356,7 +381,7 @@ motor-scope/
 ├─ runtime/             自带便携 Python 3.13.3 + pyelftools（见 runtime/README.md）
 ├─ API.md              Agent/脚本用的 HTTP API（history/next/status/catalog）
 ├─ web/                 index.html / style.css / app.js（原生 canvas，无前端依赖）
-├─ tests/               mock_tcl.py + test_core.py（区域/位域/写入） + test_history.py
+├─ tests/               mock_tcl.py + core/history/flash/profiles/chip_probe 单测
 └─ docs/                截图
 ```
 
@@ -375,6 +400,9 @@ motor-scope/
 | 读某个寄存器后系统异常 | 该寄存器可能是读清零/读后触发；不要高频扫，先查用户手册 |
 | 暂停后画面不动 | 正常；数据仍在后台缓存，点继续会追上 |
 | 想连已有 openocd | “附加 TCL”，填 `127.0.0.1:6666` |
+| LKS 连接报 target 错误 | 检查 `profiles/targets/lks32mc07x.cfg` 是否存在；SDK 升级后 SVD 路径在 `profiles/LKS32-FOC/profile.json` 的 `source.svd` |
+| 切机型后数值全 0 / 乱 | 符号表与板上固件不是同一次构建；点“重建当前机型符号”，再重新烧录 |
+| 机型卡片显示“未生成” | 该机型 `signals.json` 缺失；点“重建当前机型符号”或跑 `tools/build_profiles.py --only <ID>` |
 
 ---
 

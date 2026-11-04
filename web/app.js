@@ -92,6 +92,10 @@
       models: [], active: '', detected: '', candidates: [], exact: false,
       expected: '', match: null, warning: '', loaded: false, periphs: [], manual: false,
     },
+    // 机型工程：后端 profiles/ 下的四套「符号 + 芯片 + 连接 + 配置」
+    profiles: { active: '', items: [], loaded: false, error: '' },
+    profileSavedAt: 0,
+    switching: false,
     // 波形分组：默认分组内每路独立轴；拖入自定义组则共享轴
     wave: {
       groups: [{ id: 'default', name: '默认分组', visible: true, auto: true }],
@@ -238,6 +242,11 @@
     D.projectSel2 = $('#projectSel2');
     D.projectState = $('#projectState');
     D.projectFile = $('#projectFile');
+    D.machineList = $('#machineList');
+    D.profileState = $('#profileState');
+    D.profileBadge = $('#profileBadge');
+    D.btnProfileBuild = $('#btnProfileBuild');
+    D.btnProfileSave = $('#btnProfileSave');
     D.toasts = $('#toasts');
     D.logPanel = $('#logPanel');
     D.logText = $('#logText');
@@ -542,7 +551,10 @@
 
   function renderCards() {
     const p = readProjects();
-    if (D.cardProjectVal) D.cardProjectVal.textContent = p.active || '默认';
+    const prof = activeProfile();
+    if (D.cardProjectVal) {
+      D.cardProjectVal.textContent = S.profiles.active || p.active || '默认';
+    }
     if (D.cardProjectSub) {
       const model = S.mcu.active || S.mcu.expected || '';
       const vars = (S.catalog.variables || []).length;
@@ -551,7 +563,9 @@
       if (model) bits.push(model);
       if (vars) bits.push(vars + ' 变量');
       if (periphs) bits.push(periphs + ' 外设');
-      D.cardProjectSub.textContent = bits.join(' · ') || '自动保存到浏览器';
+      if (prof && p.active && p.active !== prof.id) bits.push(p.active);
+      if (S.profileSavedAt) bits.push('已保存 ' + new Date(S.profileSavedAt).toLocaleTimeString('zh-CN', { hour12: false }));
+      D.cardProjectSub.textContent = bits.join(' · ') || '自动保存到 profiles/';
       D.cardProjectSub.classList.toggle('warn', !!S.mcu.warning);
     }
 
@@ -1528,10 +1542,40 @@
   }
 
   // ---------------------------------------------------------------- boot
+  async function ensureBootMachine() {
+    if (!S.profiles.items.length) {
+      await loadCatalog();
+      return;
+    }
+    const p = readProjects();
+    const cur = p.items[p.active];
+    const target = cur && cur.machine;
+    if (target && target !== S.profiles.active &&
+        S.profiles.items.some((x) => x.id === target)) {
+      try {
+        const res = await post('/api/profiles/switch', { id: target }, { timeout: 30000 });
+        if (res.ok) {
+          S.catalog = res.catalog;
+          S.profiles.items = res.profiles?.items || S.profiles.items;
+          S.profiles.active = target;
+          S.arch = res.profile && res.profile.arch === 'riscv' ? 'riscv' : 'cw32';
+          S.mcu.expected = String((res.profile && res.profile.mcu) || '');
+          buildIndex();
+          renderMachines();
+          return;
+        }
+      } catch (e) {
+        console.warn('启动时切换机型失败', e);
+      }
+    }
+    await loadCatalog();
+  }
+
   async function boot() {
     cacheDom();
     bindUI();
-    await loadCatalog();
+    await loadProfiles();
+    await ensureBootMachine();
     await loadMcuIndex();
     await loadStatus();
     restoreConfig();
@@ -1550,6 +1594,7 @@
     resizeChart();
     updateOverlay();
     connectSSE();
+    setTimeout(() => saveLocal(), 1500);   // 启动后把当前机型的配置自动保存一份
     setTimeout(loadHistory, 900);
     requestAnimationFrame(drawLoop);
     setInterval(tick, 1000);
@@ -1568,18 +1613,22 @@
     }
   }
 
-  function restoreConfig() {
+  function restoreConfig(snapshot) {
     let restored = false;
     // 安全: 解锁状态绝不跨工程/刷新保留，任何在途写入也一并取消
     disarmWrite('');
+    if (snapshot === undefined) {
+      try {
+        const proj = readProjects();
+        if (proj.active && proj.items[proj.active]) {
+          localStorage.setItem('ms.cfg.v2', JSON.stringify(proj.items[proj.active]));
+        }
+      } catch {}
+    }
     try {
-      const proj = readProjects();
-      if (proj.active && proj.items[proj.active]) {
-        localStorage.setItem('ms.cfg.v2', JSON.stringify(proj.items[proj.active]));
-      }
-    } catch {}
-    try {
-      const raw = localStorage.getItem('ms.cfg.v2') || localStorage.getItem('ms.cfg.v1');
+      const raw = snapshot === undefined
+        ? (localStorage.getItem('ms.cfg.v2') || localStorage.getItem('ms.cfg.v1'))
+        : (snapshot ? JSON.stringify(snapshot) : '');
       if (raw) {
         const c = JSON.parse(raw);
         const rows = c.rows || c.signals || [];
@@ -1746,6 +1795,7 @@
     try {
       localStorage.setItem('ms.cfg.v2', JSON.stringify({
         v: 2,
+        machine: S.profiles.active,
         rows: Array.from(S.rows.values()).map((s) => ({
           id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
           scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
@@ -1802,7 +1852,244 @@
         S.projectSavedAt = Date.now();
         updateProjectUI();
       } catch {}
+      scheduleProfileSave();
     } catch {}
+  }
+
+  // ---------------------------------------------------------------- 机型工程
+  function activeProfile() {
+    return (S.profiles.items || []).find((x) => x.id === S.profiles.active) || null;
+  }
+
+  async function loadProfiles() {
+    try {
+      const data = await fetchJSON('/api/profiles');
+      S.profiles.items = Array.isArray(data.items) ? data.items : [];
+      S.profiles.active = data.active || '';
+      S.profiles.error = data.error || '';
+      S.profiles.loaded = true;
+    } catch (e) {
+      S.profiles.items = [];
+      S.profiles.error = e.message;
+      S.profiles.loaded = false;
+    }
+    ensureMachineProjects();
+    renderMachines();
+    updateProjectUI();
+  }
+
+  function findProjectByMachine(id) {
+    const p = readProjects();
+    for (const [name, item] of Object.entries(p.items || {})) {
+      if (item && item.machine === id) return name;
+    }
+    return '';
+  }
+
+  function uniqueProjectName(base) {
+    const p = readProjects();
+    if (!p.items[base]) return base;
+    let n = 2;
+    while (p.items[base + ' ' + n]) n += 1;
+    return base + ' ' + n;
+  }
+
+  // 升级迁移: 每个机型建一个同名工程; 老工程（没有 machine）原样保留
+  function ensureMachineProjects() {
+    if (!S.profiles.items.length) return;
+    const p = readProjects();
+    let changed = false;
+    for (const prof of S.profiles.items) {
+      if (findProjectByMachine(prof.id)) continue;
+      if (p.items[prof.id] && p.items[prof.id].machine === undefined) {
+        p.items[prof.id].machine = prof.id;
+      } else if (!p.items[prof.id]) {
+        p.items[prof.id] = { name: prof.id, machine: prof.id, savedAt: new Date().toISOString() };
+      } else {
+        const n = uniqueProjectName(prof.id);
+        p.items[n] = Object.assign({}, p.items[prof.id], {
+          name: n, machine: prof.id, savedAt: new Date().toISOString(),
+        });
+      }
+      changed = true;
+    }
+    if (!p.active || !p.items[p.active]) {
+      const first = findProjectByMachine(S.profiles.active);
+      p.active = first || Object.keys(p.items)[0] || '默认';
+      changed = true;
+    } else if (p.items[p.active].machine === undefined && S.profiles.active) {
+      // 老工程没有绑定机型: 当前机型有同名工程就迁过去, 老工程保留在列表里
+      const first = findProjectByMachine(S.profiles.active);
+      if (first && first !== p.active) {
+        p.active = first;
+        changed = true;
+      }
+    }
+    if (changed) writeProjects(p);
+  }
+
+  function resetMachineWorkspace() {
+    // 换机型后旧写入模块/波形分组可能指向别的固件地址, 必须清掉
+    S.write.mods = [];
+    S.write.seq = 0;
+    S.write.armed = false;
+    S.wave.groups = [{ id: 'default', name: '默认分组', visible: true, auto: true }];
+    S.wave.seq = 1;
+    S.focusId = null;
+    S.hoverT = null;
+    S.hoverX = null;
+  }
+
+  function renderMachines() {
+    if (!D.machineList) return;
+    D.machineList.innerHTML = '';
+    for (const prof of S.profiles.items) {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'machine-card'
+        + (prof.id === S.profiles.active ? ' active' : '')
+        + (prof.available ? '' : ' unavailable')
+        + (S.switching ? ' busy' : '');
+      el.title = [prof.note, prof.mcu, prof.source_axf].filter(Boolean).join('\n');
+      el.innerHTML =
+        '<b>' + esc(prof.name || prof.id) + '</b>' +
+        '<span class="mc-mcu">' + esc(prof.mcu || '—') + '</span>' +
+        '<span class="mc-sub">' + (prof.variables || 0) + ' 变量 · ' +
+        (prof.peripherals || 0) + ' 外设' + (prof.available ? '' : ' · 未生成') + '</span>' +
+        '<i class="mc-dot"></i>';
+      el.addEventListener('click', () => { switchMachine(prof.id); });
+      D.machineList.appendChild(el);
+    }
+    if (D.profileBadge) D.profileBadge.textContent = S.profiles.active || '机型';
+  }
+
+  async function switchMachine(id) {
+    if (!id || S.switching) return false;
+    if (id === S.profiles.active) {
+      toast('当前已是机型 ' + id, 'ok');
+      return true;
+    }
+    S.switching = true;
+    renderMachines();
+    try {
+      saveLocal();                     // 旧机型最新界面状态写回 localStorage
+      await flushProfileSave(false);   // 再落盘到 profiles/<旧机型>/config.json
+      S.profileSavedAt = 0;
+      const res = await post('/api/profiles/switch', { id }, { timeout: 30000 });
+      if (!res.ok) throw new Error(res.error || '切换失败');
+      S.profiles.items = res.profiles?.items || S.profiles.items;
+      S.profiles.active = id;
+      S.catalog = res.catalog || { variables: [], peripherals: [], defaults: [], stall: {}, meta: {} };
+      S.chip = null;
+      S.lastChipKey = '';
+      S.mcu.detected = '';
+      S.mcu.candidates = [];
+      S.mcu.exact = false;
+      S.mcu.warning = '';
+      S.mcu.manual = false;
+      S.arch = res.profile && res.profile.arch === 'riscv' ? 'riscv' : 'cw32';
+      S.mcu.expected = String((res.profile && res.profile.mcu) || '');
+      S.rows.clear();
+      S.virtuals = [];
+      S.samples = [];
+      S.lastT = 0;
+      S.margin.cur = '';
+      S.margin.thr = '';
+      resetMachineWorkspace();
+      buildIndex();
+      const mcuId = resolveMcuId(S.mcu.expected);
+      if (mcuId) selectMcu(mcuId);
+
+      // 配置优先级: 本机该机型工程 > 服务器 config.json > 空（用新符号表的默认信号）
+      const p = readProjects();
+      let name = findProjectByMachine(id);
+      let cfg = name ? p.items[name] : null;
+      const serverCfg = res.config && (Array.isArray(res.config.rows) || Array.isArray(res.config.signals))
+        ? res.config : null;
+      if ((!cfg || !(cfg.rows || cfg.signals || []).length) && serverCfg) cfg = serverCfg;
+      if (!name) name = uniqueProjectName(id);
+      p.items[name] = Object.assign({}, cfg || {}, {
+        name, machine: id, savedAt: new Date().toISOString(),
+      });
+      p.active = name;
+      writeProjects(p);
+      localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
+      restoreConfig(p.items[name]);
+      renderAfterProjectLoad();
+      applyChip(null);
+      updateProjectUI();
+      await refreshStatus();
+      setTimeout(() => saveLocal(), 0);   // 让新机型的配置也自动落盘
+      toast('已切换机型：' + id + (res.was_connected ? '（已断开，请重新连接）' : ''), 'ok');
+      return true;
+    } catch (e) {
+      toast('切换机型失败: ' + brief(e.message), 'err');
+      return false;
+    } finally {
+      S.switching = false;
+      renderMachines();
+      syncArchUI();
+    }
+  }
+
+  let profileSaveTimer = 0;
+  let profileSaveSeq = 0;
+
+  function scheduleProfileSave() {
+    if (!S.profiles.loaded || !S.profiles.active || S.switching) return;
+    if (profileSaveTimer) clearTimeout(profileSaveTimer);
+    profileSaveTimer = setTimeout(() => {
+      profileSaveTimer = 0;
+      flushProfileSave(false);
+    }, 1800);
+  }
+
+  async function flushProfileSave(manual) {
+    if (!S.profiles.loaded || !S.profiles.active) return;
+    if (profileSaveTimer) { clearTimeout(profileSaveTimer); profileSaveTimer = 0; }
+    const machine = S.profiles.active;
+    const cfg = Object.assign(currentSnapshot(), { machine, savedAt: new Date().toISOString() });
+    const seq = ++profileSaveSeq;
+    try {
+      const r = await post('/api/profiles/config', { config: cfg, manual: !!manual }, { timeout: 8000 });
+      if (seq === profileSaveSeq && r.ok) {
+        S.profileSavedAt = Date.now();
+        updateProjectUI();
+        renderCards();
+        if (manual) toast('已保存工程配置：' + machine + ' · ' + (r.saved_at || ''), 'ok');
+      }
+    } catch (e) {
+      if (manual) toast('保存失败: ' + brief(e.message), 'err');
+    }
+  }
+
+  async function buildCurrentProfile() {
+    const id = S.profiles.active;
+    if (!id) return;
+    if (!confirm('从源 AXF/SVD 重建机型「' + id + '」的符号表？\n地址会按当前固件更新，现有波形会被清空。')) return;
+    try {
+      toast('正在重建 ' + id + ' 的符号表…');
+      const r = await post('/api/profiles/build', { id }, { timeout: 60000 });
+      if (!r.ok) throw new Error(r.error || '重建失败');
+      S.profiles.items = r.profiles?.items || S.profiles.items;
+      if (r.catalog) {
+        S.catalog = r.catalog;
+        buildIndex();
+        S.rows.clear();
+        S.virtuals = [];
+        S.samples = [];
+        S.lastT = 0;
+        resetMachineWorkspace();
+        restoreConfig({});
+        renderAfterProjectLoad();
+      }
+      renderMachines();
+      renderChipUI();
+      toast('已重建 ' + id + '：' + (r.counts?.variables || 0) + ' 变量 / ' +
+        (r.counts?.peripherals || 0) + ' 外设', 'ok');
+    } catch (e) {
+      toast('重建失败: ' + brief(e.message), 'err');
+    }
   }
 
   // ---------------------------------------------------------------- 工程存档
@@ -1837,8 +2124,9 @@
       el.innerHTML = '';
       for (const n of names) {
         const o = document.createElement('option');
+        const machine = p.items[n] && p.items[n].machine;
         o.value = n;
-        o.textContent = n;
+        o.textContent = n + (machine && machine !== n ? ' · ' + machine : '');
         el.appendChild(o);
       }
       el.value = active;
@@ -1847,8 +2135,18 @@
       const t = S.projectSavedAt
         ? '已自动保存 ' + new Date(S.projectSavedAt).toLocaleTimeString('zh-CN', { hour12: false })
         : '自动保存到浏览器 localStorage';
-      D.projectState.textContent = t + ' · 当前：' + active;
+      D.projectState.textContent = t + ' · 当前工程：' + active;
     }
+    if (D.profileState) {
+      const pid = S.profiles.active;
+      const t = S.profileSavedAt
+        ? new Date(S.profileSavedAt).toLocaleTimeString('zh-CN', { hour12: false })
+        : '';
+      D.profileState.textContent = pid
+        ? ('机型 ' + pid + ' · 配置' + (t ? ' 已保存 ' + t : ' 每 1.8s 自动保存到 profiles/' + pid + '/config.json'))
+        : '未加载机型配置';
+    }
+    if (D.profileBadge) D.profileBadge.textContent = S.profiles.active || '机型';
     if (typeof renderCards === 'function') renderCards();
   }
 
@@ -1866,11 +2164,30 @@
     scheduleHistoryReload();
   }
 
-  function switchProject(name) {
+  async function switchProject(name) {
     if (!name) return;
     saveLocal(); // 先把当前状态写回旧工程
     const p = readProjects();
     if (!p.items[name]) p.items[name] = currentSnapshot();
+    const target = p.items[name] || {};
+    if (target.machine && target.machine !== S.profiles.active) {
+      // 工程绑定的是另一个机型：先切后端符号/芯片，再恢复这个工程的界面配置
+      const ok = await switchMachine(target.machine);
+      if (!ok) return;
+      const p2 = readProjects();
+      p2.items[name] = Object.assign({}, target, { name, machine: target.machine });
+      p2.active = name;
+      writeProjects(p2);
+      localStorage.setItem('ms.cfg.v2', JSON.stringify(p2.items[name]));
+      S.samples = [];
+      S.lastT = 0;
+      S.paused = false;
+      updatePauseUI();
+      restoreConfig(p2.items[name]);
+      renderAfterProjectLoad();
+      toast('已切换工程：' + name, 'ok');
+      return;
+    }
     p.active = name;
     writeProjects(p);
     localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name] || {}));
@@ -1890,12 +2207,14 @@
     if (!name) return;
     if (p.items[name] && !confirm('工程“' + name + '”已存在，覆盖？')) return;
     saveLocal();
-    p.items[name] = Object.assign(currentSnapshot(), { name, savedAt: new Date().toISOString() });
+    p.items[name] = Object.assign(currentSnapshot(), {
+      name, machine: S.profiles.active, savedAt: new Date().toISOString(),
+    });
     p.active = name;
     writeProjects(p);
     localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
     updateProjectUI();
-    toast('已创建工程：' + name, 'ok');
+    toast('已创建工程：' + name + '（机型 ' + (S.profiles.active || '?') + '）', 'ok');
   }
 
   function saveProjectAs() {
@@ -1904,7 +2223,9 @@
     if (!name) return;
     if (p.items[name] && !confirm('工程“' + name + '”已存在，覆盖？')) return;
     saveLocal();
-    p.items[name] = Object.assign(currentSnapshot(), { name, savedAt: new Date().toISOString() });
+    p.items[name] = Object.assign(currentSnapshot(), {
+      name, machine: S.profiles.active, savedAt: new Date().toISOString(),
+    });
     p.active = name;
     writeProjects(p);
     localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
@@ -1912,19 +2233,27 @@
     toast('已另存为：' + name, 'ok');
   }
 
-  function deleteProject() {
+  async function deleteProject() {
     const p = readProjects();
     const names = Object.keys(p.items);
     if (names.length <= 1) { toast('至少保留一个工程', 'err'); return; }
     if (!confirm('删除当前工程“' + p.active + '”？')) return;
     delete p.items[p.active];
     const next = Object.keys(p.items)[0];
+    const target = p.items[next] || {};
     p.active = next;
     writeProjects(p);
-    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[next] || {}));
+    if (target.machine && target.machine !== S.profiles.active) {
+      const ok = await switchMachine(target.machine);
+      if (!ok) return;
+      const p2 = readProjects();
+      p2.active = next;
+      writeProjects(p2);
+    }
+    localStorage.setItem('ms.cfg.v2', JSON.stringify(target));
     S.samples = [];
     S.lastT = 0;
-    restoreConfig();
+    restoreConfig(target);
     renderAfterProjectLoad();
     toast('已删除，切换到：' + next, 'ok');
   }
@@ -1946,6 +2275,12 @@
       const data = JSON.parse(await file.text());
       if (!data || (!Array.isArray(data.rows) && !Array.isArray(data.signals))) {
         throw new Error('不是 MotorScope 工程 JSON');
+      }
+      if (!data.machine) data.machine = S.profiles.active;
+      if (data.machine && data.machine !== S.profiles.active &&
+          S.profiles.items.some((x) => x.id === data.machine)) {
+        const ok = await switchMachine(data.machine);
+        if (!ok) throw new Error('导入的工程绑定机型 ' + data.machine + '，切换失败');
       }
       const p = readProjects();
       let name = (data.name || file.name.replace(/\.json$/i, '') || '导入工程').trim();
@@ -2322,6 +2657,16 @@
     S.sampler = st.sampler || {};
     S.record = st.record || {};
     S.lastStatusAt = Date.now();
+    if (st.profiles && Array.isArray(st.profiles.items) && !S.switching) {
+      const oldActive = S.profiles.active;
+      S.profiles.items = st.profiles.items;
+      S.profiles.active = st.profiles.active || oldActive;
+      S.profiles.loaded = true;
+      if (oldActive !== S.profiles.active) {
+        renderMachines();
+        updateProjectUI();
+      }
+    }
     const chipKey = st.chip ? JSON.stringify(st.chip) : '';
     if (chipKey !== S.lastChipKey) {
       S.lastChipKey = chipKey;
@@ -2409,7 +2754,12 @@
     const payload = { mode };
     if (mode === 'openocd') {
       payload.arch = S.arch;
-      if (S.arch === 'riscv' && S.rate > 20) {
+      const prof = activeProfile();
+      if (prof) {
+        if (prof.target) payload.target = prof.target;
+        if (prof.interface) payload.interface = prof.interface;
+      }
+      if (S.arch === 'riscv' && S.rate > 50) {
         S.rate = 20;
         syncToggles();
         saveLocal();
@@ -4034,7 +4384,7 @@
     });
     D.rateSel.addEventListener('change', () => {
       let v = Number(D.rateSel.value) || 20;
-      if (S.arch === 'riscv' && v > 20) v = 20;
+      if (S.arch === 'riscv' && v > 50) v = 50;
       S.rate = v;
       if (D.rateSel.value !== String(v)) D.rateSel.value = String(v);
       saveLocal();
@@ -4083,6 +4433,8 @@
     $('#btnProjectDelete')?.addEventListener('click', deleteProject);
     $('#btnProjectExport')?.addEventListener('click', exportProject);
     $('#btnProjectImport')?.addEventListener('click', () => D.projectFile?.click());
+    D.btnProfileSave?.addEventListener('click', () => flushProfileSave(true));
+    D.btnProfileBuild?.addEventListener('click', buildCurrentProfile);
     D.projectFile?.addEventListener('change', () => {
       const f = D.projectFile.files && D.projectFile.files[0];
       if (f) importProjectFile(f);
@@ -4284,15 +4636,21 @@
     } else if (mode === 'attach') {
       D.srcHint.textContent = '连到已经在跑的 OpenOCD tcl_port（如手工启动的 openocd -c "tcl_port 6666"），RISC-V / ARM 都可。';
     } else if (S.arch === 'riscv') {
-      D.srcHint.textContent = '启动 WCH OpenOCD（wlinke + sdi）连接 CH32V203。读取内存需要短暂 halt；可选 1–20 Hz，越低干扰越小。程序会短暂停顿，但不会一直暂停。';
+      D.srcHint.textContent = '启动 WCH OpenOCD（wlinke + sdi）连接 CH32V203。读取内存需要短暂 halt；可选 1–50 Hz，越低干扰越小。程序会短暂停顿，但不会一直暂停。';
     } else {
-      D.srcHint.textContent = '启动 ARM OpenOCD（cmsis-dap + SWD）连接 CW32L0，读芯片 ID 自动识别型号。';
+      const prof = activeProfile();
+      if (prof && prof.id === 'LKS32-FOC') {
+        D.srcHint.textContent = '启动 ARM OpenOCD（SWD）连接 LKS32MC07x；目标配置 profiles/targets/lks32mc07x.cfg，只读采样、不碰 Flash/复位。';
+      } else {
+        D.srcHint.textContent = '启动 ARM OpenOCD（cmsis-dap + SWD）连接 ' +
+          ((prof && prof.mcu) || 'CW32L0') + '，读芯片 ID 自动识别型号。';
+      }
     }
   }
 
   function syncRateOptions() {
     if (!D.rateSel) return;
-    const max = S.arch === 'riscv' ? 20 : 200;
+    const max = S.arch === 'riscv' ? 50 : 200;
     for (const o of D.rateSel.options) {
       o.disabled = Number(o.value) > max;
     }
