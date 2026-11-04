@@ -39,6 +39,10 @@
         <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg>
         <span class="btn-label">清空</span>
       </button>
+      <button id="btnChart" class="btn" title="显示 / 隐藏波形分区" aria-label="波形" aria-pressed="true">
+        <svg viewBox="0 0 24 24"><path d="M3 15h4l2-7 3 11 2.5-8 2 4H21"/></svg>
+        <span class="btn-label">波形</span>
+      </button>
       <button id="btnShot" class="btn" title="截图" aria-label="截图">
         <svg viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
         <span class="btn-label">截图</span>
@@ -288,12 +292,14 @@
             <label class="tool check"><input type="checkbox" id="gridOn" checked> 网格</label>
             <label class="tool check" title="0 / 中线参考线"><input type="checkbox" id="zeroLine" checked> 0 线</label>
             <label class="tool check" title="余晖 / 荧光渲染（简化后处理）"><input type="checkbox" id="glowOn"> 余晖</label>
-            <button class="panel-x" data-sec-close="chart" title="快速取消波形分区">×</button>
+            <!-- 临时禁用：波形分区关闭按钮（恢复入口见顶部“波形”） -->
+            <button class="panel-x" data-sec-close="chart" title="临时禁用" disabled hidden>×</button>
           </div>
         </div>
         <div id="canvasWrap">
           <canvas id="chart"></canvas>
           <div id="cursorTip" class="cursor-tip hidden"></div>
+          <div id="pinTip" class="cursor-tip pin-tip hidden"></div>
           <div id="emptyHint" class="empty-hint">
             <div>还没有信号</div>
             <small>在左侧把“波”打开，或点击顶部“信号源”</small>
@@ -305,19 +311,10 @@
       <section id="writeCard" class="write-card">
         <div class="write-head">
           <span class="side-title">写</span>
-          <span class="write-hint">在左侧信号行点“写”加入 / 移除</span>
-          <button class="panel-x" data-sec-close="write" title="快速取消写分区">×</button>
-          <label class="tool write-size-pick" title="写入窗口尺寸；自动=拉伸填满剩余高度">
-            <span>尺寸</span>
-            <select id="writeSize">
-              <option value="sm">紧凑</option>
-              <option value="md" selected>标准</option>
-              <option value="lg">大</option>
-              <option value="auto">自动拉伸</option>
-            </select>
-          </label>
-          <label class="check"><input id="writeArmed" type="checkbox"> 允许写入</label>
+          <span class="write-hint">左侧信号行点“写”加入 / 移除</span>
+          <label class="check write-arm"><input id="writeArmed" type="checkbox"> 允许写入</label>
           <span id="writeState" class="muted">未解锁</span>
+          <button class="panel-x" data-sec-close="write" title="快速取消写分区">×</button>
         </div>
         <div id="writeList" class="write-list">
           <div class="write-empty muted">还没有写入模块。左侧每个信号的“写”键可把该寄存器加入这里。</div>

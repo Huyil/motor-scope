@@ -29,6 +29,7 @@ import os
 import queue
 import random
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -664,6 +665,10 @@ class Hub:
             except ValueError:
                 pass
 
+    def count(self) -> int:
+        with self._lock:
+            return len(self._subs)
+
     def publish(self, msg: Dict[str, Any]) -> None:
         with self._lock:
             subs = list(self._subs)
@@ -1041,6 +1046,67 @@ class Sampler(threading.Thread):
 # --------------------------------------------------------------------------
 # 应用
 # --------------------------------------------------------------------------
+def _safe_num(v, default=0.0):
+    try:
+        x = float(v)
+        return x if math.isfinite(x) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_view_layout(layout):
+    """限制 /api/view 上报的布局大小，避免异常客户端把 presence 撑爆。"""
+    if not isinstance(layout, dict):
+        return {}
+    groups = []
+    for g in (layout.get("groups") or [])[:32]:
+        if not isinstance(g, dict):
+            continue
+        groups.append({
+            "id": str(g.get("id") or "")[:64],
+            "name": str(g.get("name") or "")[:48],
+            "auto": bool(g.get("auto")),
+            "visible": g.get("visible") is not False,
+        })
+    raw_rows = layout.get("rows") if isinstance(layout.get("rows"), dict) else {}
+    rows = {}
+    for k, v in list(raw_rows.items())[:300]:
+        rows[str(k)] = str(v)[:64]
+    raw_axes = layout.get("axes") if isinstance(layout.get("axes"), dict) else {}
+    axes = {}
+    for k, v in list(raw_axes.items())[:300]:
+        axes[str(k)] = "right" if str(v) == "right" else "left"
+    table = [str(x) for x in (layout.get("table") or [])][:300]
+    plot = [str(x) for x in (layout.get("plot") or [])][:300]
+    raw_write = layout.get("write") if isinstance(layout.get("write"), list) else []
+    write = []
+    for m in raw_write[:16]:
+        if not isinstance(m, dict):
+            continue
+        write.append({
+            "id": str(m.get("id") or "")[:32],
+            "rowId": str(m.get("rowId") or "")[:128],
+            "mode": "switch" if m.get("mode") == "switch" else "slider",
+            "width": _safe_num(m.get("width")),
+            "widthTouched": bool(m.get("widthTouched")),
+            "min": _safe_num(m.get("min")),
+            "max": _safe_num(m.get("max")),
+            "step": max(1.0, _safe_num(m.get("step"), 1.0)),
+            "onValue": _safe_num(m.get("onValue"), 1.0),
+            "offValue": _safe_num(m.get("offValue")),
+            "lockValue": _safe_num(m.get("lockValue")),
+            "locked": False,
+            "expanded": bool(m.get("expanded")),
+            "layout": "block" if m.get("layout") == "block" else "bar",
+            "addr": int(_safe_num(m.get("addr"))),
+            "size": int(_safe_num(m.get("size"))),
+            "signed": bool(m.get("signed")),
+            "name": str(m.get("name") or "")[:96],
+        })
+    return {"groups": groups, "rows": rows, "table": table, "plot": plot,
+            "axes": axes, "write": write}
+
+
 class App:
     def __init__(self, args):
         self.args = args
@@ -1049,6 +1115,10 @@ class App:
         self.header = os.path.abspath(args.header or os.path.join(self.project, "Libraries", "inc", "cw32l011.h"))
         self.signals_path = os.path.abspath(args.signals or SIGNALS_JSON)
         self.import_dir = os.path.join(HERE, "imports")
+        # 分享链接：imports/ 已 gitignore，持久化到 imports/shares.json
+        self.shares_path = os.path.join(self.import_dir, "shares.json")
+        self.shares_lock = threading.Lock()
+        self.shares = self._load_shares()
         # 机型工程: 一个机型 = 一套符号表 + 芯片/连接参数 + 前端配置
         self.profiles_root = PROFILES_DIR
         self.profile: Optional[Dict[str, Any]] = None
@@ -1061,6 +1131,9 @@ class App:
         self.catalog_error = ""
         self.catalog_lock = threading.Lock()
         self.status_lock = threading.Lock()
+        # 每个 SSE 客户端上报“本端正在显示”的 id；只用于删除提示/在线状态，不影响采样
+        self.presence: Dict[str, Dict[str, Any]] = {}
+        self.presence_lock = threading.Lock()
         self.running = True
         self.error = ""
         self.started = time.time()
@@ -1083,6 +1156,110 @@ class App:
             self.add_log("默认信号初始化失败: %s" % exc)
 
     # ---- 机型工程 ----
+    # ---- 分享链接：保存一份前端快照，GET 时原样返回 ----
+    def _load_shares(self) -> Dict[str, Any]:
+        try:
+            with open(self.shares_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_shares_locked(self) -> None:
+        try:
+            os.makedirs(self.import_dir, exist_ok=True)
+            tmp = self.shares_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.shares, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, self.shares_path)
+        except Exception as exc:
+            self.add_log("保存分享失败: %s" % exc)
+
+    def create_share(self, snapshot: Dict[str, Any]) -> str:
+        if not isinstance(snapshot, dict):
+            raise RuntimeError("分享内容无效")
+        data = dict(snapshot)
+        data["v"] = int(data.get("v") or 1)
+        raw = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        if len(raw.encode("utf-8")) > 1024 * 1024:
+            raise RuntimeError("分享内容太大（>1MB）")
+        now = time.time()
+        with self.shares_lock:
+            for sid, rec in list(self.shares.items()):
+                if not isinstance(rec, dict) or now - float(rec.get("created") or 0) > 30 * 86400:
+                    self.shares.pop(sid, None)
+            sid = secrets.token_urlsafe(6)
+            while sid in self.shares:
+                sid = secrets.token_urlsafe(6)
+            self.shares[sid] = {"created": now, "data": data}
+            if len(self.shares) > 200:
+                keep = sorted(self.shares.items(),
+                              key=lambda kv: float((kv[1] or {}).get("created") or 0))[-200:]
+                self.shares = dict(keep)
+            self._save_shares_locked()
+            return sid
+
+    def get_share(self, sid: str) -> Optional[Dict[str, Any]]:
+        sid = str(sid or "").strip()
+        if not sid:
+            return None
+        with self.shares_lock:
+            rec = self.shares.get(sid)
+            if not isinstance(rec, dict):
+                return None
+            if time.time() - float(rec.get("created") or 0) > 30 * 86400:
+                self.shares.pop(sid, None)
+                self._save_shares_locked()
+                return None
+            data = rec.get("data")
+            return dict(data) if isinstance(data, dict) else None
+
+    # ---- presence: 每端本地的表/波显示集合（删除提示用） ----
+    def presence_add(self):
+        with self.presence_lock:
+            used = {p.get("no") for p in self.presence.values()}
+            no = 1
+            while no in used:
+                no += 1
+            cid = "c%d" % no
+            self.presence[cid] = {"id": cid, "no": no, "visible": [], "layout": {}, "label": "", "last": time.monotonic()}
+            return cid, no
+
+    def presence_remove(self, cid: str) -> None:
+        with self.presence_lock:
+            self.presence.pop(cid, None)
+
+    def presence_update(self, cid: str, visible, layout=None, label=None) -> bool:
+        with self.presence_lock:
+            p = self.presence.get(cid)
+            if not p:
+                return False
+            new = [str(x) for x in (visible or [])][:256]
+            new_layout = _clean_view_layout(layout)
+            new_label = str(label or "")[:32]
+            changed = (new != p.get("visible") or new_layout != p.get("layout")
+                       or (new_label and new_label != p.get("label")))
+            p["visible"] = new
+            p["layout"] = new_layout
+            if new_label:
+                p["label"] = new_label
+            p["last"] = time.monotonic()
+            return changed
+
+    def presence_payload(self):
+        now = time.monotonic()
+        with self.presence_lock:
+            for cid, p in list(self.presence.items()):
+                if now - p.get("last", 0) > 15:
+                    del self.presence[cid]
+            return [
+                {"id": p["id"], "no": p["no"],
+                 "label": p.get("label") or "",
+                 "visible": list(p.get("visible") or []),
+                 "layout": p.get("layout") or {}}
+                for p in sorted(self.presence.values(), key=lambda x: x["no"])
+            ]
+
     def _apply_profile_meta(self, meta: Dict[str, Any]) -> None:
         self.profile = dict(meta or {})
         src = (meta or {}).get("source") or {}
@@ -1214,6 +1391,27 @@ class App:
             print("[scope] " + line, flush=True)
 
     # ---- 目录 ----
+    def _apply_annotations(self, data: Dict[str, Any]) -> int:
+        """把 <ID>/annotations.json（或 signals.json 同级 annotations.json）合并进目录。
+
+        desc 是人工/源码注释，不属于 gen_signals 生成物；单独文件保证
+        “导入 AXF / 从 AXF 重新生成”不会把它覆盖。
+        """
+        try:
+            if self.profile:
+                pid = str(self.profile.get("id") or "")
+                if pid:
+                    return profiles.apply_annotations(
+                        data, profiles.load_annotations(pid, self.profiles_root))
+            ann_path = os.path.join(os.path.dirname(self.signals_path), "annotations.json")
+            if os.path.isfile(ann_path):
+                with open(ann_path, "r", encoding="utf-8") as f:
+                    ann = json.load(f)
+                return profiles.apply_annotations(data, ann if isinstance(ann, dict) else {})
+        except Exception as exc:
+            self.add_log("合并变量注释失败: %s" % exc)
+        return 0
+
     def load_catalog(self, auto_regen: bool = True) -> None:
         with self.catalog_lock:
             data = None
@@ -1236,6 +1434,7 @@ class App:
             if data is None:
                 data = {"meta": {}, "variables": [], "peripherals": [],
                         "defaults": [], "stall": {}}
+            self._apply_annotations(data)
             self.catalog = data
             self.add_log("信号表: %d 个变量 / %d 个外设 (%s)"
                          % (len(data.get("variables", [])), len(data.get("peripherals", [])),
@@ -1256,6 +1455,7 @@ class App:
             map_path = os.path.join(os.path.dirname(self.axf), "DR2159.map")
             data = gen_signals.build(self.axf, header,
                                      map_path if os.path.isfile(map_path) else None)
+        self._apply_annotations(data)
         os.makedirs(os.path.dirname(self.signals_path) or ".", exist_ok=True)
         tmp = self.signals_path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1315,6 +1515,7 @@ class App:
             defaults=list(prof.get("defaults") or []),
             stall=dict(prof.get("stall") or {}),
         )
+        self._apply_annotations(data)
         if self.profile:
             meta = dict(self.profile)
             src = dict(psrc)
@@ -1441,6 +1642,15 @@ class App:
         return {"signals": signals, "rate": self.args.rate}
 
     # ---- 状态 ----
+    def lan_payload(self) -> Dict[str, Any]:
+        ips = getattr(self, "lan_ips", None)
+        if ips is None:
+            ips = lan_ipv4_addresses()
+        return {
+            "ips": [str(ip) for ip in (ips or [])],
+            "port": int(getattr(self, "lan_port", 0) or 0),
+        }
+
     def status_payload(self) -> Dict[str, Any]:
         src = self.source
         info = src.info() if src else {"kind": "none", "connected": False}
@@ -1466,6 +1676,7 @@ class App:
             },
             "config": {"signals": [s.to_dict() for s in self.sampler.signals],
                        "rate": self.sampler.rate},
+            "lan": self.lan_payload(),
             "error": self.error,
             "connect_error": self.last_connect_error,
             "openocd_found": self._openocd_info(),
@@ -2120,6 +2331,14 @@ class Handler(BaseHTTPRequestHandler):
                                    extra={"Content-Disposition": 'attachment; filename="motorscope.csv"'})
             if path == "/api/stream":
                 return self._stream()
+            if path.startswith("/api/share/"):
+                sid = path[len("/api/share/"):].strip("/")
+                data = self.app.get_share(sid)
+                if data is None:
+                    return self._json({"ok": False, "error": "分享不存在或已过期"}, 404)
+                out = {"ok": True}
+                out.update(data)
+                return self._json(out)
             if path.startswith("/api/"):
                 return self._json({"ok": False, "error": "unknown api"}, 404)
             return self._static(path)
@@ -2147,8 +2366,35 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/disconnect":
                 self.app.disconnect()
                 return self._json({"ok": True, "status": self.app.status_payload()})
+            if path == "/api/share":
+                try:
+                    sid = self.app.create_share(payload)
+                    return self._json({"ok": True, "id": sid})
+                except Exception as exc:
+                    return self._json({"ok": False, "error": str(exc)}, 400)
+            if path == "/api/view":
+                cid = str(payload.get("clientId") or "")
+                if not cid:
+                    return self._json({"ok": False, "error": "no clientId"}, 400)
+                before = self.app.presence_payload()
+                changed = self.app.presence_update(cid, payload.get("visible") or [], payload.get("layout") or {}, payload.get("label") or "")
+                after = self.app.presence_payload()
+                if changed or after != before:
+                    self.app.hub.publish({"type": "presence", "presence": after})
+                return self._json({"ok": True})
             if path == "/api/config":
-                return self._json(self.app.apply_config(payload))
+                res = self.app.apply_config(payload)
+                sigs = res.get("signals") or []
+                roles = {}
+                for x in payload.get("signals") or []:
+                    if isinstance(x, dict):
+                        roles[str(x.get("id") or "")] = str(x.get("role") or "signal")
+                for s in sigs:
+                    s["role"] = roles.get(str(s.get("id") or ""), "signal")
+                self.app.hub.publish({"type": "config",
+                                      "config": {"signals": sigs,
+                                                 "rate": res.get("rate")}})
+                return self._json(res)
             if path == "/api/profiles/switch":
                 return self._json(self.app.switch_profile(payload.get("id")))
             if path == "/api/profiles/config":
@@ -2198,6 +2444,7 @@ class Handler(BaseHTTPRequestHandler):
     def _stream(self) -> None:
         app = self.app
         q = app.hub.subscribe()
+        cid, cno = app.presence_add()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -2209,9 +2456,14 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"retry: 1000\n\n")
             self._sse_send({"type": "hello",
                             "status": app.status_payload(),
+                            "clients": app.hub.count(),
+                            "clientId": cid,
+                            "clientNo": cno,
+                            "presence": app.presence_payload(),
                             "config": {"signals": [s.to_dict() for s in app.sampler.signals],
                                        "rate": app.sampler.rate}})
             self.wfile.flush()
+            app.hub.publish({"type": "presence", "presence": app.presence_payload()})
             last_status = time.monotonic()
             last_ping = time.monotonic()
             while app.running:
@@ -2238,9 +2490,14 @@ class Handler(BaseHTTPRequestHandler):
                     except queue.Empty:
                         break
                 samples: List[Any] = []
+                others: List[Dict[str, Any]] = []
                 for item in batch:
                     if item.get("type") == "s":
                         samples.extend(item.get("b") or [])
+                    else:
+                        others.append(item)
+                for item in others:
+                    self._sse_send(item)
                 if samples:
                     self._sse_send({"type": "s", "b": samples})
                 now = time.monotonic()
@@ -2255,6 +2512,8 @@ class Handler(BaseHTTPRequestHandler):
             pass
         finally:
             app.hub.unsubscribe(q)
+            app.presence_remove(cid)
+            app.hub.publish({"type": "presence", "presence": app.presence_payload()})
 
     def _sse_send(self, obj: Dict[str, Any]) -> None:
         data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -2304,8 +2563,8 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     ap.add_argument("--port", type=int, default=8765, help="HTTP 端口 (默认 8765)")
     ap.add_argument("--host", default="127.0.0.1",
                     help="本地 HTTP 绑定地址（默认 127.0.0.1；0.0.0.0 会同时把本地端口开到局域网）")
-    ap.add_argument("--lan-port", type=int, default=80,
-                    help="局域网固定出口端口（默认 80；0=不额外开 80，沿用本地端口）")
+    ap.add_argument("--lan-port", type=int, default=0,
+                    help="可选：额外的局域网固定出口端口（默认 0=关闭；80 需要管理员/portproxy）")
     ap.add_argument("--project", default="", help="DR2159_Project 目录")
     ap.add_argument("--axf", default="", help="AXF 路径")
     ap.add_argument("--header", default="", help="cw32l011.h 路径")
@@ -2445,6 +2704,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        (args.host in ("0.0.0.0", "", "::") and lan_port in (0, port)))
     url = "http://%s:%d/" % (args.host if args.host != "0.0.0.0" else "127.0.0.1", port)
     lan = lan_ipv4_addresses() if (lan_visible or lan_error) else []
+    app.lan_ips = list(lan) if lan_visible else []
+    app.lan_port = int(lan_active_port) if lan_visible else 0
     print("MotorScope %s" % VERSION)
     print("  UI   : %s" % url)
     if lan_visible:

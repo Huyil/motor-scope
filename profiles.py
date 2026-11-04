@@ -101,7 +101,7 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         # LKS 的默认信号分布在 0x20000020..0x200004f8, 合并成一次读
         "scan": {"max_gap": 2048, "max_words": 512},
         "source": {
-            "axf": r"D:\Code\lll\lks07x_Project.axf",
+            "axf": r"D:\Code\LKS32\lks07x_Project.axf",
             "header": "",
             "map": "",
             "svd": r"C:\Keil_v5\ARM\Packs\Linko\LKS07x\1.2.0\SVD\LKS32MC07x.svd",
@@ -150,6 +150,11 @@ def signals_path(pid: str, root: str = ROOT) -> str:
     return os.path.join(_profile_dir(pid, root), "signals.json")
 
 
+def annotations_path(pid: str, root: str = ROOT) -> str:
+    """手工/源码注释文件；不属于生成物，重建 signals.json 时不会被覆盖。"""
+    return os.path.join(_profile_dir(pid, root), "annotations.json")
+
+
 def config_path(pid: str, root: str = ROOT) -> str:
     return os.path.join(_profile_dir(pid, root), "config.json")
 
@@ -171,6 +176,40 @@ def _write_json(path: str, data: Any, indent: Optional[int] = None) -> int:
         f.write("\n")
     os.replace(tmp, path)
     return os.path.getsize(path)
+
+
+def load_annotations(pid: str, root: str = ROOT) -> Dict[str, Any]:
+    """读取 <ID>/annotations.json；格式 {"variables": {"name": "desc", ...}}。"""
+    data = _read_json(annotations_path(pid, root), None)
+    return data if isinstance(data, dict) else {}
+
+
+def apply_annotations(data: Dict[str, Any], annotations: Dict[str, Any]) -> int:
+    """把 annotations.variables 合并进 catalog.variables[].desc；返回命中数。
+
+    生成器只产出地址/类型，desc 属于人工/源码注释，单独存文件，避免
+    “导入 AXF / 从 AXF 重新生成”时被覆盖。
+    """
+    if not isinstance(data, dict) or not isinstance(annotations, dict):
+        return 0
+    table = annotations.get("variables")
+    if not isinstance(table, dict) or not table:
+        return 0
+    hit = 0
+    for v in data.get("variables") or []:
+        if not isinstance(v, dict):
+            continue
+        name = str(v.get("name") or "")
+        desc = table.get(name)
+        if desc is None:
+            continue
+        desc = str(desc).strip()
+        if not desc:
+            continue
+        if v.get("desc") != desc:
+            v["desc"] = desc
+        hit += 1
+    return hit
 
 
 # --------------------------------------------------------------------------
@@ -303,7 +342,7 @@ def ensure(root: str = ROOT, active: str = "") -> Dict[str, Any]:
     return index
 
 
-def build_catalog(meta: Dict[str, Any]) -> Dict[str, Any]:
+def build_catalog(meta: Dict[str, Any], root: str = ROOT) -> Dict[str, Any]:
     """按 profile.source 生成符号目录（需要 pyelftools；SVD 型号不需要头文件）。"""
     import gen_signals  # 延迟导入：未装 pyelftools 时仍可读已有 signals.json
 
@@ -330,10 +369,18 @@ def build_catalog(meta: Dict[str, Any]) -> Dict[str, Any]:
         stall=dict(meta.get("stall") or {}),
     )
     data.setdefault("meta", {})["profile"] = str(meta.get("id") or "")
+    pid = str(meta.get("id") or "")
+    if pid:
+        apply_annotations(data, load_annotations(pid, root))
     return data
 
 
 def save_catalog(pid: str, data: Dict[str, Any], root: str = ROOT) -> None:
+    # 写回 signals.json 时再合并一次，保证任何调用方都不会丢掉 desc
+    try:
+        apply_annotations(data, load_annotations(pid, root))
+    except Exception:
+        pass
     _write_json(signals_path(pid, root), data)
 
 
@@ -369,7 +416,7 @@ def rebuild(pid: str, root: str = ROOT) -> Dict[str, Any]:
     meta = read_profile(pid, root)
     if meta is None:
         raise RuntimeError("未知机型: %s" % pid)
-    data = build_catalog(meta)
+    data = build_catalog(meta, root)
     save_catalog(pid, data, root)
     meta = apply_counts(meta, data)
     meta = write_profile(meta, root)

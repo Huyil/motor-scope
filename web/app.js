@@ -104,15 +104,17 @@
       groups: [{ id: 'default', name: '默认分组', visible: true, auto: true }],
       seq: 1,
     },
-    // 写入窗口：多个独立模块，每个有自己的类型/范围/实时/状态
+    // 写入窗口：多个独立模块，每个有自己的类型/范围/锁定/状态
     write: {
-      armed: false, size: 'md', seq: 1,
+      armed: false, seq: 1,
       mods: [{
         id: 'wm1', rowId: 'motor.over.threshold', mode: 'slider',
         width: 0.5, widthTouched: false,
-        min: 0, max: 4095, step: 1, live: false,
+        min: 0, max: 4095, step: 1, locked: false, lockValue: 0,
+        onValue: 1, offValue: 0,
         status: '', statusKind: '', busy: false, pending: null, timer: 0,
-        liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+        liveTimer: null, lockTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+        dragging: false, lastResult: null, expanded: false, layout: 'bar',
       }],
     },
     focusId: null,
@@ -122,6 +124,11 @@
     dirty: true,
     hoverT: null,
     hoverX: null,
+    pinT: null,
+    pinX: null,
+    pinY: null,
+    pinTipW: 0,
+    pinTipH: 0,
     view: null,
     size: { w: 0, h: 0 },
     ui: {
@@ -142,6 +149,17 @@
       sections: { chart: true, table: true, write: true },
     },
     es: null,
+    sseReady: false,
+    clientId: '',
+    clientNo: 0,
+    presence: [],
+    presenceKey: '',
+    viewTimer: 0,
+    viewSentKey: '',
+    viewHeartbeat: 0,
+    shareApplied: false,
+    shareApplying: false,
+    shareId: '',
     selRows: new Map(),
     liveRows: new Map(),
     legendEls: new Map(),
@@ -161,7 +179,68 @@
     sampleCountSeen: 0,
   };
 
-  const PROJECTS_KEY = 'ms.projects.v2';
+  // 每个标签页/固定客户端独立 key：避免同机多个页面互相覆盖 localStorage。
+  // 固定标识：URL ?client=dsh，或 localStorage.setItem('ms.clientId','dsh')。
+  const LEGACY_CFG_KEY = 'ms.cfg.v2';
+  const LEGACY_PROJECTS_KEY = 'ms.projects.v2';
+  const CFG_LAST_KEY = 'ms.cfg.last';
+  const PROJECTS_LAST_KEY = 'ms.projects.last';
+  function safeClientToken(v) {
+    return String(v || '').replace(/[^A-Za-z0-9_.-]+/g, '').slice(0, 32);
+  }
+  function resolveClientKey() {
+    try {
+      const q = new URLSearchParams(location.search).get('client');
+      const qt = safeClientToken(q);
+      if (qt) return 'fixed-' + qt;
+      const h = new URLSearchParams(String(location.hash || '').replace(/^#/, '')).get('client');
+      const ht = safeClientToken(h);
+      if (ht) return 'fixed-' + ht;
+      const fixed = safeClientToken(localStorage.getItem('ms.clientId'));
+      if (fixed) return 'fixed-' + fixed;
+      let k = sessionStorage.getItem('ms.clientKey');
+      if (!k) {
+        k = 'tab-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
+        sessionStorage.setItem('ms.clientKey', k);
+      }
+      return safeClientToken(k) || ('tab-' + Date.now().toString(36));
+    } catch {
+      return 'tab-' + Date.now().toString(36);
+    }
+  }
+  const CLIENT_KEY = resolveClientKey();
+  const CLIENT_LABEL = CLIENT_KEY.startsWith('fixed-') ? CLIENT_KEY.slice(6) : CLIENT_KEY;
+  const CFG_KEY = LEGACY_CFG_KEY + '@' + CLIENT_KEY;
+  const PROJECTS_KEY = LEGACY_PROJECTS_KEY + '@' + CLIENT_KEY;
+
+  function writeCfgRaw(text) {
+    try { localStorage.setItem(CFG_KEY, text); } catch {}
+    try { localStorage.setItem(CFG_LAST_KEY, text); } catch {}
+    // 兼容旧版本/外部工具：只作为 seed，不会被已打开页面回读覆盖
+    try { localStorage.setItem(LEGACY_CFG_KEY, text); } catch {}
+  }
+  function readCfgRaw() {
+    try {
+      return localStorage.getItem(CFG_KEY)
+        || localStorage.getItem(CFG_LAST_KEY)
+        || localStorage.getItem(LEGACY_CFG_KEY)
+        || localStorage.getItem('ms.cfg.v1');
+    } catch { return null; }
+  }
+  function writeProjectsRaw(text) {
+    try { localStorage.setItem(PROJECTS_KEY, text); } catch {}
+    try { localStorage.setItem(PROJECTS_LAST_KEY, text); } catch {}
+    try { localStorage.setItem(LEGACY_PROJECTS_KEY, text); } catch {}
+  }
+  function readProjectsRaw() {
+    try {
+      return localStorage.getItem(PROJECTS_KEY)
+        || localStorage.getItem(PROJECTS_LAST_KEY)
+        || localStorage.getItem(LEGACY_PROJECTS_KEY);
+    } catch { return null; }
+  }
+  S.clientKey = CLIENT_KEY;
+  S.clientLabel = CLIENT_LABEL;
 
   // ---------------------------------------------------------------- dom
   const D = {};
@@ -193,6 +272,7 @@
     D.chart = $('#chart');
     D.wrap = $('#canvasWrap');
     D.tip = $('#cursorTip');
+    D.pinTip = $('#pinTip');
     D.empty = $('#emptyHint');
     D.statSamples = $('#statSamples');
     D.statRate = $('#statRate');
@@ -244,7 +324,6 @@
     D.writeList = $('#writeList');
     D.writeArmed = $('#writeArmed');
     D.writeState = $('#writeState');
-    D.writeSize = $('#writeSize');
     D.projectSel = $('#projectSel');
     D.projectSel2 = $('#projectSel2');
     D.projectState = $('#projectState');
@@ -259,6 +338,7 @@
     D.logText = $('#logText');
     D.btnPause = $('#btnPause');
     D.btnReset = $('#btnReset');
+    D.btnChart = $('#btnChart');
     D.btnConnect = $('#btnConnect');
     D.srcHint = $('#srcHint');
     D.rateSel = $('#rateSel');
@@ -724,6 +804,7 @@
     updateEmptyHint();
     S.dirty = true;
     saveLocal();
+    sendViewState();
   }
 
   function toggleWaveGroup(groupId) {
@@ -736,6 +817,7 @@
     updateEmptyHint();
     S.dirty = true;
     saveLocal();
+    sendViewState();
   }
 
   function addWaveGroup() {
@@ -745,6 +827,7 @@
     S.wave.groups.push({ id: 'wg' + S.wave.seq, name, visible: true, auto: false });
     renderCatalog();
     saveLocal();
+    sendViewState();
     toast('已新建波形分组：' + name, 'ok');
   }
 
@@ -761,6 +844,7 @@
     updateEmptyHint();
     S.dirty = true;
     saveLocal();
+    sendViewState();
   }
   function tableRows() {
     const out = [];
@@ -777,12 +861,22 @@
     return ids.size;
   }
 
-  // “已选择”里要同时看到表/波；按 plot 优先、table 补充，去重
+  // “已选择”= 共享监视集；表/波开关只决定本端是否显示，不改变监视集
   function selectedRows() {
     const out = [];
     const seen = new Set();
-    for (const r of plotRows()) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
-    for (const r of tableRows()) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
+    for (const r of S.rows.values()) {
+      const inWrite = !!writeModForRow(r.id);
+      const internal = r.support || r.configRole === 'support'
+        || ((r.writeOnly || r.configRole === 'write') && !inWrite);
+      if (r.monitor && (!internal || r.table || r.plot) && !seen.has(r.id)) {
+        seen.add(r.id);
+        out.push(r);
+      }
+    }
+    for (const v of S.virtuals) {
+      if (!seen.has(v.id) && (v.table || v.plot)) { seen.add(v.id); out.push(v); }
+    }
     return out;
   }
 
@@ -790,6 +884,12 @@
     const secs = S.ui.sections || (S.ui.sections = { chart: true, table: true, write: true });
     for (const [key, el] of [['chart', D.chartCard], ['table', D.tableCard], ['write', D.writeCard]]) {
       if (el) el.classList.toggle('section-hidden', secs[key] === false);
+    }
+    if (D.btnChart) {
+      const on = secs.chart !== false;
+      D.btnChart.classList.toggle('active', on);
+      D.btnChart.setAttribute('aria-pressed', on ? 'true' : 'false');
+      D.btnChart.title = on ? '隐藏波形分区' : '显示波形分区';
     }
   }
 
@@ -807,6 +907,7 @@
     const visible = d.visible !== false;
     const table = d.table !== undefined ? !!d.table : visible;
     const plot = d.plot !== undefined ? !!d.plot : visible;
+    const monitor = d.monitor !== undefined ? !!d.monitor : (!d.support && (visible || !!d.writeOnly));
     return {
       kind: 'channel',
       id: String(d.id || d.name || ''),
@@ -826,6 +927,8 @@
       groupId: String(d.groupId || ''),
       writeOnly: !!d.writeOnly,
       visible,
+      monitor,
+      configRole: String(d.configRole || ''),
       axis: d.axis === 'right' ? 'right' : d.axis === 'left' ? 'left' : inferAxis(d.name),
       type: String(d.type || ''),
       value: null,
@@ -882,6 +985,7 @@
       if (opts.table !== undefined) old.table = !!opts.table;
       if (opts.plot !== undefined) old.plot = !!opts.plot;
       if (opts.support === false) old.support = false;
+      old.monitor = true;
       afterSignalsChanged();
       return old;
     }
@@ -1002,6 +1106,7 @@
       const src = entry || S.index.get(id);
       if (!src) { toast('找不到信号: ' + id, 'err'); return; }
       row = newRow(src, { table: flag === 'table', plot: flag === 'plot', support: false });
+      row.monitor = true;
       row.groupId = 'default';
       if (row.plot) { const g = waveGroupFor(row); if (g) g.visible = true; }
       S.rows.set(id, row);
@@ -1009,7 +1114,7 @@
       return;
     }
     if (row.support && on) row.support = false;
-    if (on) row.writeOnly = false;
+    if (on) { row.writeOnly = false; row.monitor = true; }
     row[flag] = !!on;
     if (on && row.plot) { const g = waveGroupFor(row); if (g) g.visible = true; }
     if (!row.table && !row.plot) {
@@ -1027,7 +1132,7 @@
       return;
     }
     row.table = row.plot = !!on;
-    if (on) row.writeOnly = false;
+    if (on) { row.writeOnly = false; row.monitor = true; }
     if (on && row.plot) { const g = waveGroupFor(row); if (g) g.visible = true; }
     afterSignalsChanged();
   }
@@ -1053,7 +1158,7 @@
     const beforeIds = S.signals.map((s) => s.id);
     const before = beforeIds.join('|');
     const need = new Set();
-    for (const r of S.rows.values()) if (r.table || r.plot) need.add(r.id);
+    for (const r of S.rows.values()) if (r.monitor) need.add(r.id);
     for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
     // 写入模块即使不在表/波形里，也要采样，才能显示当前值和回读
     for (const m of S.write.mods) if (m.rowId && S.rows.has(m.rowId)) need.add(m.rowId);
@@ -1108,16 +1213,14 @@
     mod.step = 1;
   }
 
-  const WRITE_WIDTH_STEPS = [0.25, 1 / 3, 0.5, 1];
-  function defaultWriteWidth(mode) { return mode === 'switch' ? 0.25 : 0.5; }
+  const WRITE_WIDTH_STEPS = [1 / 3, 0.5, 1];
+  function defaultWriteWidth(mode) { return mode === 'switch' ? 1 / 3 : 0.5; }
   function widthLabel(w) {
-    if (Math.abs(w - 0.25) < 0.01) return '1/4';
     if (Math.abs(w - 1 / 3) < 0.01) return '1/3';
     if (Math.abs(w - 0.5) < 0.01) return '1/2';
     return '1';
   }
   function widthSpan(w) {
-    if (Math.abs(w - 0.25) < 0.01) return 3;
     if (Math.abs(w - 1 / 3) < 0.01) return 4;
     if (Math.abs(w - 0.5) < 0.01) return 6;
     return 12;
@@ -1132,9 +1235,11 @@
     const mod = {
       id: 'wm' + S.write.seq, rowId: row.id, mode: 'slider',
       width: 0.5, widthTouched: false,
-      min: 0, max: 0, step: 1, live: false,
+      min: 0, max: 0, step: 1, locked: false, lockValue: 0,
+      onValue: 1, offValue: 0,
       status: '', statusKind: '', busy: false, pending: null, timer: 0,
-      liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+      liveTimer: null, lockTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+      dragging: false, lastResult: null, expanded: false, layout: 'bar',
       addr: row.addr, size: row.size, signed: !!row.signed, name: row.name,
     };
     resetWriteRange(row, mod);
@@ -1207,10 +1312,13 @@
     if (existing) {
       S.write.mods = S.write.mods.filter((m) => m !== existing);
       stopLiveWrite(existing);
+      stopLockWrite(existing);
       existing.liveHeld = false;
+      const row = S.rows.get(rowId);
+      if (row) { row.writeOnly = false; row.monitor = true; }
       ensureWriteMods();
       afterSignalsChanged();
-      toast('已从写入窗口移除：' + (S.index.get(rowId)?.name || rowId), 'ok');
+      toast('已取消写入：' + (S.index.get(rowId)?.name || rowId) + '（仍保留在已选择）', 'ok');
       return;
     }
     let row = S.rows.get(rowId);
@@ -1222,331 +1330,784 @@
       S.rows.set(rowId, row);
     }
     if (!row.addr) { toast('该信号没有可写地址', 'err'); return; }
+    row.monitor = true;
     S.write.mods.push(makeWriteMod(row));
     ensureWriteMods();
     afterSignalsChanged();
-    toast('已加入写入窗口：' + (row.name || row.id), 'ok');
+    toast('已加入写入窗口，并加入已选择：' + (row.name || row.id), 'ok');
   }
 
-  function applyWriteSize() {
-    const size = ['sm', 'md', 'lg', 'auto'].includes(S.write.size) ? S.write.size : 'md';
-    S.write.size = size;
-    if (D.writeCard) {
-      for (const s of ['sm', 'md', 'lg', 'auto']) D.writeCard.classList.toggle('size-' + s, s === size);
-    }
-    if (D.writeSize) D.writeSize.value = size;
+  // 写入模块的 DOM 只构建一次，后续只更新文本/class，避免整块重建造成闪烁
+  const writeUI = new Map();
+
+  function writeStatusText(mod) {
+    if (mod.status) return mod.status;
+    return S.write.armed ? '就绪' : '未解锁';
+  }
+
+  function setWriteError(mod, msg, live) {
+    mod.status = msg;
+    mod.statusKind = 'err';
+    if (live) { stopLiveWrite(mod); stopLockWrite(mod); mod.liveHeld = false; mod.dragging = false; if (mod.locked) mod.locked = false; }
+    refreshWriteUI();
+    toast(msg, 'err');
   }
 
   function syncWriteUI() {
-    applyWriteSize();
     const armed = !!S.write.armed;
     if (D.writeCard) D.writeCard.classList.toggle('locked', !armed);
     if (D.writeArmed) D.writeArmed.checked = armed;
     if (D.writeState) {
-      D.writeState.textContent = armed ? ('已解锁 · ' + S.write.mods.length + ' 个模块') : '未解锁';
+      const txt = armed ? ('已解锁 · ' + S.write.mods.length + ' 个模块') : '未解锁';
+      if (D.writeState.textContent !== txt) D.writeState.textContent = txt;
       D.writeState.className = armed ? 'ok' : 'muted';
     }
-    if (!D.writeList) return;
     for (const mod of S.write.mods) {
-      const el = D.writeList.querySelector('[data-mod="' + mod.id + '"]');
-      if (!el) continue;
-      const btn = el.querySelector('.wm-write');
-      if (btn) {
-        btn.disabled = !armed;
-        btn.title = armed ? '写入当前值并回读' : '先勾选“允许写入”';
-      }
+      const ui = writeUI.get(mod.id);
+      if (!ui) continue;
+      ui.wbtn.disabled = !armed;
+      ui.wbtn.title = armed ? '写入当前值并回读' : '先勾选“允许写入”';
+      ui.onBtn.disabled = !armed;
+      ui.offBtn.disabled = !armed;
     }
+  }
+
+  function updateSliderFill(ui, mod, value) {
+    const span = mod.max - mod.min;
+    const p = span > 0 ? clamp((Number(value) - mod.min) / span, 0, 1) * 100 : 0;
+    ui.slider.style.setProperty('--p', p.toFixed(1) + '%');
+  }
+
+  function syncWriteCardHeight() {
+    if (!D.writeCard) return;
+    const tableH = D.tableCard ? D.tableCard.getBoundingClientRect().height : 0;
+    const base = Math.max(180, Math.round(tableH || 0));
+    const expanded = S.write.mods.some((m) => m.expanded);
+    const h = expanded
+      ? Math.max(base, Math.min(Math.round(window.innerHeight * 0.6), 520))
+      : base;
+    D.writeCard.style.height = h + 'px';
+    D.writeCard.style.flexBasis = h + 'px';
+  }
+
+  function syncWriteCardExpanded() {
+    if (D.writeCard) D.writeCard.classList.toggle('has-expanded', S.write.mods.some((m) => m.expanded));
+    syncWriteCardHeight();
+  }
+
+  function setSwitchButtons(ui, which) {
+    ui.onBtn.classList.toggle('on', which === 'on');
+    ui.offBtn.classList.toggle('on', which === 'off');
+  }
+
+  function writeValueOf(mod, ui) {
+    if (mod.mode === 'switch') {
+      if (ui.onBtn.classList.contains('on')) return mod.onValue;
+      if (ui.offBtn.classList.contains('on')) return mod.offValue;
+      return mod.onValue;
+    }
+    const v = Number(ui.num.value);
+    return isFinite(v) ? v : (Number(ui.slider.value) || 0);
+  }
+
+  function makeWriteField(labelText, title) {
+    const lab = document.createElement('label');
+    lab.className = 'wm-field';
+    const span = document.createElement('span');
+    span.textContent = labelText;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.title = title;
+    input.setAttribute('aria-label', title);
+    lab.append(span, input);
+    return { lab, input };
+  }
+
+  function buildWriteStatusRow(ui) {
+    const row = document.createElement('div');
+    row.className = 'wm-status-row';
+    const min = document.createElement('span');
+    min.className = 'wm-min';
+    const status = document.createElement('span');
+    status.className = 'wm-status';
+    const liveTag = document.createElement('span');
+    liveTag.className = 'wm-live-tag';
+    liveTag.textContent = '';
+    const liveDot = document.createElement('span');
+    liveDot.className = 'wm-live-dot';
+    liveDot.title = '周期性写入中';
+    const max = document.createElement('span');
+    max.className = 'wm-max';
+    row.append(min, status, liveTag, liveDot, max);
+    ui.minLabel = min;
+    ui.status = status;
+    ui.liveTag = liveTag;
+    ui.liveDot = liveDot;
+    ui.maxLabel = max;
+    return row;
+  }
+
+  function buildWriteDetail(mod, ui) {
+    const detail = document.createElement('div');
+    detail.className = 'wm-detail';
+
+    const layoutSeg = document.createElement('div');
+    layoutSeg.className = 'seg small wm-layout';
+    const layoutBtns = {};
+    for (const [lay, label] of [['bar', '条'], ['block', '块']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.layout = lay;
+      b.textContent = label;
+      b.title = lay === 'bar' ? '横条样式（顶部）' : '方块样式（底部）';
+      b.addEventListener('click', () => setWriteLayout(mod, lay));
+      layoutBtns[lay] = b;
+      layoutSeg.appendChild(b);
+    }
+
+    const modeSeg = document.createElement('div');
+    modeSeg.className = 'seg small wm-mode';
+    const modeBtns = {};
+    for (const [mode, label] of [['slider', '滑条'], ['switch', '开关']]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.mode = mode;
+      b.textContent = label;
+      b.addEventListener('click', () => setWriteMode(mod, mode));
+      modeBtns[mode] = b;
+      modeSeg.appendChild(b);
+    }
+
+    const widthBtn = document.createElement('button');
+    widthBtn.type = 'button';
+    widthBtn.className = 'wm-width';
+    widthBtn.addEventListener('click', () => {
+      mod.width = nextWriteWidth(mod.width);
+      mod.widthTouched = true;
+      renderWriteMods();
+      saveLocal();
+    });
+
+    const wbtn = document.createElement('button');
+    wbtn.type = 'button';
+    wbtn.className = 'btn primary wm-write';
+    wbtn.textContent = '写入';
+    wbtn.title = '写入当前值并回读';
+
+    const range = document.createElement('div');
+    range.className = 'wm-range';
+    const minF = makeWriteField('最小', '最小值');
+    const maxF = makeWriteField('最大', '最大值');
+    const stepF = makeWriteField('步长', '步长');
+    const minI = minF.input, maxI = maxF.input, stepI = stepF.input;
+    range.append(minF.lab, maxF.lab, stepF.lab);
+
+    const switchVals = document.createElement('div');
+    switchVals.className = 'wm-switch-vals';
+    const onF = makeWriteField('开值', '开关“开”按钮写入的值');
+    const offF = makeWriteField('关值', '开关“关”按钮写入的值');
+    const onI = onF.input, offI = offF.input;
+    switchVals.append(onF.lab, offF.lab);
+
+    detail.append(layoutSeg, modeSeg, widthBtn, wbtn, range, switchVals);
+    ui.layoutBtns = layoutBtns;
+    ui.modeBtns = modeBtns;
+    ui.widthBtn = widthBtn;
+    ui.wbtn = wbtn;
+    ui.minI = minI;
+    ui.maxI = maxI;
+    ui.stepI = stepI;
+    ui.onI = onI;
+    ui.offI = offI;
+    return detail;
+  }
+
+  function initWriteValues(mod, ui) {
+    const row = S.rows.get(mod.rowId);
+    const raw = latestRawOf(row);
+    const locked = !!mod.locked;
+    const init = (raw === null || locked) ? clamp(Number(mod.liveValue) || mod.min, mod.min, mod.max) : clamp(raw, mod.min, mod.max);
+    ui.slider.value = String(init);
+    ui.num.value = String(locked ? init : (raw === null ? init : raw));
+    updateSliderFill(ui, mod, init);
+    const which = raw === null ? '' : (raw === mod.onValue ? 'on' : (raw === mod.offValue ? 'off' : ''));
+    setSwitchButtons(ui, which);
+  }
+
+  function bindWriteEvents(mod, ui) {
+    const { slider, num, onBtn, offBtn, onI, offI, minI, maxI, stepI, lock, wbtn, expand, del } = ui;
+
+    slider.addEventListener('input', () => {
+      const v = Number(slider.value);
+      num.value = String(v);
+      mod.liveValue = v;
+      updateSliderFill(ui, mod, v);
+    });
+    slider.addEventListener('pointerdown', () => {
+      mod.dragging = true;
+      if (!S.write.armed || mod.locked) return;
+      mod.liveHeld = true;
+      mod.liveValue = Number(slider.value);
+      startLiveWrite(mod, mod.liveValue);
+    });
+    slider.addEventListener('change', () => {
+      const wasHeld = mod.liveHeld;
+      finishLiveWrite(mod);
+      // 键盘方向键/点击轨道不会触发 pointerdown：默认滑动即写入，补发一次
+      if (!wasHeld && !mod.locked && S.write.armed) {
+        const v = Number(slider.value);
+        if (v !== mod.lastSent) sendWrite(mod, v, { live: false });
+      }
+    });
+    num.addEventListener('change', () => {
+      const v = Number(num.value);
+      if (!isFinite(v)) { num.value = String(mod.liveValue || mod.min); return; }
+      const sv = clamp(v, mod.min, mod.max);
+      slider.value = String(sv);
+      mod.liveValue = v;
+      updateSliderFill(ui, mod, sv);
+      if (!mod.locked && S.write.armed) sendWrite(mod, v, { live: false });
+    });
+
+    const sendSwitch = (which) => {
+      const v = which === 'on' ? mod.onValue : mod.offValue;
+      mod.liveValue = v;
+      mod.lockValue = v;
+      setSwitchButtons(ui, which);
+      if (S.write.armed) sendWrite(mod, v, { live: false });
+    };
+    onBtn.addEventListener('click', () => sendSwitch('on'));
+    offBtn.addEventListener('click', () => sendSwitch('off'));
+
+    onI.addEventListener('change', () => {
+      const v = Number(onI.value);
+      mod.onValue = isFinite(v) ? v : 1;
+      onI.value = String(mod.onValue);
+      ui.onBtn.textContent = String(mod.onValue);
+      ui.onBtn.title = '写入开值 ' + mod.onValue;
+      saveLocal();
+    });
+    offI.addEventListener('change', () => {
+      const v = Number(offI.value);
+      mod.offValue = isFinite(v) ? v : 0;
+      offI.value = String(mod.offValue);
+      ui.offBtn.textContent = String(mod.offValue);
+      ui.offBtn.title = '写入关值 ' + mod.offValue;
+      saveLocal();
+    });
+    minI.addEventListener('change', () => {
+      mod.min = Number(minI.value) || 0;
+      if (mod.max <= mod.min) { mod.max = mod.min + 1; maxI.value = String(mod.max); }
+      ui.slider.min = String(mod.min);
+      ui.slider.max = String(mod.max);
+      ui.minLabel.textContent = String(mod.min);
+      ui.maxLabel.textContent = String(mod.max);
+      const v = clamp(Number(ui.slider.value) || mod.min, mod.min, mod.max);
+      ui.slider.value = String(v);
+      updateSliderFill(ui, mod, v);
+      saveLocal();
+    });
+    maxI.addEventListener('change', () => {
+      mod.max = Number(maxI.value) || 0;
+      if (mod.max <= mod.min) { mod.min = Math.max(0, mod.max - 1); minI.value = String(mod.min); }
+      ui.slider.min = String(mod.min);
+      ui.slider.max = String(mod.max);
+      ui.minLabel.textContent = String(mod.min);
+      ui.maxLabel.textContent = String(mod.max);
+      const v = clamp(Number(ui.slider.value) || mod.min, mod.min, mod.max);
+      ui.slider.value = String(v);
+      updateSliderFill(ui, mod, v);
+      saveLocal();
+    });
+    stepI.addEventListener('change', () => {
+      mod.step = Math.max(1, Number(stepI.value) || 1);
+      stepI.value = String(mod.step);
+      ui.slider.step = String(mod.step);
+      saveLocal();
+    });
+    wbtn.addEventListener('click', () => sendWrite(mod, writeValueOf(mod, ui), { live: false }));
+    lock.addEventListener('click', () => setLocked(mod, !mod.locked));
+    del.addEventListener('click', () => toggleWriteRow(mod.rowId));
+    expand.addEventListener('click', () => {
+      mod.expanded = !mod.expanded;
+      ui.el.classList.toggle('expanded', mod.expanded);
+      ui.expand.textContent = mod.expanded ? '▾' : '▸';
+      ui.expand.title = mod.expanded ? '收起数值设置' : '展开数值设置';
+      if (mod.expanded && ui.el.scrollIntoView) ui.el.scrollIntoView({ block: 'nearest' });
+      syncWriteCardExpanded();
+      saveLocal();
+    });
+  }
+
+  function buildBarModEl(mod) {
+    const el = document.createElement('div');
+    el.className = 'write-mod layout-bar';
+    el.dataset.mod = mod.id;
+    el._mod = mod;
+    el._layout = 'bar';
+    const ui = { el, layout: 'bar' };
+
+    const bar = document.createElement('div');
+    bar.className = 'wm-bar';
+    const name = document.createElement('span');
+    name.className = 'wm-name';
+    const type = document.createElement('span');
+    type.className = 'wm-type';
+    const addr = document.createElement('span');
+    addr.className = 'wm-addr';
+    const switchBtns = document.createElement('div');
+    switchBtns.className = 'wm-switch-btns';
+    const onBtn = document.createElement('button');
+    onBtn.type = 'button';
+    onBtn.className = 'wm-switch-btn';
+    const offBtn = document.createElement('button');
+    offBtn.type = 'button';
+    offBtn.className = 'wm-switch-btn';
+    onBtn.textContent = String(mod.onValue);
+    offBtn.textContent = String(mod.offValue);
+    onBtn.title = '写入开值 ' + mod.onValue;
+    offBtn.title = '写入关值 ' + mod.offValue;
+    switchBtns.append(onBtn, offBtn);
+    const num = document.createElement('input');
+    num.type = 'number';
+    num.className = 'wm-number';
+    num.title = '写入值（按位宽 clamp）';
+    const lock = document.createElement('button');
+    lock.type = 'button';
+    lock.className = 'wm-lock';
+    lock.textContent = '锁定';
+    lock.title = '锁定：持续周期性写入；默认单击/滑动写一次';
+    const expand = document.createElement('button');
+    expand.type = 'button';
+    expand.className = 'wm-expand';
+    expand.textContent = '▸';
+    expand.title = '展开数值设置';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'wm-del';
+    del.textContent = '×';
+    del.title = '从写入窗口移除';
+    bar.append(name, switchBtns, type, addr, num, lock, expand, del);
+
+    const sliderRow = document.createElement('div');
+    sliderRow.className = 'wm-slider-row';
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'wm-slider';
+    sliderRow.appendChild(slider);
+
+    Object.assign(ui, { name, type, addr, num, onBtn, offBtn, lock, expand, del, slider, sliderRow });
+    const statusRow = buildWriteStatusRow(ui);
+    const detail = buildWriteDetail(mod, ui);
+    el.append(bar, sliderRow, statusRow, detail);
+    bindWriteEvents(mod, ui);
+    initWriteValues(mod, ui);
+    return ui;
+  }
+
+  function buildBlockModEl(mod) {
+    const el = document.createElement('div');
+    el.className = 'write-mod layout-block';
+    el.dataset.mod = mod.id;
+    el._mod = mod;
+    el._layout = 'block';
+    const ui = { el, layout: 'block' };
+
+    const top = document.createElement('div');
+    top.className = 'wm-top';
+    const name = document.createElement('span');
+    name.className = 'wm-name';
+    const type = document.createElement('span');
+    type.className = 'wm-type';
+    const addr = document.createElement('span');
+    addr.className = 'wm-addr';
+    const lock = document.createElement('button');
+    lock.type = 'button';
+    lock.className = 'wm-lock';
+    lock.textContent = '锁定';
+    lock.title = '锁定：持续周期性写入；默认单击/滑动写一次';
+    const expand = document.createElement('button');
+    expand.type = 'button';
+    expand.className = 'wm-expand';
+    expand.textContent = '▸';
+    expand.title = '展开数值设置';
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'wm-del';
+    del.textContent = '×';
+    del.title = '从写入窗口移除';
+    top.append(name, type, addr, lock, expand, del);
+
+    const body = document.createElement('div');
+    body.className = 'wm-body';
+    const sliderWrap = document.createElement('div');
+    sliderWrap.className = 'wm-slider-wrap';
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.className = 'wm-slider';
+    sliderWrap.appendChild(slider);
+    const num = document.createElement('input');
+    num.type = 'number';
+    num.className = 'wm-number';
+    num.title = '写入值（按位宽 clamp）';
+    const switchBtns = document.createElement('div');
+    switchBtns.className = 'wm-switch-btns';
+    const onBtn = document.createElement('button');
+    onBtn.type = 'button';
+    onBtn.className = 'wm-switch-btn';
+    const offBtn = document.createElement('button');
+    offBtn.type = 'button';
+    offBtn.className = 'wm-switch-btn';
+    onBtn.textContent = String(mod.onValue);
+    offBtn.textContent = String(mod.offValue);
+    onBtn.title = '写入开值 ' + mod.onValue;
+    offBtn.title = '写入关值 ' + mod.offValue;
+    switchBtns.append(onBtn, offBtn);
+    body.append(sliderWrap, num, switchBtns);
+
+    Object.assign(ui, { name, type, addr, num, onBtn, offBtn, lock, expand, del, slider, sliderWrap });
+    const statusRow = buildWriteStatusRow(ui);
+    const detail = buildWriteDetail(mod, ui);
+    el.append(top, body, statusRow, detail);
+    bindWriteEvents(mod, ui);
+    initWriteValues(mod, ui);
+    return ui;
+  }
+
+  function buildWriteModEl(mod) {
+    return mod.layout === 'block' ? buildBlockModEl(mod) : buildBarModEl(mod);
+  }
+
+  function updateWriteModEl(ui, mod, row) {
+    const el = ui.el;
+    const isBlock = mod.layout === 'block';
+    el.classList.toggle('layout-bar', !isBlock);
+    el.classList.toggle('layout-block', isBlock);
+    el.classList.toggle('mode-switch', mod.mode === 'switch');
+    el.classList.toggle('expanded', !!mod.expanded);
+    el.style.gridColumn = isBlock ? 'span ' + widthSpan(mod.width) : 'span 12';
+    const name = row.name || mod.name || mod.rowId;
+    if (ui.name.textContent !== name) ui.name.textContent = name;
+    ui.name.title = name + '\n' + hex(row.addr) + ' · ' + row.size + 'B';
+    const addrTxt = '@' + hex(row.addr, 6);
+    if (ui.addr.textContent !== addrTxt) ui.addr.textContent = addrTxt;
+    ui.addr.title = hex(row.addr) + ' · ' + (row.width || row.size * 8) + ' 位';
+    const bits = row.width || row.size * 8;
+    const bitTxt = Array.isArray(row.bit) ? ' · bit[' + row.bit[0] + ':' + (row.bit[0] + row.bit[1] - 1) + ']' : '';
+    const typeTxt = bits + 'b' + bitTxt;
+    if (ui.type.textContent !== typeTxt) ui.type.textContent = typeTxt;
+    ui.type.title = '位宽 ' + bits + ' 位' + (Array.isArray(row.bit) ? ' · 位域 [' + row.bit[0] + ':' + (row.bit[0] + row.bit[1] - 1) + ']（读-改-写）' : '');
+    for (const [lay, b] of Object.entries(ui.layoutBtns)) b.classList.toggle('active', mod.layout === lay);
+    for (const [mode, b] of Object.entries(ui.modeBtns)) b.classList.toggle('active', mod.mode === mode);
+    const wl = widthLabel(mod.width);
+    if (ui.widthBtn.textContent !== wl) ui.widthBtn.textContent = wl;
+    ui.widthBtn.title = '方块宽度：1/3 → 1/2 → 整行（当前 ' + wl + '）';
+    ui.slider.min = String(mod.min);
+    ui.slider.max = String(mod.max);
+    ui.slider.step = String(mod.step);
+    if (document.activeElement !== ui.minI) ui.minI.value = String(mod.min);
+    if (document.activeElement !== ui.maxI) ui.maxI.value = String(mod.max);
+    if (document.activeElement !== ui.stepI) ui.stepI.value = String(mod.step);
+    if (document.activeElement !== ui.onI) ui.onI.value = String(mod.onValue);
+    if (document.activeElement !== ui.offI) ui.offI.value = String(mod.offValue);
+    ui.minLabel.textContent = String(mod.min);
+    ui.maxLabel.textContent = String(mod.max);
+    ui.onBtn.textContent = String(mod.onValue);
+    ui.offBtn.textContent = String(mod.offValue);
+    ui.onBtn.title = '写入开值 ' + mod.onValue;
+    ui.offBtn.title = '写入关值 ' + mod.offValue;
+    ui.expand.textContent = mod.expanded ? '▾' : '▸';
+    ui.expand.title = mod.expanded ? '收起数值设置' : '展开数值设置';
+    ui.lock.classList.toggle('on', !!mod.locked);
+    ui.lock.title = mod.locked ? '已锁定：持续周期性写入，点击关闭' : '锁定：持续周期性写入；默认单击/滑动写一次';
+    ui.status.textContent = writeStatusText(mod);
+    ui.status.className = 'wm-status' + (mod.statusKind ? ' ' + mod.statusKind : (S.write.armed ? '' : ' muted'));
+  }
+
+  function setWriteMode(mod, mode) {
+    if (mod.mode === mode) return;
+    mod.mode = mode;
+    mod.status = '';
+    mod.statusKind = '';
+    mod.expanded = true;
+    if (!mod.widthTouched) mod.width = defaultWriteWidth(mode);
+    stopLiveWrite(mod);
+    mod.liveHeld = false;
+    mod.dragging = false;
+    renderWriteMods();
+    saveLocal();
+  }
+
+  function setWriteLayout(mod, layout) {
+    if (mod.layout === layout) return;
+    mod.layout = layout;
+    mod.expanded = true;
+    renderWriteMods();
+    saveLocal();
   }
 
   function renderWriteMods() {
     if (!D.writeList) return;
-    stopAllLiveWrites();
-    D.writeList.innerHTML = '';
+    stopAllDragWrites();
+    const list = D.writeList;
+    const empty = list.querySelector('.write-empty');
     if (!S.write.mods.length) {
-      const empty = document.createElement('div');
-      empty.className = 'write-empty muted';
-      empty.textContent = '还没有写入模块。左侧每个信号的“写”键可把该寄存器加入这里。';
-      D.writeList.appendChild(empty);
+      for (const ui of writeUI.values()) ui.el.remove();
+      writeUI.clear();
+      if (!empty) {
+        const div = document.createElement('div');
+        div.className = 'write-empty muted';
+        div.textContent = '还没有写入模块。左侧每个信号的“写”键可把该寄存器加入这里。';
+        list.appendChild(div);
+      }
       syncWriteUI();
+      syncWriteCardExpanded();
       return;
     }
-    for (const mod of S.write.mods) {
+    if (empty) empty.remove();
+    const ordered = S.write.mods.slice().sort((a, b) => (a.layout === 'block' ? 1 : 0) - (b.layout === 'block' ? 1 : 0));
+    const seen = new Set();
+    for (const mod of ordered) {
       const row = S.rows.get(mod.rowId);
       if (!row) continue;
-      const el = document.createElement('div');
-      el.className = 'write-mod' + (Math.abs(mod.width - 0.25) < 0.01 ? ' wm-quarter' : '');
-      el.dataset.mod = mod.id;
-      el.style.gridColumn = 'span ' + widthSpan(mod.width);
-
-      const head = document.createElement('div');
-      head.className = 'wm-head';
-      const name = document.createElement('span');
-      name.className = 'wm-name';
-      name.textContent = row.name;
-      name.title = row.name + '\n' + hex(row.addr) + ' · ' + row.size + 'B';
-      const addr = document.createElement('span');
-      addr.className = 'wm-addr';
-      addr.textContent = '@' + hex(row.addr, 6);
-      const seg = document.createElement('div');
-      seg.className = 'seg small';
-      for (const [mode, label] of [['slider', '滑条'], ['switch', '开关']]) {
-        const b = document.createElement('button');
-        b.dataset.mode = mode;
-        b.textContent = label;
-        b.classList.toggle('active', mod.mode === mode);
-        b.addEventListener('click', () => {
-          mod.mode = mode;
-          mod.status = '';
-          if (!mod.widthTouched) mod.width = defaultWriteWidth(mode);
-          stopLiveWrite(mod);
-          mod.liveHeld = false;
-          renderWriteMods();
-          saveLocal();
-        });
-        seg.appendChild(b);
+      seen.add(mod.id);
+      let ui = writeUI.get(mod.id);
+      if (!ui || ui.el._mod !== mod || ui.layout !== (mod.layout === 'block' ? 'block' : 'bar')) {
+        if (ui) ui.el.remove();
+        ui = buildWriteModEl(mod);
+        writeUI.set(mod.id, ui);
       }
-      const widthBtn = document.createElement('button');
-      widthBtn.className = 'wm-width';
-      widthBtn.textContent = widthLabel(mod.width);
-      widthBtn.title = '模块宽度：1/4 → 1/3 → 1/2 → 整行（当前 ' + widthLabel(mod.width) + '）';
-      widthBtn.addEventListener('click', () => {
-        mod.width = nextWriteWidth(mod.width);
-        mod.widthTouched = true;
-        renderWriteMods();
-        saveLocal();
-      });
-      const wbtn = document.createElement('button');
-      wbtn.className = 'btn primary wm-write';
-      wbtn.textContent = '写入';
-      wbtn.title = '写入当前值并回读';
-      wbtn.addEventListener('click', () => sendWrite(mod, Number(num.value)));
-      const del = document.createElement('button');
-      del.className = 'wm-del';
-      del.textContent = '×';
-      del.title = '从写入窗口移除';
-      del.addEventListener('click', () => toggleWriteRow(mod.rowId));
-      head.append(addr, seg, widthBtn, wbtn, del);
-
-      const body = document.createElement('div');
-      body.className = 'wm-body';
-      const isSwitch = mod.mode === 'switch';
-      const slider = document.createElement('input');
-      slider.type = 'range';
-      slider.className = 'wm-slider' + (isSwitch ? ' hidden' : '');
-      slider.min = String(mod.min);
-      slider.max = String(mod.max);
-      slider.step = String(mod.step);
-      const num = document.createElement('input');
-      num.type = 'number';
-      num.className = 'wm-number' + (isSwitch ? ' hidden' : '');
-      const swWrap = document.createElement('label');
-      swWrap.className = 'check wm-switch-wrap' + (isSwitch ? '' : ' hidden');
-      const sw = document.createElement('input');
-      sw.type = 'checkbox';
-      swWrap.append(sw, document.createTextNode(' 1'));
-      const range = document.createElement('span');
-      range.className = 'wm-range' + (isSwitch ? ' hidden' : '');
-      const minI = document.createElement('input'); minI.type = 'number'; minI.value = String(mod.min); minI.title = '最小值';
-      const maxI = document.createElement('input'); maxI.type = 'number'; maxI.value = String(mod.max); maxI.title = '最大值';
-      const stepI = document.createElement('input'); stepI.type = 'number'; stepI.value = String(mod.step); stepI.title = '步长';
-      range.append(document.createTextNode('范围 '), minI, document.createTextNode(' … '), maxI, document.createTextNode(' 步 '), stepI);
-      const liveLab = document.createElement('label');
-      liveLab.className = 'check wm-live';
-      const live = document.createElement('input');
-      live.type = 'checkbox';
-      live.checked = !!mod.live;
-      liveLab.append(live, document.createTextNode(' 实时'));
-      const status = document.createElement('span');
-      status.className = 'wm-status ' + (mod.statusKind || '');
-      status.textContent = mod.status || (S.write.armed ? (latestRawOf(row) === null ? '等待样本' : '当前 ' + latestRawOf(row)) : '未解锁');
-      body.append(slider, num, swWrap, range, liveLab, status);
-
-      const raw = latestRawOf(row);
-      if (raw !== null) {
-        slider.value = String(clamp(raw, mod.min, mod.max));
-        num.value = String(raw);
-        sw.checked = !!raw;
-      }
-
-      slider.addEventListener('input', () => {
-        const v = Number(slider.value);
-        num.value = String(v);
-        mod.liveValue = v;
-        // 实时关闭时只改 UI，不发写；必须点“写入”
-      });
-      slider.addEventListener('pointerdown', () => {
-        if (!S.write.armed || !mod.live) return;
-        mod.liveHeld = true;
-        mod.liveValue = Number(slider.value);
-        startLiveWrite(mod, mod.liveValue); // 按住每 100ms 写一次
-      });
-      slider.addEventListener('change', () => {
-        // 松开/键盘提交：先停掉 100ms 定时，再补发最后位置（实时开启时）
-        finishLiveWrite(mod);
-        if (mod.live && S.write.armed) {
-          const v = Number(slider.value);
-          if (v !== mod.lastSent) sendWrite(mod, v);
-        }
-      });
-      num.addEventListener('change', () => {
-        const v = Number(num.value);
-        slider.value = String(clamp(v, mod.min, mod.max));
-        mod.liveValue = v;
-        if (mod.live) sendWrite(mod, v);
-      });
-      sw.addEventListener('change', () => {
-        const v = sw.checked ? 1 : 0;
-        num.value = String(v);
-        slider.value = String(v);
-        // 实时关闭时开关也只改 UI，点击“写入”才发
-        if (S.write.armed && mod.live) sendWrite(mod, v);
-      });
-      minI.addEventListener('change', () => {
-        mod.min = Number(minI.value) || 0;
-        if (mod.max <= mod.min) { mod.max = mod.min + 1; maxI.value = String(mod.max); }
-        slider.min = String(mod.min);
-        saveLocal();
-      });
-      maxI.addEventListener('change', () => {
-        mod.max = Number(maxI.value) || 0;
-        if (mod.max <= mod.min) { mod.min = Math.max(0, mod.max - 1); minI.value = String(mod.min); }
-        slider.max = String(mod.max);
-        saveLocal();
-      });
-      stepI.addEventListener('change', () => {
-        mod.step = Math.max(1, Number(stepI.value) || 1);
-        stepI.value = String(mod.step);
-        slider.step = String(mod.step);
-        saveLocal();
-      });
-      live.addEventListener('change', () => {
-        mod.live = !!live.checked;
-        if (!mod.live) { stopLiveWrite(mod); mod.liveHeld = false; }
-        saveLocal();
-      });
-      wbtn.addEventListener('click', () => {
-        const v = Number(num.value);
-        sendWrite(mod, v);
-      });
-
-      el.append(head, name, body);
-      D.writeList.appendChild(el);
+      updateWriteModEl(ui, mod, row);
+      list.appendChild(ui.el);
+    }
+    for (const [id, ui] of Array.from(writeUI)) {
+      if (!seen.has(id)) { ui.el.remove(); writeUI.delete(id); }
     }
     syncWriteUI();
+    refreshWriteUI();
+    syncWriteCardExpanded();
   }
 
   function refreshWriteUI() {
     if (!D.writeList) return;
     for (const mod of S.write.mods) {
-      const el = D.writeList.querySelector('[data-mod="' + mod.id + '"]');
-      if (!el) continue;
+      const ui = writeUI.get(mod.id);
+      if (!ui) continue;
       const row = S.rows.get(mod.rowId);
       const raw = latestRawOf(row);
-      const slider = el.querySelector('.wm-slider');
-      const num = el.querySelector('.wm-number');
-      const sw = el.querySelector('.wm-switch-wrap input');
-      // 焦点在模块内（正在输入/按按钮/按住滑条）时不要用采样值覆盖用户输入
-      const focused = el.contains(document.activeElement);
-      if (raw !== null && !focused && !mod.busy) {
-        if (slider) slider.value = String(clamp(raw, mod.min, mod.max));
-        if (num) num.value = String(raw);
-        if (sw) sw.checked = !!raw;
-      }
-      const st = el.querySelector('.wm-status');
-      if (st) {
-        if (mod.status) {
-          st.textContent = mod.status;
-          st.className = 'wm-status ' + (mod.statusKind || '');
-        } else {
-          st.textContent = S.write.armed ? (raw === null ? '等待样本' : '当前 ' + raw) : '未解锁';
-          st.className = 'wm-status';
+      const focused = ui.el.contains(document.activeElement);
+      const hold = mod.dragging || mod.liveHeld || mod.locked;
+      // 正在拖动/输入/请求中时，不用采样值覆盖用户当前值
+      if (raw !== null && !focused && !hold && !mod.busy) {
+        const sv = clamp(raw, mod.min, mod.max);
+        if (ui.slider.value !== String(sv)) {
+          ui.slider.value = String(sv);
+          updateSliderFill(ui, mod, sv);
+        }
+        if (ui.num.value !== String(raw)) ui.num.value = String(raw);
+        if (mod.mode === 'switch' && !mod.locked) {
+          const which = raw === mod.onValue ? 'on' : (raw === mod.offValue ? 'off' : '');
+          setSwitchButtons(ui, which);
         }
       }
+      if (mod.mode === 'switch' && mod.locked) {
+        const which = mod.lockValue === mod.onValue ? 'on' : (mod.lockValue === mod.offValue ? 'off' : '');
+        setSwitchButtons(ui, which);
+      }
+      const lockOn = !!mod.locked && !!S.write.armed;
+      const dragOn = !!mod.liveHeld && !!S.write.armed;
+      const active = lockOn || dragOn;
+      if (ui.el.classList.contains('lock-on') !== active) ui.el.classList.toggle('lock-on', active);
+      const tagTxt = lockOn ? 'LOCK' : '';
+      if (ui.liveTag.textContent !== tagTxt) ui.liveTag.textContent = tagTxt;
+      const txt = writeStatusText(mod);
+      if (ui.status.textContent !== txt) ui.status.textContent = txt;
+      const cls = 'wm-status' + (mod.statusKind ? ' ' + mod.statusKind : (S.write.armed ? '' : ' muted'));
+      if (ui.status.className !== cls) ui.status.className = cls;
+      if (ui.lock) {
+        const locked = !!mod.locked;
+        if (ui.lock.classList.contains('on') !== locked) ui.lock.classList.toggle('on', locked);
+        const lockTitle = locked ? '已锁定：持续周期性写入，点击关闭' : '锁定：持续周期性写入；默认单击/滑动写一次';
+        if (ui.lock.title !== lockTitle) ui.lock.title = lockTitle;
+      }
+      const dis = !S.write.armed;
+      if (ui.wbtn.disabled !== dis) {
+        ui.wbtn.disabled = dis;
+        ui.wbtn.title = dis ? '先勾选“允许写入”' : '写入当前值并回读';
+      }
+      if (ui.onBtn.disabled !== dis) ui.onBtn.disabled = dis;
+      if (ui.offBtn.disabled !== dis) ui.offBtn.disabled = dis;
     }
   }
 
-  async function sendWrite(mod, value) {
+  async function sendWrite(mod, value, opts = {}) {
+    const live = !!opts.live;
     const row = S.rows.get(mod.rowId);
-    if (!row || !row.addr) {
-      mod.status = '没有可写的目标'; mod.statusKind = 'err';
-      refreshWriteUI(); toast(mod.status, 'err'); return;
-    }
-    if (!S.write.armed) {
-      mod.status = '未解锁：先勾选“允许写入”'; mod.statusKind = 'err';
-      refreshWriteUI(); toast(mod.status, 'err'); return;
-    }
+    if (!row || !row.addr) { setWriteError(mod, '没有可写的目标', live); return; }
+    if (!S.write.armed) { setWriteError(mod, '未解锁：先勾选“允许写入”', live); return; }
     let v = Number(value);
-    if (!isFinite(v)) {
-      mod.status = '写入值无效'; mod.statusKind = 'err';
-      refreshWriteUI(); toast(mod.status, 'err'); return;
-    }
+    if (!isFinite(v)) { setWriteError(mod, '写入值无效', live); return; }
     const bits = row.width || (row.size * 8);
     const max = Math.pow(2, bits) - 1;
     v = Math.max(0, Math.min(max, Math.trunc(v)));
     mod.lastSent = v;
-    if (mod.busy) { mod.pending = v; return; }
+    if (mod.busy) {
+      // 周期写排队时保留更“显式”的那次请求（显式写优先于锁定 tick）
+      if (!mod.pending || !live || mod.pending.live) mod.pending = { value: v, live };
+      return;
+    }
     mod.busy = true;
-    mod.status = '写入中…'; mod.statusKind = 'muted';
-    refreshWriteUI();
+    if (!live) {
+      mod.status = '写入中…';
+      mod.statusKind = 'muted';
+      refreshWriteUI();
+    }
     try {
       const res = await post('/api/write', {
         addr: row.addr, size: row.size, value: v, bit: row.bit || null, verify: true,
       });
-      mod.status = '已写 ' + fmtInt(v) + ' · 回读 ' + fmtInt(res.readback) + (res.verified ? '' : '（不一致）');
-      mod.statusKind = res.verified ? 'ok' : 'err';
-      if (!res.verified) toast('写入已发出，但回读不一致（固件可能正在改它）', 'err');
+      mod.lastResult = { value: v, readback: res.readback, verified: !!res.verified };
+      if (!live) {
+        if (S.write.armed) {
+          mod.status = '已写 ' + fmtInt(v) + ' · 回读 ' + fmtInt(res.readback) + (res.verified ? '' : '（不一致）');
+          mod.statusKind = res.verified ? 'ok' : 'err';
+        } else {
+          // 请求在途时被锁定：不要把“已写”盖到“未解锁”上
+          mod.status = '';
+          mod.statusKind = '';
+        }
+      }
+      if (!res.verified && !live) toast('写入已发出，但回读不一致（固件可能正在改它）', 'err');
     } catch (e) {
-      mod.status = '写入失败: ' + e.message; mod.statusKind = 'err';
+      mod.status = '写入失败: ' + e.message;
+      mod.statusKind = 'err';
+      if (live) {
+        stopLiveWrite(mod);
+        mod.liveHeld = false;
+        mod.dragging = false;
+        if (mod.locked) { stopLockWrite(mod); mod.locked = false; }
+      }
       toast(mod.status, 'err');
     } finally {
       mod.busy = false;
       refreshWriteUI();
-      saveLocal();
       const pending = mod.pending;
       mod.pending = null;
-      if (pending !== null && pending !== v) sendWrite(mod, pending);
+      if (pending && (pending.value !== v || pending.live !== live)) {
+        sendWrite(mod, pending.value, { live: pending.live });
+      }
     }
   }
 
-  // ---- 实时写入: 按住滑条每 100ms 写一次, 松开立即停 ----
+  // ---- 写入节拍: 默认滑动/单击写一次; 锁定后持续周期性写 ----
   function stopLiveWrite(mod) {
     if (mod.liveTimer) { clearInterval(mod.liveTimer); clearTimeout(mod.liveTimer); mod.liveTimer = null; }
     if (mod.timer) { clearTimeout(mod.timer); mod.timer = 0; }
+    mod.timer = 0;
+  }
+
+  function stopLockWrite(mod) {
+    if (mod.lockTimer) { clearInterval(mod.lockTimer); clearTimeout(mod.lockTimer); mod.lockTimer = null; }
   }
 
   function startLiveWrite(mod, value) {
     stopLiveWrite(mod);
-    if (!mod.live || !S.write.armed) return;
+    if (!S.write.armed) return;
+    mod.liveHeld = true;
     mod.liveValue = Number(value);
     const tick = () => {
-      if (!mod.live || !S.write.armed) { stopLiveWrite(mod); return; }
-      sendWrite(mod, mod.liveValue);
+      if (!S.write.armed) {
+        stopLiveWrite(mod);
+        mod.liveHeld = false;
+        refreshWriteUI();
+        return;
+      }
+      sendWrite(mod, mod.liveValue, { live: true });
     };
     tick();
     mod.liveTimer = setInterval(tick, 100);
   }
 
   function finishLiveWrite(mod) {
+    mod.dragging = false;
     if (!mod.liveHeld) return;
     mod.liveHeld = false;
     stopLiveWrite(mod);
-    // 松开时补发最后位置（若最后一次定时写还没覆盖到），之后不再持续写
-    if (mod.live && S.write.armed && mod.liveValue !== mod.lastSent) {
-      sendWrite(mod, mod.liveValue);
+    if (!S.write.armed) { refreshWriteUI(); return; }
+    if (mod.locked) { refreshWriteUI(); return; }
+    const v = Number(mod.liveValue);
+    const done = mod.lastResult;
+    // 最后一次 100ms 写已经覆盖最终值：只把结果落到状态栏一次，不重复发请求
+    if (!mod.busy && mod.lastSent === v && done && done.value === v) {
+      mod.status = '已写 ' + fmtInt(done.value) + ' · 回读 ' + fmtInt(done.readback) + (done.verified ? '' : '（不一致）');
+      mod.statusKind = done.verified ? 'ok' : 'err';
+      if (!done.verified) toast('写入已发出，但回读不一致（固件可能正在改它）', 'err');
+      refreshWriteUI();
+      return;
+    }
+    // 松开补发最终值（显式写，状态栏只更新这一次）
+    sendWrite(mod, v, { live: false });
+  }
+
+  function lockValueOf(mod) {
+    const ui = writeUI.get(mod.id);
+    if (!ui) return null;
+    if (mod.mode === 'switch') {
+      if (mod.lockValue !== mod.onValue && mod.lockValue !== mod.offValue) mod.lockValue = mod.onValue;
+      return mod.lockValue;
+    }
+    const v = Number(ui.num.value);
+    return isFinite(v) ? v : (Number(ui.slider.value) || 0);
+  }
+
+  function startLockWrite(mod) {
+    stopLockWrite(mod);
+    if (!mod.locked || !S.write.armed) return;
+    const tick = () => {
+      if (!mod.locked || !S.write.armed) { stopLockWrite(mod); refreshWriteUI(); return; }
+      const v = lockValueOf(mod);
+      if (v === null) return;
+      mod.liveValue = v;
+      sendWrite(mod, v, { live: true });
+    };
+    tick();
+    mod.lockTimer = setInterval(tick, 100);
+  }
+
+  function setLocked(mod, locked) {
+    mod.locked = !!locked;
+    if (mod.locked) {
+      if (mod.mode === 'switch') {
+        const raw = latestRawOf(S.rows.get(mod.rowId));
+        if (raw !== null && (raw === mod.onValue || raw === mod.offValue)) mod.lockValue = raw;
+        else if (mod.lockValue !== mod.onValue && mod.lockValue !== mod.offValue) mod.lockValue = mod.onValue;
+      }
+      const v = lockValueOf(mod);
+      if (v !== null) mod.liveValue = v;
+      startLockWrite(mod);
+    } else {
+      stopLockWrite(mod);
+      if (mod.pending && mod.pending.live) mod.pending = null;
+    }
+    refreshWriteUI();
+    saveLocal();
+  }
+
+  function stopAllDragWrites() {
+    for (const mod of S.write.mods) {
+      stopLiveWrite(mod);
+      mod.liveHeld = false;
+      mod.dragging = false;
     }
   }
 
   function stopAllLiveWrites() {
     for (const mod of S.write.mods) {
       stopLiveWrite(mod);
+      stopLockWrite(mod);
       mod.liveHeld = false;
+      mod.dragging = false;
     }
-  }
-
-  function scheduleWrite(mod, value) {
-    if (!mod.live || !S.write.armed) return;
-    if (mod.timer) clearTimeout(mod.timer);
-    mod.timer = setTimeout(() => { mod.timer = 0; sendWrite(mod, value); }, 120);
   }
 
   function scheduleHistoryReload() {
@@ -1569,7 +2130,8 @@
     renderMarginSelects();
     updateEmptyHint();
     saveLocal();
-    sendConfig();
+    sendViewState();
+    if (monitorKey() !== S.lastConfigKey) sendConfig();
     S.dirty = true;
   }
 
@@ -1626,6 +2188,7 @@
     resizeChart();
     updateOverlay();
     connectSSE();
+    setTimeout(() => maybeApplyShare(), 4000); // SSE 未及时 hello 时的分享兜底
     setTimeout(() => saveLocal(), 1500);   // 启动后把当前机型的配置自动保存一份
     setTimeout(loadHistory, 900);
     requestAnimationFrame(drawLoop);
@@ -1653,13 +2216,13 @@
       try {
         const proj = readProjects();
         if (proj.active && proj.items[proj.active]) {
-          localStorage.setItem('ms.cfg.v2', JSON.stringify(proj.items[proj.active]));
+          writeCfgRaw(JSON.stringify(proj.items[proj.active]));
         }
       } catch {}
     }
     try {
       const raw = snapshot === undefined
-        ? (localStorage.getItem('ms.cfg.v2') || localStorage.getItem('ms.cfg.v1'))
+        ? readCfgRaw()
         : (snapshot ? JSON.stringify(snapshot) : '');
       if (raw) {
         const c = JSON.parse(raw);
@@ -1735,14 +2298,17 @@
             id: String(m.id || ('wm' + (i + 1))),
             rowId: String(m.rowId || ''),
             mode: m.mode === 'switch' ? 'switch' : 'slider',
-            width: Number(m.width) || (m.mode === 'switch' ? 0.25 : 0.5),
+            width: Number(m.width) || (m.mode === 'switch' ? 1 / 3 : 0.5),
             widthTouched: !!m.widthTouched,
             min: Number(m.min) || 0,
             max: Number(m.max) || 0,
             step: Math.max(1, Number(m.step) || 1),
-            live: !!m.live,
+            locked: !!m.locked, lockValue: Number(m.lockValue) || 0,
+            onValue: Number.isFinite(Number(m.onValue)) ? Number(m.onValue) : 1,
+            offValue: Number.isFinite(Number(m.offValue)) ? Number(m.offValue) : 0,
             status: '', statusKind: '', busy: false, pending: null, timer: 0,
-            liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+            liveTimer: null, lockTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+            dragging: false, lastResult: null, expanded: !!m.expanded, layout: m.layout === 'block' ? 'block' : 'bar',
             addr: Number(m.addr) >>> 0, size: Number(m.size) || 2,
             signed: !!m.signed, name: String(m.name || ''),
           }));
@@ -1753,14 +2319,17 @@
           S.write.mods = [{
             id: 'wm1', rowId: c.write.targetId,
             mode: c.write.mode === 'switch' ? 'switch' : 'slider',
-            width: c.write.mode === 'switch' ? 0.25 : 0.5,
+            width: c.write.mode === 'switch' ? 1 / 3 : 0.5,
             widthTouched: false,
             min: Number(c.write.min) || 0,
             max: Number(c.write.max) || 4095,
             step: Math.max(1, Number(c.write.step) || 1),
-            live: !!c.write.live,
+            locked: !!c.write.locked, lockValue: Number(c.write.lockValue) || 0,
+            onValue: Number.isFinite(Number(c.write.onValue)) ? Number(c.write.onValue) : 1,
+            offValue: Number.isFinite(Number(c.write.offValue)) ? Number(c.write.offValue) : 0,
             status: '', statusKind: '', busy: false, pending: null, timer: 0,
-            liveTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+            liveTimer: null, lockTimer: null, liveHeld: false, liveValue: 0, lastSent: null,
+            dragging: false, lastResult: null, expanded: !!c.write.expanded, layout: 'bar',
           }];
           S.write.seq = 1;
         }
@@ -1775,8 +2344,7 @@
           S.wave.seq = Math.max(1, Number(c.wave.seq) || 1,
             ...groups.map((g) => Number(String(g.id).replace(/\D/g, '')) || 0));
         }
-        // 安全: 写入解锁状态不跨工程/刷新保留
-        S.write.size = ['sm', 'md', 'lg', 'auto'].includes(c.write?.size) ? c.write.size : S.write.size;
+        // 安全: 写入解锁状态不跨工程/刷新保留；旧存档的 write.size 直接忽略
         S.write.armed = false;
       }
     } catch (e) { console.warn(e); }
@@ -1825,7 +2393,7 @@
 
   function saveLocal() {
     try {
-      localStorage.setItem('ms.cfg.v2', JSON.stringify({
+      writeCfgRaw(JSON.stringify({
         v: 2,
         machine: S.profiles.active,
         rows: Array.from(S.rows.values()).map((s) => ({
@@ -1833,7 +2401,7 @@
           scale: s.scale, offset: s.offset, unit: s.unit, color: s.color,
           step: s.step, axis: s.axis, type: s.type,
           table: !!s.table, plot: !!s.plot, support: !!s.support, groupId: s.groupId || '',
-          writeOnly: !!s.writeOnly,
+          writeOnly: !!s.writeOnly, monitor: !!s.monitor, configRole: s.configRole || '',
         })),
         virtuals: S.virtuals.map((v) => ({
           id: v.id, arrayId: v.arrayId, name: v.name, sourceIds: v.sourceIds.slice(),
@@ -1863,12 +2431,12 @@
         },
         write: {
           armed: false, // 解锁状态不落盘
-          size: S.write.size,
           seq: S.write.seq,
           mods: S.write.mods.map((m) => ({
             id: m.id, rowId: m.rowId, mode: m.mode,
             width: m.width, widthTouched: !!m.widthTouched,
-            min: m.min, max: m.max, step: m.step, live: !!m.live,
+            min: m.min, max: m.max, step: m.step, locked: !!m.locked, lockValue: m.lockValue || 0,
+            onValue: m.onValue, offValue: m.offValue, expanded: !!m.expanded, layout: m.layout === 'block' ? 'block' : 'bar',
             addr: m.addr, size: m.size, signed: !!m.signed, name: m.name || '',
           })),
         },
@@ -1877,10 +2445,10 @@
       try {
         const p = readProjects();
         if (!p.active) p.active = '默认';
-        p.items[p.active] = Object.assign(JSON.parse(localStorage.getItem('ms.cfg.v2') || '{}'), {
+        p.items[p.active] = Object.assign(JSON.parse(readCfgRaw() || '{}'), {
           name: p.active, savedAt: new Date().toISOString(),
         });
-        localStorage.setItem(PROJECTS_KEY, JSON.stringify(p));
+        writeProjectsRaw(JSON.stringify(p));
         S.projectSavedAt = Date.now();
         updateProjectUI();
       } catch {}
@@ -2045,7 +2613,7 @@
       });
       p.active = name;
       writeProjects(p);
-      localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
+      writeCfgRaw(JSON.stringify(p.items[name]));
       restoreConfig(p.items[name]);
       renderAfterProjectLoad();
       applyChip(null);
@@ -2127,7 +2695,7 @@
   // ---------------------------------------------------------------- 工程存档
   function readProjects() {
     try {
-      const raw = localStorage.getItem(PROJECTS_KEY);
+      const raw = readProjectsRaw();
       if (raw) {
         const p = JSON.parse(raw);
         if (p && typeof p === 'object' && p.items && typeof p.items === 'object') {
@@ -2139,11 +2707,11 @@
   }
 
   function writeProjects(p) {
-    try { localStorage.setItem(PROJECTS_KEY, JSON.stringify(p)); } catch {}
+    try { writeProjectsRaw(JSON.stringify(p)); } catch {}
   }
 
   function currentSnapshot() {
-    try { return JSON.parse(localStorage.getItem('ms.cfg.v2') || '{}'); } catch { return {}; }
+    try { return JSON.parse(readCfgRaw() || '{}'); } catch { return {}; }
   }
 
   function updateProjectUI() {
@@ -2210,7 +2778,7 @@
       p2.items[name] = Object.assign({}, target, { name, machine: target.machine });
       p2.active = name;
       writeProjects(p2);
-      localStorage.setItem('ms.cfg.v2', JSON.stringify(p2.items[name]));
+      writeCfgRaw(JSON.stringify(p2.items[name]));
       S.samples = [];
       S.lastT = 0;
       S.paused = false;
@@ -2222,7 +2790,7 @@
     }
     p.active = name;
     writeProjects(p);
-    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name] || {}));
+    writeCfgRaw(JSON.stringify(p.items[name] || {}));
     S.samples = [];
     S.lastT = 0;
     S.paused = false;
@@ -2244,7 +2812,7 @@
     });
     p.active = name;
     writeProjects(p);
-    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
+    writeCfgRaw(JSON.stringify(p.items[name]));
     updateProjectUI();
     toast('已创建工程：' + name + '（机型 ' + (S.profiles.active || '?') + '）', 'ok');
   }
@@ -2260,7 +2828,7 @@
     });
     p.active = name;
     writeProjects(p);
-    localStorage.setItem('ms.cfg.v2', JSON.stringify(p.items[name]));
+    writeCfgRaw(JSON.stringify(p.items[name]));
     updateProjectUI();
     toast('已另存为：' + name, 'ok');
   }
@@ -2282,7 +2850,7 @@
       p2.active = next;
       writeProjects(p2);
     }
-    localStorage.setItem('ms.cfg.v2', JSON.stringify(target));
+    writeCfgRaw(JSON.stringify(target));
     S.samples = [];
     S.lastT = 0;
     restoreConfig(target);
@@ -2320,7 +2888,7 @@
       p.items[name] = data;
       p.active = name;
       writeProjects(p);
-      localStorage.setItem('ms.cfg.v2', JSON.stringify(data));
+      writeCfgRaw(JSON.stringify(data));
       S.samples = [];
       S.lastT = 0;
       restoreConfig();
@@ -2336,7 +2904,14 @@
     S.virtuals = [];
     for (const x of list || []) {
       if (!x || !x.id) continue;
-      const row = normalizeSignal(x);
+      const role = x.role === 'support' ? 'support' : (x.role === 'write' ? 'write' : 'signal');
+      const support = role === 'support';
+      const hidden = role !== 'signal';
+      const row = normalizeSignal({
+        ...x, support, writeOnly: false, configRole: role, monitor: true,
+        table: hidden ? false : undefined,
+        plot: hidden ? false : undefined,
+      });
       S.rows.set(row.id, row);
     }
     ensureWaveGroups();
@@ -2348,23 +2923,105 @@
     syncToggles();
   }
 
+  function configKeyOf(list, rate) {
+    return JSON.stringify({
+      rate: Number(rate) || 0,
+      signals: (list || []).map((x) => ({
+        id: String(x.id || x.name || ''),
+        name: String(x.name || x.id || ''),
+        addr: Number(x.addr) >>> 0,
+        size: Number(x.size) || 4,
+        signed: !!x.signed,
+        bit: Array.isArray(x.bit) ? [Number(x.bit[0]), Number(x.bit[1])] : null,
+        scale: Number(x.scale ?? 1),
+        offset: Number(x.offset ?? 0),
+        unit: x.unit !== undefined ? String(x.unit || '') : '',
+        color: String(x.color || ''),
+        step: !!x.step,
+        role: x.role === 'support' ? 'support' : (x.role === 'write' ? 'write' : 'signal'),
+      })),
+    });
+  }
+
+  function adoptSharedConfig(list, rate) {
+    const incoming = (list || []).filter((x) => x && x.id);
+    const prev = new Map(S.rows);
+    const prevChannelKey = S.lastChannelKey || '';
+    const incomingKey = configKeyOf(incoming, rate);
+    S.rows.clear();
+    for (const item of incoming) {
+      const was = prev.get(item.id);
+      const role = item.role === 'support' ? 'support' : (item.role === 'write' ? 'write' : 'signal');
+      const support = role === 'support';
+      const hidden = role !== 'signal';
+      const row = normalizeSignal({
+        ...item,
+        support,
+        monitor: true,
+        configRole: role,
+        table: was ? was.table : (hidden ? false : true),
+        plot: was ? was.plot : (hidden ? false : true),
+        groupId: was ? was.groupId : (item.groupId || ''),
+        axis: was ? was.axis : item.axis,
+        writeOnly: was ? !!was.writeOnly : false,
+      });
+      S.rows.set(row.id, row);
+    }
+    if (rate) S.rate = Number(rate) || S.rate;
+    if (D.rateSel) D.rateSel.value = String(S.rate);
+    ensureWaveGroups();
+    ensureWriteMods();
+    syncChannels();
+    const channelKey = S.signals.map((s) => s.id).join('|');
+    const channelChanged = channelKey !== prevChannelKey;
+    renderCatalog();
+    renderSelected();
+    renderLegend();
+    renderValueTable();
+    renderWriteMods();
+    renderMarginSelects();
+    syncToggles();
+    updateEmptyHint();
+    if (channelChanged) { S.samples = []; S.lastT = 0; }
+    S.lastConfigKey = incomingKey;
+    S.configDirty = false;
+    saveLocal();
+    sendViewState(true);
+    loadHistory();
+    S.dirty = true;
+    // 本地写入模块可能补充了共享集之外的通道；如果本地监视集与服务器不同，主动补发一次
+    if (monitorKey() !== incomingKey) sendConfig(true);
+  }
+
+  function monitorConfigPayload() {
+    return {
+      rate: S.rate,
+      // 共享监视集：只发 monitor 通道，表/波形可见性不影响采样
+      signals: S.signals.map((s) => ({
+        id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
+        bit: s.bit, scale: s.scale, offset: s.offset, unit: s.unit,
+        color: s.color, step: s.step,
+        role: s.configRole || (s.support ? 'support' : (s.writeOnly ? 'write' : 'signal')),
+      })),
+    };
+  }
+
+  function monitorKey() {
+    return JSON.stringify(monitorConfigPayload());
+  }
+
   function sendConfig(force = false) {
     S.configDirty = true;
     if (S.configTimer) clearTimeout(S.configTimer);
     const run = async () => {
       S.configTimer = 0;
       if (!S.configDirty && !force) return;
+      if (!S.sseReady) { S.configDirty = true; return; }
       S.configDirty = false;
-      const payload = {
-        rate: S.rate,
-        // 只发实际需要采样的通道 union；AVG 虚拟行没有地址，不会出现在这里。
-        signals: S.signals.map((s) => ({
-          id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
-          bit: s.bit, scale: s.scale, offset: s.offset, unit: s.unit,
-          color: s.color, step: s.step, visible: !isHidden(s),
-          role: s.support ? 'support' : 'signal',
-        })),
-      };
+      const payload = monitorConfigPayload();
+      const key = JSON.stringify(payload);
+      if (!force && key === S.lastConfigKey) return;
+      S.lastConfigKey = key;
       try {
         await post('/api/config', payload);
       } catch (e) {
@@ -2375,9 +3032,351 @@
     S.configTimer = setTimeout(run, 120);
   }
 
+  function otherViewersFor(id) {
+    return (S.presence || []).filter((p) => p
+      && p.id !== S.clientId
+      && Array.isArray(p.visible)
+      && p.visible.includes(id));
+  }
+
+  function updatePresence(list) {
+    const arr = Array.isArray(list) ? list : [];
+    const key = JSON.stringify(arr);
+    if (key === S.presenceKey) return;
+    S.presenceKey = key;
+    S.presence = arr;
+    if (S.ui.tab === 'waves') renderCatalog();
+  }
+
+  function localVisibleIds() {
+    const out = [];
+    const seen = new Set();
+    for (const r of S.rows.values()) {
+      if (!r.monitor) continue;
+      const g = waveGroupFor(r);
+      const plotOn = !!r.plot && (!g || g.visible !== false);
+      if (r.table || plotOn) { out.push(r.id); seen.add(r.id); }
+    }
+    // 虚拟行（AVG）本身不采样，但它引用的源通道正在被本端查看
+    for (const v of S.virtuals) {
+      const g = waveGroupFor(v);
+      const plotOn = !!v.plot && (!g || g.visible !== false);
+      if (!v.table && !plotOn) continue;
+      for (const id of v.sourceIds || []) {
+        if (!seen.has(id)) { seen.add(id); out.push(id); }
+      }
+    }
+    return out;
+  }
+
+  function writeModsSnapshot() {
+    return S.write.mods.map((m) => ({
+      id: m.id, rowId: m.rowId, mode: m.mode,
+      width: m.width, widthTouched: !!m.widthTouched,
+      min: m.min, max: m.max, step: m.step,
+      onValue: m.onValue, offValue: m.offValue, lockValue: m.lockValue || 0,
+      locked: false, // 分享/复制不继承锁定，避免对方已解锁时立即周期写
+      expanded: !!m.expanded, layout: m.layout || 'bar',
+      addr: m.addr, size: m.size, signed: !!m.signed, name: m.name || '',
+    }));
+  }
+
+  function waveLayoutPayload() {
+    const groups = (S.wave.groups || []).map((g) => ({
+      id: String(g.id), name: String(g.name || g.id),
+      auto: !!g.auto, visible: g.visible !== false,
+    }));
+    const rows = {};
+    const table = [];
+    const plot = [];
+    const axes = {};
+    const add = (row) => {
+      rows[row.id] = row.groupId || 'default';
+      if (row.table) table.push(row.id);
+      if (row.plot) plot.push(row.id);
+      axes[row.id] = row.axis === 'right' ? 'right' : 'left';
+    };
+    for (const r of S.rows.values()) {
+      const inWrite = !!writeModForRow(r.id);
+      const internal = r.support || r.configRole === 'support'
+        || ((r.writeOnly || r.configRole === 'write') && !inWrite);
+      if (!r.monitor || internal) continue;
+      add(r);
+    }
+    for (const v of S.virtuals) add(v);
+    return { groups, rows, table, plot, axes, write: writeModsSnapshot() };
+  }
+
+  function sendViewState(force = false) {
+    if (!S.sseReady || !S.clientId) return;
+    const visible = localVisibleIds();
+    const layout = waveLayoutPayload();
+    const key = JSON.stringify({ visible, layout });
+    if (!force && key === S.viewSentKey) return;
+    S.viewSentKey = key;
+    if (S.viewTimer) clearTimeout(S.viewTimer);
+    const run = () => {
+      S.viewTimer = 0;
+      fetch('/api/view', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId: S.clientId, label: S.clientLabel || '', visible, layout }),
+      }).catch(() => {});
+    };
+    if (force) return run();
+    S.viewTimer = setTimeout(run, 120);
+  }
+
+  function applyWriteModsSnapshot(list) {
+    if (!Array.isArray(list)) return false;
+    const mods = [];
+    for (const m of list.slice(0, 16)) {
+      if (!m || !m.rowId) continue;
+      const row = S.rows.get(String(m.rowId));
+      if (!row) continue;
+      row.monitor = true;
+      const mod = makeWriteMod(row);
+      mod.mode = m.mode === 'switch' ? 'switch' : 'slider';
+      mod.width = Number(m.width) || defaultWriteWidth(mod.mode);
+      mod.widthTouched = !!m.widthTouched;
+      if (Number.isFinite(Number(m.min))) mod.min = Number(m.min);
+      if (Number.isFinite(Number(m.max))) mod.max = Number(m.max);
+      mod.step = Math.max(1, Number(m.step) || 1);
+      mod.onValue = Number.isFinite(Number(m.onValue)) ? Number(m.onValue) : 1;
+      mod.offValue = Number.isFinite(Number(m.offValue)) ? Number(m.offValue) : 0;
+      mod.lockValue = Number.isFinite(Number(m.lockValue)) ? Number(m.lockValue) : 0;
+      mod.locked = false;
+      mod.expanded = !!m.expanded;
+      mod.layout = m.layout === 'block' ? 'block' : 'bar';
+      mods.push(mod);
+    }
+    S.write.mods = mods;
+    S.write.seq = Math.max(1, ...mods.map((m) => Number(String(m.id).replace(/\D/g, '')) || 0));
+    ensureWriteMods();
+    return true;
+  }
+
+  function applyWaveLayout(layout) {
+    if (!layout || !Array.isArray(layout.groups) || !layout.groups.length) return false;
+    const remoteGroups = layout.groups.filter((g) => g && g.id);
+    const remoteDefault = remoteGroups.find((g) => g.id === 'default');
+    const map = { default: 'default' };
+    let seq = Math.max(1, Number(S.wave.seq) || 1);
+    const groups = [{
+      id: 'default',
+      name: (remoteDefault && remoteDefault.name) || '默认分组',
+      auto: remoteDefault ? remoteDefault.auto !== false : true,
+      visible: remoteDefault ? remoteDefault.visible !== false : true,
+    }];
+    for (const g of remoteGroups) {
+      if (g.id === 'default') continue;
+      seq += 1;
+      while (S.wave.groups.some((x) => x.id === 'wg' + seq)) seq += 1;
+      const id = 'wg' + seq;
+      map[g.id] = id;
+      groups.push({
+        id,
+        name: String(g.name || ('分组 ' + seq)),
+        auto: !!g.auto,
+        visible: g.visible !== false,
+      });
+    }
+    S.wave.seq = Math.max(seq, ...groups.map((g) => Number(String(g.id).replace(/\D/g, '')) || 0));
+    S.wave.groups = groups;
+    const remoteRows = layout.rows && typeof layout.rows === 'object' ? layout.rows : {};
+    const tableSet = Array.isArray(layout.table) ? new Set(layout.table) : null;
+    const plotSet = Array.isArray(layout.plot) ? new Set(layout.plot) : null;
+    const axes = layout.axes && typeof layout.axes === 'object' ? layout.axes : {};
+    const apply = (row) => {
+      const gid = remoteRows[row.id];
+      row.groupId = gid && map[gid] ? map[gid] : 'default';
+      if (tableSet) row.table = tableSet.has(row.id);
+      if (plotSet) row.plot = plotSet.has(row.id);
+      if (axes[row.id] === 'right' || axes[row.id] === 'left') row.axis = axes[row.id];
+    };
+    for (const r of S.rows.values()) apply(r);
+    for (const v of S.virtuals) apply(v);
+    if (Array.isArray(layout.write)) applyWriteModsSnapshot(layout.write);
+    ensureWaveGroups();
+    renderCatalog();
+    renderSelected();
+    renderLegend();
+    renderValueTable();
+    renderWriteMods();
+    updateEmptyHint();
+    S.dirty = true;
+    saveLocal();
+    sendViewState(true);
+    return true;
+  }
+
+  function copyWaveLayoutFrom(peer) {
+    if (!applyWaveLayout(peer && peer.layout)) {
+      toast('客户端 ' + (peer && peer.no ? peer.no : '?') + ' 暂无可复制的布局', 'err');
+      return;
+    }
+    toast('已复制 ' + (peer.label || ('客户端 ' + peer.no)) + ' 的分组/显示布局到本窗口', 'ok');
+  }
+
+  function confirmRemoveMonitor(row) {
+    if (!row) return;
+    if (row.kind === 'virtual') {
+      if (confirm('从本端移除虚拟行“' + shortName(row.name) + '”？')) removeSignal(row.id);
+      return;
+    }
+    const mods = S.write.mods.filter((m) => m.rowId === row.id);
+    const viewers = otherViewersFor(row.id);
+    const labels = viewers.map((p) => p.label || ('客户端 ' + p.no)).join('、');
+    const base = viewers.length
+      ? '“' + shortName(row.name) + '”正在被 ' + labels + ' 查看。\n删除后所有客户端都会同步移除。'
+      : '从共享监视集移除“' + shortName(row.name) + '”？所有在线客户端都会同步移除。';
+    const extra = mods.length ? '\n该信号还属于写入模块，删除会同时移除写入模块。' : '';
+    if (!confirm(base + extra + '\n仍要删除？')) return;
+    for (const m of mods) {
+      stopLiveWrite(m);
+      stopLockWrite(m);
+    }
+    if (mods.length) S.write.mods = S.write.mods.filter((m) => m.rowId !== row.id);
+    removeSignal(row.id);
+  }
+
+  function shareIdFromHash() {
+    const m = /(?:^|[#&])share=([^&]+)/.exec(location.hash || '');
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      return ok;
+    } catch { return false; }
+  }
+
+  function shareBase() {
+    const q = new URLSearchParams(location.search).get('lan');
+    if (q) {
+      try {
+        const u = new URL(q);
+        if ((u.protocol === 'http:' || u.protocol === 'https:')
+            && !/^(127\.|localhost$)/i.test(u.hostname)) return u.origin;
+      } catch {}
+    }
+    const host = String(location.hostname || '');
+    if (/^192\.168\./.test(host)) return location.origin;
+    const lan = S.status && S.status.lan;
+    const ips = lan && Array.isArray(lan.ips) ? lan.ips.slice() : [];
+    const rank = (ip) => {
+      if (/^192\.168\./.test(ip)) return 0;
+      if (/^10\./.test(ip)) return 1;
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return 2;
+      return 9;
+    };
+    ips.sort((a, b) => rank(a) - rank(b));
+    const ip = ips.find((x) => rank(x) < 9);
+    if (ip) {
+      const port = Number(lan.port) || Number(location.port) || 0;
+      const suffix = port && !(port === 80 && location.protocol === 'http:') ? ':' + port : '';
+      return location.protocol + '//' + ip + suffix;
+    }
+    return location.origin;
+  }
+
+  async function shareViewLink() {
+    if (!S.status || !S.status.lan) {
+      try {
+        const st = await fetchJSON('/api/status');
+        if (st && st.lan) S.status = st;
+      } catch {}
+    }
+    const snapshot = {
+      v: 1,
+      profile: S.profiles.active || '',
+      rate: S.rate,
+      windowSec: S.windowSec,
+      chart: {
+        autoZero: !!S.autoZero, fillOn: S.fillOn !== false,
+        gridOn: S.gridOn !== false, zeroLine: S.zeroLine !== false, glow: !!S.glow,
+      },
+      signals: monitorConfigPayload().signals,
+      layout: waveLayoutPayload(),
+    };
+    const res = await post('/api/share', snapshot);
+    if (!res || !res.ok || !res.id) throw new Error((res && res.error) || '生成分享失败');
+    const base = shareBase();
+    const path = location.pathname || '/';
+    const url = base.replace(/\/$/, '') + path + '#share=' + encodeURIComponent(res.id);
+    const ok = await copyText(url);
+    if (ok) toast('分享链接已复制：' + url, 'ok');
+    else prompt('浏览器不允许自动复制，请手动复制分享链接：', url);
+    return url;
+  }
+
+  function applyShareChart(share) {
+    if (share.windowSec != null && Number.isFinite(Number(share.windowSec))) {
+      S.windowSec = Number(share.windowSec);
+      S.view = null;
+      if (D.winSel) D.winSel.value = String(S.windowSec);
+      if (D.winSel2) D.winSel2.value = String(S.windowSec);
+    }
+    const c = share.chart;
+    if (c && typeof c === 'object') {
+      S.autoZero = !!c.autoZero;
+      S.fillOn = c.fillOn !== false;
+      S.gridOn = c.gridOn !== false;
+      S.zeroLine = c.zeroLine !== false;
+      S.glow = !!c.glow;
+    }
+    syncToggles();
+    renderCards();
+    S.dirty = true;
+  }
+
+  async function maybeApplyShare() {
+    if (S.shareApplied || S.shareApplying) return;
+    const sid = shareIdFromHash();
+    if (!sid) return;
+    S.shareApplying = true;
+    try {
+      const share = await fetchJSON('/api/share/' + encodeURIComponent(sid));
+      if (!share || !share.ok || !Array.isArray(share.signals)) throw new Error('分享内容无效');
+      if (share.profile && S.profiles.active && share.profile !== S.profiles.active) {
+        const ok = await switchMachine(share.profile);
+        if (!ok) toast('分享来自机型 ' + share.profile + '，切换失败，尝试按分享内容恢复', 'err');
+      }
+      adoptSharedConfig(share.signals, share.rate);
+      if (share.layout) applyWaveLayout(share.layout);
+      applyShareChart(share);
+      await sendConfig(true);
+      sendViewState(true);
+      S.shareId = sid;
+      S.shareApplied = true;
+      toast('已应用分享的波形选择和显示布局', 'ok');
+    } catch (e) {
+      toast('应用分享失败: ' + brief(e.message), 'err');
+    } finally {
+      S.shareApplying = false;
+    }
+  }
+
   // ---------------------------------------------------------------- SSE
   function connectSSE() {
     if (S.es) S.es.close();
+    if (!S.viewHeartbeat) {
+      S.viewHeartbeat = setInterval(() => { if (S.sseReady) sendViewState(true); }, 5000);
+    }
     const es = new EventSource('/api/stream');
     S.es = es;
     es.onmessage = (ev) => {
@@ -2385,17 +3384,36 @@
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'hello') {
         applyStatus(msg.status);
-        if (!S.rows.size && msg.config?.signals?.length) {
-          adoptSignals(msg.config.signals, msg.config.rate);
-          renderSelected(); renderLegend(); renderValueTable();
-          saveLocal();
-          loadHistory();
+        S.sseReady = true;
+        S.clientId = String(msg.clientId || '');
+        S.clientNo = Number(msg.clientNo) || 0;
+        updatePresence(msg.presence);
+        const shared = msg.config?.signals || [];
+        const clients = Number(msg.clients) || 1;
+        const sharePending = !!shareIdFromHash() || S.shareApplying || S.shareApplied;
+        if (S.shareApplied) {
+          // 分享已应用: 服务器可能还是旧配置, 以分享内容为准
+          sendConfig(true);
+        } else if (sharePending) {
+          // 分享正在/即将应用: 不要先用服务器旧配置覆盖
+          maybeApplyShare();
+        } else if (clients <= 1 && S.rows.size) {
+          // 只有自己在线: 用本地监视集初始化共享配置
+          sendConfig(true).then(loadHistory);
+        } else if (shared.length) {
+          // 多客户端: 以服务器共享配置为准, 不覆盖别人的配置
+          adoptSharedConfig(shared, msg.config?.rate);
         } else if (S.rows.size) {
-          // 服务重启/重连后把页面的通道和频率重新下发, 否则服务端会退回默认配置
           sendConfig(true).then(loadHistory);
         } else {
           loadHistory();
         }
+        sendViewState(true);
+      } else if (msg.type === 'config') {
+        // 任一客户端改了共享监视集/参数, 所有客户端同步
+        adoptSharedConfig(msg.config?.signals || [], msg.config?.rate);
+      } else if (msg.type === 'presence') {
+        updatePresence(msg.presence);
       } else if (msg.type === 'status') {
         applyStatus(msg.status);
       } else if (msg.type === 's') {
@@ -2659,7 +3677,9 @@
   function disarmWrite(reason) {
     for (const mod of S.write.mods) {
       stopLiveWrite(mod);
+      stopLockWrite(mod);
       mod.liveHeld = false;
+      mod.dragging = false;
       mod.busy = false;
       mod.pending = null;
       mod.status = reason || '';
@@ -2893,6 +3913,61 @@
     return wrap;
   }
 
+  function renderRemoteLayouts(body) {
+    const peers = (S.presence || []).filter((p) => p
+      && p.id !== S.clientId
+      && p.layout && Array.isArray(p.layout.groups) && p.layout.groups.length);
+    if (!peers.length) return;
+    const details = document.createElement('details');
+    details.className = 'wave-remote';
+    const summary = document.createElement('summary');
+    summary.textContent = '其他端布局 · ' + peers.length + '（展开查看 / 复制）';
+    details.appendChild(summary);
+    const nameOf = (id) => {
+      const row = S.rows.get(id) || S.virtuals.find((v) => v.id === id);
+      return row ? shortName(row.name) : String(id);
+    };
+    for (const peer of peers) {
+      const layout = peer.layout;
+      const goods = layout.groups || [];
+      const rows = layout.rows && typeof layout.rows === 'object' ? layout.rows : {};
+      const byGroup = {};
+      for (const [id, gid] of Object.entries(rows)) {
+        (byGroup[gid] = byGroup[gid] || []).push(id);
+      }
+      const shown = new Set([...(layout.table || []), ...(layout.plot || [])]).size;
+      const item = document.createElement('div');
+      item.className = 'wr-item';
+      const head = document.createElement('div');
+      head.className = 'wr-head';
+      const label = document.createElement('span');
+      label.textContent = peer.label || ('客户端 ' + peer.no);
+      const meta = document.createElement('span');
+      meta.className = 'wr-meta';
+      const wm = Array.isArray(layout.write) ? layout.write.length : 0;
+      meta.textContent = goods.length + ' 组 · ' + shown + ' 显示' + (wm ? ' · ' + wm + ' 写' : '');
+      const copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = 'mini';
+      copy.textContent = '复制到本窗口';
+      copy.title = '把客户端 ' + peer.no + ' 的分组/显示布局复制到当前预览窗口（只影响本端）';
+      copy.addEventListener('click', () => copyWaveLayoutFrom(peer));
+      head.append(label, meta, copy);
+      const detail = document.createElement('div');
+      detail.className = 'wr-groups';
+      detail.textContent = goods.map((g) => {
+        const names = (byGroup[g.id] || []);
+        const headTxt = (g.name || g.id) + '（' + (g.auto ? '独立轴' : '共享轴')
+          + (g.visible === false ? '·隐藏' : '') + '，' + names.length + ' 行）';
+        const list = names.slice(0, 6).map(nameOf).join('、') + (names.length > 6 ? ' …' : '');
+        return headTxt + (list ? '：' + list : '');
+      }).join('  |  ');
+      item.append(head, detail);
+      details.appendChild(item);
+    }
+    body.appendChild(details);
+  }
+
   function renderWaveList(body, q) {
     body.innerHTML = '';
     const top = document.createElement('div');
@@ -2904,9 +3979,18 @@
     add.addEventListener('click', addWaveGroup);
     const hint = document.createElement('span');
     hint.className = 'wave-hint';
-    hint.textContent = '拖动行到分组 = 共享轴';
-    top.append(add, hint);
+    hint.textContent = '本端 ' + (S.clientLabel || '?') + ' · 共享 ' + ((S.presence && S.presence.length) || 1) + ' 端 · 表/波仅本端 · 拖动行 = 共享轴';
+    const share = document.createElement('button');
+    share.type = 'button';
+    share.className = 'mini';
+    share.textContent = '分享';
+    share.title = '生成分享链接：打开链接会应用当前波形选择/分组/显示设置一次';
+    share.addEventListener('click', () => {
+      shareViewLink().catch((e) => toast('生成分享链接失败: ' + brief(e.message), 'err'));
+    });
+    top.append(add, share, hint);
     body.appendChild(top);
+    renderRemoteLayouts(body);
 
     let shown = 0;
     for (const g of S.wave.groups) {
@@ -2955,7 +4039,7 @@
       }
       for (const row of rows) {
         const el = document.createElement('div');
-        el.className = 'wave-row';
+        el.className = 'wave-row' + (!row.table && !row.plot ? ' local-hidden' : '');
         el.dataset.id = row.id;
         el.draggable = true;
         el.title = (row.kind === 'virtual' ? row.name : hex(row.addr) + ' · ' + row.name) +
@@ -2977,10 +4061,19 @@
         rm.className = 'sel-x';
         rm.textContent = '×';
         rm.title = '从已选择移除';
-        rm.addEventListener('click', (e) => { e.stopPropagation(); removeSignal(row.id); });
+        rm.title = '从共享监视集移除（会同步到所有客户端）';
+        rm.addEventListener('click', (e) => { e.stopPropagation(); confirmRemoveMonitor(row); });
         const toggles = waveRowToggles(row);
         const actions = document.createElement('span');
         actions.className = 'wave-actions';
+        const viewers = otherViewersFor(row.id);
+        if (viewers.length) {
+          const vw = document.createElement('span');
+          vw.className = 'wave-viewers';
+          vw.textContent = '其他端 ' + viewers.length;
+          vw.title = viewers.map((p) => p.label || ('客户端 ' + p.no)).join('、') + ' 正在查看';
+          actions.append(vw);
+        }
         actions.append(tag, rm);
         el.addEventListener('click', (e) => {
           if (e.target.closest('button') || e.target.closest('.sig-toggles')) return;
@@ -3055,6 +4148,7 @@
   }
 
   function descFor(entry, staticOnly) {
+    if (entry && entry.desc) return entry.desc; // 手册/源码中文注释（annotate_vars 生成），优先直出
     const info = reginfoFor(entry);
     if (!info) return '';
     if (!staticOnly) {
@@ -3445,6 +4539,7 @@
       for (const mod of S.write.mods.slice()) {
         if (!ids.has(mod.rowId)) continue;
         stopLiveWrite(mod);
+        stopLockWrite(mod);
         S.write.mods = S.write.mods.filter((m) => m !== mod);
       }
     }
@@ -3988,6 +5083,8 @@
       row.axis = D.calAxis.value === 'right' ? 'right' : 'left';
     }
     saveLocal();
+    if (monitorKey() !== S.lastConfigKey) sendConfig();
+    sendViewState();
     renderSelected();
     renderValueTable();
     renderLegend();
@@ -4120,8 +5217,10 @@
     const range = sampleRange(start, end);
     const i0 = range[0], i1 = range[1];
     S.view = { x0, y0, pw, ph, start, end, panes };
+    updatePinTipPosition(S.view);
 
     if (!panes.length) {
+      if (D.pinTip) D.pinTip.classList.add('hidden');
       const bg = ctx.createLinearGradient(0, y0, 0, y0 + ph);
       bg.addColorStop(0, 'rgba(14,24,42,.38)');
       bg.addColorStop(1, 'rgba(7,12,23,.18)');
@@ -4346,6 +5445,36 @@
       }
     }
 
+    // pinned cursor (left click)
+    if (S.pinT !== null && S.pinT >= start && S.pinT <= end) {
+      const x = x0 + ((S.pinT - start) / Math.max(1, end - start)) * pw;
+      ctx.strokeStyle = 'rgba(245,158,11,.72)';
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(x, y0); ctx.lineTo(x, y0 + ph); ctx.stroke();
+      ctx.setLineDash([]);
+      const nearest = nearestSample(S.pinT);
+      if (nearest) {
+        for (const pane of panes) {
+          for (const row of pane.rows) {
+            const v = plotValue(row, nearest[1], pane);
+            if (v === null) continue;
+            const y = pane.Y(v);
+            ctx.beginPath();
+            ctx.arc(x, y, 3.4, 0, Math.PI * 2);
+            ctx.fillStyle = row.color;
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(5,10,18,.9)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+      }
+      ctx.fillStyle = 'rgba(245,158,11,.95)';
+      ctx.font = 'bold 8px ' + mono;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('PIN', x, y0 + 8);
+    }
+
     // paused badge
     if (S.paused) {
       ctx.fillStyle = 'rgba(245,158,11,.14)';
@@ -4399,22 +5528,7 @@
   }
 
   // ---------------------------------------------------------------- hover
-  function onPointerMove(e) {
-    const view = S.view;
-    if (!view) return;
-    const rect = D.chart.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    if (x < view.x0 || x > view.x0 + view.pw || y < view.y0 || y > view.y0 + view.ph) {
-      onPointerLeave();
-      return;
-    }
-    const t = view.start + ((x - view.x0) / view.pw) * (view.end - view.start);
-    S.hoverT = t;
-    S.hoverX = x;
-    S.dirty = true;
-    const near = nearestSample(t);
-    if (!near) { D.tip.classList.add('hidden'); return; }
+  function buildTipHTML(t, near, view) {
     const rows = [];
     for (const row of visiblePlotRows()) {
       const pane = (view.panes || []).find((p) => p.rows.includes(row));
@@ -4437,7 +5551,26 @@
         '<span>' + esc(shortName(row.name)) + '</span><span class="v">' + main + '</span></div>');
     }
     const rel = ((t - view.end) / 1000).toFixed(2);
-    D.tip.innerHTML = '<div class="ct-time">' + rel + ' s · t=' + (near[0] / 1000).toFixed(2) + ' s</div>' + rows.join('');
+    return '<div class="ct-time">' + rel + ' s · t=' + (near[0] / 1000).toFixed(2) + ' s</div>' + rows.join('');
+  }
+
+  function onPointerMove(e) {
+    const view = S.view;
+    if (!view) return;
+    const rect = D.chart.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    if (x < view.x0 || x > view.x0 + view.pw || y < view.y0 || y > view.y0 + view.ph) {
+      onPointerLeave();
+      return;
+    }
+    const t = view.start + ((x - view.x0) / view.pw) * (view.end - view.start);
+    S.hoverT = t;
+    S.hoverX = x;
+    S.dirty = true;
+    const near = nearestSample(t);
+    if (!near) { D.tip.classList.add('hidden'); return; }
+    D.tip.innerHTML = buildTipHTML(t, near, view);
     D.tip.classList.remove('hidden');
     const tw = D.tip.offsetWidth || 160;
     const th = D.tip.offsetHeight || 60;
@@ -4455,6 +5588,47 @@
     S.hoverX = null;
     D.tip.classList.add('hidden');
     S.dirty = true;
+  }
+
+  function setPin(t, x, y) {
+    const near = nearestSample(t);
+    if (!near || !D.pinTip) return;
+    S.pinT = near[0];
+    S.pinX = x;
+    S.pinY = y;
+    D.pinTip.innerHTML = buildTipHTML(t, near, S.view);
+    const timeEl = D.pinTip.querySelector('.ct-time');
+    if (timeEl) timeEl.textContent = 'PIN · t=' + (near[0] / 1000).toFixed(2) + ' s · 右键/Esc 取消';
+    D.pinTip.classList.remove('hidden');
+    S.pinTipW = D.pinTip.offsetWidth || 160;
+    S.pinTipH = D.pinTip.offsetHeight || 60;
+    updatePinTipPosition(S.view);
+    S.dirty = true;
+  }
+
+  function clearPin() {
+    if (S.pinT === null) return;
+    S.pinT = null;
+    S.pinX = null;
+    S.pinY = null;
+    if (D.pinTip) D.pinTip.classList.add('hidden');
+    S.dirty = true;
+  }
+
+  function updatePinTipPosition(view) {
+    if (!D.pinTip) return;
+    if (S.pinT === null || !view) { D.pinTip.classList.add('hidden'); return; }
+    if (S.pinT < view.start || S.pinT > view.end) { D.pinTip.classList.add('hidden'); return; }
+    const x = view.x0 + ((S.pinT - view.start) / Math.max(1, view.end - view.start)) * view.pw;
+    const tw = S.pinTipW || D.pinTip.offsetWidth || 160;
+    const th = S.pinTipH || D.pinTip.offsetHeight || 60;
+    let left = x + 14;
+    if (left + tw > S.size.w - 6) left = x - tw - 14;
+    left = clamp(left, 6, S.size.w - tw - 6);
+    const top = clamp((S.pinY || view.y0 + 14) - th / 2, 6, S.size.h - th - 6);
+    D.pinTip.style.left = left + 'px';
+    D.pinTip.style.top = top + 'px';
+    D.pinTip.classList.remove('hidden');
   }
 
   // ---------------------------------------------------------------- topbar fit
@@ -4494,10 +5668,33 @@
     initPanels();
     window.addEventListener('resize', () => { resizeChart(); fitTopbar(); });
     if (window.ResizeObserver) new ResizeObserver(resizeChart).observe(D.wrap);
+    if (window.ResizeObserver && D.tableCard) {
+      new ResizeObserver(() => syncWriteCardHeight()).observe(D.tableCard);
+    }
+    window.addEventListener('resize', syncWriteCardHeight);
     setupTopbarFit();
 
     D.chart.addEventListener('pointermove', onPointerMove);
     D.chart.addEventListener('pointerleave', onPointerLeave);
+    D.chart.addEventListener('click', (e) => {
+      if (e.button !== 0) return;
+      const view = S.view;
+      if (!view) return;
+      const rect = D.chart.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      if (x < view.x0 || x > view.x0 + view.pw || y < view.y0 || y > view.y0 + view.ph) return;
+      const t = view.start + ((x - view.x0) / view.pw) * (view.end - view.start);
+      setPin(t, x, y);
+    });
+    D.chart.addEventListener('contextmenu', (e) => {
+      if (S.pinT === null) return;
+      e.preventDefault();
+      clearPin();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && S.pinT !== null) clearPin();
+    });
 
     $('#btnQuickConnect')?.addEventListener('click', () => doConnect('openocd'));
     $('#btnQuickSim')?.addEventListener('click', () => doConnect('sim'));
@@ -4511,6 +5708,7 @@
     D.btnReset?.addEventListener('click', resetTarget);
     $('#btnSidebar')?.addEventListener('click', () => D.sidebar?.classList.toggle('open'));
     $('#btnClear').addEventListener('click', clearAll);
+    $('#btnChart')?.addEventListener('click', () => toggleSection('chart'));
     $('#btnShot').addEventListener('click', snapshot);
     $('#btnLog').addEventListener('click', () => { S.ui.log = true; D.logPanel.classList.remove('hidden'); refreshLog(); });
     $('#btnLogClose').addEventListener('click', () => { S.ui.log = false; D.logPanel.classList.add('hidden'); });
@@ -4591,12 +5789,7 @@
       renderCards();
     });
 
-    // 写入：全局解锁 + 每个模块自己的类型/范围/实时
-    D.writeSize?.addEventListener('change', () => {
-      S.write.size = D.writeSize.value;
-      applyWriteSize();
-      saveLocal();
-    });
+    // 写入：全局解锁 + 每个模块自己的类型/范围/锁定
     const finishPointerLive = () => {
       for (const mod of S.write.mods) finishLiveWrite(mod);
     };
@@ -4606,7 +5799,13 @@
     D.writeArmed?.addEventListener('change', () => {
       S.write.armed = !!D.writeArmed.checked;
       if (!S.write.armed) stopAllLiveWrites();
-      for (const mod of S.write.mods) { mod.pending = null; mod.status = ''; mod.statusKind = ''; }
+      else for (const mod of S.write.mods) if (mod.locked) startLockWrite(mod);
+      for (const mod of S.write.mods) {
+        mod.pending = null;
+        mod.status = '';
+        mod.statusKind = '';
+        mod.dragging = false;
+      }
       syncWriteUI();
       refreshWriteUI();
       saveLocal();
@@ -5037,6 +6236,7 @@
   }
 
   function clearAll() {
+    clearPin();
     S.samples = [];
     S.lastT = 0;
     S.pauseAt = 0;

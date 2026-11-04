@@ -15,6 +15,7 @@ profiles/
 ├─ DR2159/
 │  ├─ profile.json           元数据：MCU / 架构 / 源文件 / RAM / 默认信号 / 连接参数
 │  ├─ signals.json           符号目录（gen_signals 生成，可提交）
+│  ├─ annotations.json       变量中文描述（人工/源码注释，重建不覆盖）
 │  └─ config.json            前端配置快照（自动/手动保存，运行时生成）
 ├─ DR1152/                   CW32L012
 ├─ DR1152_CH/                CH32V203C8T6（RISC-V）
@@ -22,6 +23,9 @@ profiles/
 ```
 
 - `signals.json` 是**生成物**，与源 AXF/ELF + 头文件/SVD 对应；固件重编后要重建。
+- `annotations.json` 是**人工/源码注释**（变量 `desc`），格式 `{"variables": {"变量全名": "描述"}}`；
+  导入 AXF / 从 AXF 重新生成 / `profiles.rebuild()` 时会自动合并，不会被生成物覆盖。
+  `tools/annotate_vars.py` 负责生成/更新它（同时镜像一份到 signals.json 供当前 UI 立即读取）。
 - `config.json` 是**用户状态**（`{"saved_at": "...", "config": {...}}`），默认不进 git。
 - `profile.json` 的 `source` 里的路径允许 Windows 风格（`D:\...`）；在 WSL/Linux 下
   会自动映射到 `/mnt/d/...`。
@@ -48,7 +52,7 @@ profiles/
 | `DR2159` | CW32L011 | ARM M0+ | `D:\Code\DR2159\...\DR2159.axf` | `cw32l011.h` | 453 / 27 |
 | `DR1152` | CW32L012 | ARM M0+ | `D:\Code\DR1152\...\DR1152.axf` | `cw32l012.h` | 503 / 50 |
 | `DR1152_CH` | CH32V203C8T6 | RISC-V | `...\DR1152_Project_CH32.elf` | `CH32V203xx.svd` | 350 / 51 |
-| `LKS32-FOC` | LKS32MC07x | ARM M0 | `D:\Code\lll\lks07x_Project.axf` | `LKS32MC07x.svd` | 1006 / 30 |
+| `LKS32-FOC` | LKS32MC07x | ARM M0 | `D:\Code\LKS32\lks07x_Project.axf` | `LKS32MC07x.svd` | 1006 / 30 |
 
 > 数量是 2026-11-04 的构建结果；固件重编后点“重建当前机型符号”更新。
 

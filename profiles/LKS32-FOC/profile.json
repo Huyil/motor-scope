@@ -12,7 +12,7 @@
   "target": "profiles/targets/lks32mc07x.cfg",
   "interface": "",
   "source": {
-    "axf": "D:\\Code\\lll\\lks07x_Project.axf",
+    "axf": "D:\\Code\\LKS32\\lks07x_Project.axf",
     "header": "",
     "map": "",
     "svd": "C:\\Keil_v5\\ARM\\Packs\\Linko\\LKS07x\\1.2.0\\SVD\\LKS32MC07x.svd"

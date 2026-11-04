@@ -1,0 +1,6 @@
+# dsh-motorscope is both the profile bundle layer and the plugin it inserts.
+# Without this dsh.bundle declaration the profile loader treats the package as a
+# plain dependency and never mounts the host/client halves after a restart.
+- insert:
+    - id: dsh-motorscope
+      name: dsh-motorscope

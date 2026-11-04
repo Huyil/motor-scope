@@ -83,19 +83,22 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 
 | 接口 | 用途 |
 | --- | --- |
-| `GET /api/status` | 连接状态、实际采样率、`generation`、`history` 点数、`oldest_t`/`latest_t`、`config.signals` |
-| `GET /api/catalog` | 当前机型的变量/外设，地址/类型/位域/默认堵转信号 |
+| `GET /api/status` | 连接状态、实际采样率、`generation`、`history` 点数、`oldest_t`/`latest_t`、`config.signals`、`lan.ips/port`（分享链接优先用 192.*） |
+| `GET /api/catalog` | 当前机型的变量/外设，地址/类型/位域/默认堵转信号；变量可带 `desc`（由 `profiles/<ID>/annotations.json` 合并） |
 | `GET /api/reginfo?model=<ID>` | 该型号的寄存器描述（entries 数组；没有就返回空） |
 | `GET /api/profiles` | 机型列表：`id/name/mcu/arch/available/variables/peripherals/source_axf` + `active` |
 | `GET /api/log` | 服务 + OpenOCD 尾部日志 |
 | `GET /api/record.csv` | 后端录制 CSV（需要先 POST `/api/record` 开启） |
-| `GET /api/stream` | SSE：`hello` / `status` / `s`；浏览器实时用 |
+| `GET /api/share/<id>` | 取回分享快照；30 天/最多 200 条，持久化在 `imports/shares.json` |
+| `GET /api/stream` | SSE：`hello`（含 `clients`、`clientId/clientNo`、`presence`、当前共享 config）/ `status` / `s` / `config`（共享配置广播）/ `presence`（各端本地显示集合广播）；浏览器实时用 |
 
 ## 5. 控制接口（只读 Agent 不要调）
 
 | 接口 | 说明 |
 | --- | --- |
-| `POST /api/config` | `{"signals":[...],"rate":100}`，会改变用户正在看的通道；通道变了清历史 |
+| `POST /api/share` | 保存当前前端快照（信号集 + 分组布局 + 时间窗口/图表开关），返回 `{"ok":true,"id":"..."}`；链接 `#share=<id>` |
+| `POST /api/view` | `{"clientId":"c1","label":"dsh","visible":["信号id",...],"layout":{groups,rows,table,plot,axes,write}}`：上报本端表/波显示集合与波形分组布局，用于其他端“正在查看”提示、删除确认和“复制布局”；`layout.write` 为写入模块快照；不影响采样 |
+| `POST /api/config` | `{"signals":[...],"rate":100}`，**单调试器共享采样配置**：应用后广播 `config` 给所有 SSE 客户端；通道变了清历史。多客户端时新客户端采用服务器当前配置，不自动覆盖 |
 | `POST /api/record` | `{"active":true}` 开始后端录制 |
 | `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach"}` 重新连 |
 | `POST /api/disconnect` | 断开并释放 OpenOCD/H7-TOOL |
