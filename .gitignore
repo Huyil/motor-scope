@@ -8,3 +8,6 @@ runtime/
 
 # 机型工程的前端配置快照是运行时/user 状态, 不进 git
 profiles/*/config.json
+
+# 手册抽取中间产物（子智能体输出，不进 git）
+.work/

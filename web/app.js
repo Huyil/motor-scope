@@ -96,6 +96,9 @@
     profiles: { active: '', items: [], loaded: false, error: '' },
     profileSavedAt: 0,
     switching: false,
+    // 寄存器信息（与寄存器模板分开导入）：key -> {static, full, states, values, ...}
+    reginfo: { model: '', entries: [], map: new Map(), loaded: false },
+    readVals: new Map(),
     // 波形分组：默认分组内每路独立轴；拖入自定义组则共享轴
     wave: {
       groups: [{ id: 'default', name: '默认分组', visible: true, auto: true }],
@@ -125,11 +128,12 @@
       tab: 'vars',
       view: 'list',
       search: '',
-      openGroups: new Set(['motor', 'adc', 'sys']),
+      openGroups: new Set(['motor', 'adc', 'sys', '__custom']),
       openNodes: new Set(['g:motor', 'g:adc', 'g:sys']),
       openPeriph: new Set(['ADC', 'ATIM', 'GPIOA']),
       openRegs: new Set(),
-      overlayDismissed: false,
+      expanded: new Set(),
+      overlayDismissed: true,
       panel: '',
       log: false,
       connecting: false,
@@ -171,6 +175,7 @@
     D.catalogBody = $('#catalogBody');
     D.search = $('#search');
     D.sigCount = $('#sigCount');
+    D.btnCollapseAll = $('#btnCollapseAll');
     D.selCount = $('#selCount');
     D.selectedList = $('#selectedList');
     D.legend = $('#legend');
@@ -232,6 +237,8 @@
     D.hdrFile = $('#hdrFile');
     D.btnImportVars = $('#btnImportVars');
     D.btnImportRegs = $('#btnImportRegs');
+    D.regInfoFile = $('#regInfoFile');
+    D.btnImportRegInfo = $('#btnImportRegInfo');
     D.btnRecReset = $('#btnRecReset');
     D.writeCard = $('#writeCard');
     D.writeList = $('#writeList');
@@ -251,6 +258,7 @@
     D.logPanel = $('#logPanel');
     D.logText = $('#logText');
     D.btnPause = $('#btnPause');
+    D.btnReset = $('#btnReset');
     D.btnConnect = $('#btnConnect');
     D.srcHint = $('#srcHint');
     D.rateSel = $('#rateSel');
@@ -350,6 +358,24 @@
     else renderCards();
   }
 
+  async function loadReginfo(model) {
+    model = String(model || '');
+    S.reginfo = { model, entries: [], map: new Map(), loaded: false };
+    S.readVals.clear();
+    if (!model) return;
+    try {
+      const data = await fetchJSON('/mcu/' + encodeURIComponent(model) + '.info.json?t=' + Date.now());
+      const list = Array.isArray(data.entries) ? data.entries : [];
+      const map = new Map();
+      for (const e of list) {
+        if (e && e.key) map.set(String(e.key), e);
+      }
+      S.reginfo = { model, entries: list, map, loaded: true };
+    } catch (e) {
+      // 没有 info 文件是正常情况（变量/旧型号），保持空表
+    }
+  }
+
   let mcuReq = 0;
   async function selectMcu(id, manual = false) {
     const m = S.mcu.models.find((x) => x.id === id);
@@ -357,7 +383,11 @@
     S.mcu.active = id;
     if (manual) S.mcu.manual = true;
     if (D.mcuSel && D.mcuSel.value !== id) D.mcuSel.value = id;
-    if (!m.file) { renderCards(); return; }
+    if (!m.file) {
+      await loadReginfo(id);
+      renderCards();
+      return;
+    }
     const req = ++mcuReq;
     try {
       const t = await fetchJSON('/mcu/' + m.file);
@@ -367,6 +397,8 @@
       if (req !== mcuReq) return;
       S.mcu.periphs = [];
     }
+    await loadReginfo(id);
+    if (req !== mcuReq) return;
     buildIndex();
     renderCatalog();
     renderCards();
@@ -582,15 +614,15 @@
 
     const kind = S.source?.kind || 'none';
     const connected = sourceConnected(S.source) && !S.sampler?.error;
-    const srcLabel = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '未连接';
+    const srcLabel = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '待连接';
     if (D.cardSourceVal) {
-      D.cardSourceVal.textContent = connected ? srcLabel : (kind === 'none' ? '未连接' : srcLabel + '（断开）');
+      D.cardSourceVal.textContent = connected ? srcLabel : (kind === 'none' ? '待连接' : srcLabel + '（断开）');
     }
     if (D.cardSourceSub) {
       const chip = S.mcu.detected || S.mcu.expected || '';
       D.cardSourceSub.textContent = connected
         ? (chip ? '已连接 · ' + chip : '已连接')
-        : (S.arch === 'riscv' ? 'CH32V203 · RISC-V' : 'CW32L0 · ARM');
+        : (kind === 'none' ? '待连接 · 待运行' : '待重连');
       D.cardSourceSub.classList.toggle('warn', !!S.sampler?.error);
     }
     if (D.btnConnect) {
@@ -1685,7 +1717,7 @@
           S.margin.thr = String(c.margin.thr || '');
         }
         if (Array.isArray(c.recordSel)) S.recordSel = new Set(c.recordSel.map(String));
-        S.ui.view = c.view === 'tree' ? 'tree' : 'list';
+        S.ui.view = 'list';
         S.ui.tableOpen = c.tableOpen !== false;
         if (c.sections && typeof c.sections === 'object') {
           S.ui.sections = {
@@ -1878,9 +1910,9 @@
     updateProjectUI();
   }
 
-  function findProjectByMachine(id) {
-    const p = readProjects();
-    for (const [name, item] of Object.entries(p.items || {})) {
+  function findProjectByMachine(id, p) {
+    const proj = p || readProjects();
+    for (const [name, item] of Object.entries(proj.items || {})) {
       if (item && item.machine === id) return name;
     }
     return '';
@@ -1900,7 +1932,7 @@
     const p = readProjects();
     let changed = false;
     for (const prof of S.profiles.items) {
-      if (findProjectByMachine(prof.id)) continue;
+      if (findProjectByMachine(prof.id, p)) continue;
       if (p.items[prof.id] && p.items[prof.id].machine === undefined) {
         p.items[prof.id].machine = prof.id;
       } else if (!p.items[prof.id]) {
@@ -1914,12 +1946,12 @@
       changed = true;
     }
     if (!p.active || !p.items[p.active]) {
-      const first = findProjectByMachine(S.profiles.active);
+      const first = findProjectByMachine(S.profiles.active, p);
       p.active = first || Object.keys(p.items)[0] || '默认';
       changed = true;
     } else if (p.items[p.active].machine === undefined && S.profiles.active) {
       // 老工程没有绑定机型: 当前机型有同名工程就迁过去, 老工程保留在列表里
-      const first = findProjectByMachine(S.profiles.active);
+      const first = findProjectByMachine(S.profiles.active, p);
       if (first && first !== p.active) {
         p.active = first;
         changed = true;
@@ -2683,7 +2715,7 @@
       disarmWrite('连接断开，写入已锁定');
       saveLocal();
     }
-    const label = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '未连接';
+    const label = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '待连接';
     D.connText.textContent = label;
     D.connRate.textContent = (S.sampler.rate_actual || S.sampler.rate || 0).toFixed(0) + ' Hz';
     D.connPill.classList.toggle('on', !!connected);
@@ -2697,8 +2729,9 @@
       : '关';
     let msg = '运行中';
     if (S.sampler.error) msg = brief(S.sampler.error);
-    else if (S.source.kind === 'none') msg = brief(st.connect_error) || '等待连接';
+    else if (S.source.kind === 'none') msg = brief(st.connect_error) || '待连接 · 待运行';
     else if (!connected) msg = '连接已断开';
+    else if (!S.sampler.samples) msg = '待运行';
     else if (S.paused) msg = '已暂停（数据仍在后台缓存）';
     D.statMsg.textContent = msg;
     D.statMsg.classList.toggle('muted', !S.sampler.error);
@@ -2735,17 +2768,8 @@
 
   // ---------------------------------------------------------------- overlay
   function updateOverlay() {
-    const src = S.status?.source;
-    const connected = sourceConnected(src);
-    const shouldShow = !connected && !S.ui.overlayDismissed && !S.ui.connecting && !S.ui.panel;
-    D.overlay.classList.toggle('hidden', !shouldShow);
-    if (S.ui.connecting) {
-      D.overlayHint.textContent = '正在启动 OpenOCD 并读 CPUID 握手…';
-    } else if (S.status?.connect_error) {
-      D.overlayHint.textContent = brief(S.status.connect_error);
-    } else {
-      D.overlayHint.textContent = '将自动寻找 OpenOCD，启动 tcl_port 并读取芯片 ID。';
-    }
+    // 启动页已关闭：连接入口改用顶栏“连接”按钮 / 信号源卡片，不再弹遮罩
+    if (D.overlay) D.overlay.classList.add('hidden');
   }
 
   async function doConnect(mode) {
@@ -2827,27 +2851,46 @@
     const tab = S.ui.tab;
     const q = S.ui.search.trim().toLowerCase();
     D.sigCount.textContent = String(visibleRowCount());
-    D.selCount.textContent = String(selectedRows().length);
+    if (D.selCount) D.selCount.textContent = String(selectedRows().length);
     D.search.placeholder = tab === 'periph' ? '搜索外设 / 寄存器 / 位' : tab === 'custom' ? '自定义地址'
-      : tab === 'waves' ? '搜索波形 / 分组' : '搜索变量 / 寄存器 / 地址';
+      : tab === 'waves' ? '搜索已选择 / 分组' : '搜索变量 / 寄存器 / 地址';
     const viewRow = document.querySelector('.view-row');
     if (viewRow) viewRow.classList.toggle('hidden', tab === 'waves');
     if (D.viewNote) {
       D.viewNote.textContent = tab === 'waves'
         ? '分组 · 独立轴 / 共享轴 · 拖动合并'
-        : (S.ui.view === 'tree'
-          ? '对象 · 结构体 · 数组 · 位域'
-          : (tab === 'periph' ? '按外设分组' : tab === 'vars' ? '按对象分组' : '任意地址'));
+        : (tab === 'periph' ? '按外设分组' : tab === 'vars' ? '按对象分组' : '任意地址');
     }
+    // 树视图暂时下线（按钮保留，后续替换）：统一走列表
+    S.ui.view = 'list';
     if (tab === 'vars') {
-      if (S.ui.view === 'tree') renderVarsTree(body, q); else renderVars(body, q);
+      renderVars(body, q);
     } else if (tab === 'periph') {
-      if (S.ui.view === 'tree') renderPeriphTree(body, q); else renderPeriph(body, q);
+      renderPeriph(body, q);
     } else if (tab === 'waves') {
       renderWaveList(body, q);
     } else {
       renderCustom(body);
     }
+  }
+
+  function waveRowToggles(row) {
+    if (row.kind !== 'virtual') {
+      return rowFlagButtons(row.id, S.index.get(row.id) || row, { flat: true });
+    }
+    const wrap = document.createElement('span');
+    wrap.className = 'sig-toggles flat';
+    for (const [flag, label, title] of [['table', '表', '数值表'], ['plot', '波', '波形']]) {
+      const b = document.createElement('button');
+      b.className = 'tgl tgl-' + flag + (row[flag] ? ' on' : '');
+      b.textContent = label;
+      b.title = (row[flag] ? '从' : '加入') + title;
+      b.dataset.avgToggle = row.arrayId;
+      b.dataset.flag = flag;
+      b.setAttribute('aria-pressed', row[flag] ? 'true' : 'false');
+      wrap.appendChild(b);
+    }
+    return wrap;
   }
 
   function renderWaveList(body, q) {
@@ -2867,7 +2910,8 @@
 
     let shown = 0;
     for (const g of S.wave.groups) {
-      const all = plotRows().filter((row) => (row.groupId || 'default') === g.id);
+      // “已选择”页包含表、波两种选中行（原 selected-block 已移除）
+      const all = selectedRows().filter((row) => (row.groupId || 'default') === g.id);
       const rows = q
         ? all.filter((row) => matchText([row.name, shortName(row.name), g.name], q))
         : all;
@@ -2932,10 +2976,14 @@
         const rm = document.createElement('button');
         rm.className = 'sel-x';
         rm.textContent = '×';
-        rm.title = '从波形移除';
+        rm.title = '从已选择移除';
         rm.addEventListener('click', (e) => { e.stopPropagation(); removeSignal(row.id); });
+        const toggles = waveRowToggles(row);
+        const actions = document.createElement('span');
+        actions.className = 'wave-actions';
+        actions.append(tag, rm);
         el.addEventListener('click', (e) => {
-          if (e.target.closest('.sel-x')) return;
+          if (e.target.closest('button') || e.target.closest('.sig-toggles')) return;
           setFocus(row.id, true);
         });
         el.addEventListener('dragstart', (e) => {
@@ -2944,7 +2992,7 @@
           el.classList.add('dragging');
         });
         el.addEventListener('dragend', () => el.classList.remove('dragging'));
-        el.append(dot, nm, val, tag, rm);
+        el.append(dot, nm, val, toggles, actions);
         inner.appendChild(el);
         S.liveRows.set(row.id, val);
       }
@@ -2966,7 +3014,7 @@
     if (!shown) {
       const empty = document.createElement('div');
       empty.className = 'cat-empty muted';
-      empty.textContent = q ? '没有匹配的波形' : '还没有波形；在变量/外设行点“波”加入';
+      empty.textContent = q ? '没有匹配的已选择项' : '还没有已选择信号；在变量/外设行点“表/波”加入';
       body.appendChild(empty);
     }
     if (S.samples.length) refreshLiveValues();
@@ -2977,9 +3025,51 @@
     return parts.some((p) => String(p || '').toLowerCase().includes(q));
   }
 
-  function rowFlagButtons(id, entry) {
+  function entryId(entry) {
+    return String((entry && (entry.id || entry.name)) || '');
+  }
+
+  function reginfoFor(entry) {
+    if (!S.reginfo.map.size) return null;
+    return S.reginfo.map.get(entryId(entry)) || null;
+  }
+
+  function dynamicInfoText(info, value) {
+    if (!info || value === undefined || value === null) return '';
+    const k = String(value);
+    if (info.states && Object.prototype.hasOwnProperty.call(info.states, k)) {
+      return info.states[k];
+    }
+    if (info.values) {
+      if (Object.prototype.hasOwnProperty.call(info.values, k)) return info.values[k];
+      const n = Number(value);
+      if (Number.isFinite(n)) {
+        for (const kk of ['0x' + n.toString(16), '0x' + n.toString(16).toUpperCase(),
+                          n.toString(16).toUpperCase(), n.toString(16),
+                          '0b' + n.toString(2), n.toString()]) {
+          if (Object.prototype.hasOwnProperty.call(info.values, kk)) return info.values[kk];
+        }
+      }
+    }
+    return '';
+  }
+
+  function descFor(entry, staticOnly) {
+    const info = reginfoFor(entry);
+    if (!info) return '';
+    if (!staticOnly) {
+      const v = S.readVals.get(entryId(entry));
+      if (v !== undefined) {
+        const d = dynamicInfoText(info, v);
+        if (d) return d;
+      }
+    }
+    return info.static || '';
+  }
+
+  function rowFlagButtons(id, entry, opts = {}) {
     const wrap = document.createElement('span');
-    wrap.className = 'sig-toggles';
+    wrap.className = 'sig-toggles' + (opts.flat ? ' flat' : '');
     const row = S.rows.get(id);
     for (const [flag, label, title] of [['table', '表', '数值表'], ['plot', '波', '波形']]) {
       const b = document.createElement('button');
@@ -3001,18 +3091,26 @@
     wb.setAttribute('aria-label', wb.title);
     wb.setAttribute('aria-pressed', inWrite ? 'true' : 'false');
     wrap.appendChild(wb);
-    // 十字分区右下角保留：先占位，后续可放“曲线设置”等
-    const reserved = document.createElement('span');
-    reserved.className = 'tgl-reserved';
-    reserved.setAttribute('aria-hidden', 'true');
-    wrap.appendChild(reserved);
+    // 右下角：读一次（不加入采样，只刷新 sig-val 与简述）
+    if (opts.read !== false) {
+      const rb = document.createElement('button');
+      rb.className = 'tgl tgl-read';
+      rb.textContent = '读';
+      rb.title = '读取一次并刷新数值/简述';
+      rb.dataset.rowRead = id;
+      rb.setAttribute('aria-label', '读取一次');
+      wrap.appendChild(rb);
+    }
     return wrap;
   }
 
   function sigRow(entry, kind, opts = {}) {
+    const item = document.createElement('div');
+    item.className = 'sig-item';
     const rowEl = document.createElement('div');
-    const eid = entry.id || entry.name;
+    const eid = entryId(entry);
     const row = S.rows.get(eid);
+    const staticOnly = !!(row && (row.table || row.plot));
     rowEl.className = 'sig-row' + (row ? ' selected' : '') + (row && !row.table && !row.plot ? ' idle' : '');
     rowEl.dataset.id = eid;
     rowEl.dataset.kind = kind;
@@ -3031,27 +3129,73 @@
     }
     const name = document.createElement('span');
     name.className = 'sig-name';
-    if (entry.bit) {
-      name.innerHTML = esc(entry.name) + ' <span class="bit">[' +
-        (entry.bit[1] > 1 ? (entry.bit[0] + ':' + (entry.bit[0] + entry.bit[1] - 1)) : entry.bit[0]) + ']</span>';
+    const fullName = String(entry.name || '');
+    const leaf = (opts.reg || opts.bit) ? fullName.split('.').pop() : fullName;
+    const isRegOrBit = !!(opts.reg || opts.bit);
+    if (isRegOrBit) {
+      // 寄存器和位域只显示内层名，前面加 . 区分层级
+      name.innerHTML = '<span class="name-dot">.</span>' + esc(leaf) + (entry.bit
+        ? ' <span class="bit">[' + (entry.bit[1] > 1
+          ? (entry.bit[0] + ':' + (entry.bit[0] + entry.bit[1] - 1)) : entry.bit[0]) + ']</span>'
+        : '');
+    } else if (fullName.length > 24 && fullName.includes('.')) {
+      // 长变量名按第一个 . 拆成两行：对象名 / .成员名
+      const i = fullName.indexOf('.');
+      name.classList.add('two-line');
+      name.innerHTML = esc(fullName.slice(0, i)) + '<br><span class="name-tail">' +
+        esc(fullName.slice(i)) + '</span>';
     } else {
-      name.textContent = entry.name;
+      name.textContent = fullName;
     }
     name.title = entry.name + '\n' + hex(entry.addr) + ' · ' + (entry.size * 8) + ' bit ' + (entry.signed ? 'signed' : 'unsigned') +
-      '\n表：加入数值表；波：加入波形；写：加入下方写入窗口（可再做开关/滑条）';
+      '\n点击行展开详情；表 / 波 / 写 / 读 都在右侧按钮';
     main.appendChild(name);
-    const meta = document.createElement('div');
-    meta.className = 'sig-meta';
-    meta.textContent = hex(entry.addr) + ' · ' + (entry.type || (entry.size * 8 + 'b'));
-    main.appendChild(meta);
+    const desc = document.createElement('div');
+    desc.className = 'sig-desc';
+    desc.dataset.descId = eid;
+    desc.textContent = descFor(entry, staticOnly);
+    desc.title = desc.textContent || '';
+    main.appendChild(desc);
     const val = document.createElement('span');
     val.className = 'sig-val';
-    val.textContent = '—';
-    rowEl.appendChild(rowFlagButtons(eid, entry));
+    val.textContent = S.readVals.has(eid)
+      ? fmtValue(row || entry, S.readVals.get(eid)) : '—';
     rowEl.appendChild(main);
     rowEl.appendChild(val);
+    rowEl.appendChild(rowFlagButtons(eid, entry));
+    item.appendChild(rowEl);
+
+    const info = reginfoFor(entry);
+    const detail = document.createElement('div');
+    detail.className = 'sig-detail';
+    const meta = document.createElement('div');
+    meta.className = 'sig-meta';
+    meta.textContent = hex(entry.addr) + ' · ' + (entry.type || ((entry.size || 4) * 8 + 'b')) +
+      ' · ' + ((entry.size || 4) * 8) + ' bit ' + (entry.signed ? 'signed' : 'unsigned');
+    detail.appendChild(meta);
+    const full = document.createElement('div');
+    full.className = 'sig-full';
+    full.textContent = (info && (info.full || info.static)) || '暂无手册描述（可在设置里导入寄存器信息 JSON）';
+    detail.appendChild(full);
+    const tags = document.createElement('div');
+    tags.className = 'sig-tags';
+    const tagPairs = [];
+    if (info && info.access) tagPairs.push(['访问', info.access]);
+    if (info && info.reset) tagPairs.push(['复位', info.reset]);
+    if (info && info.page) tagPairs.push(['页码', 'p.' + info.page]);
+    if (info && info.states) tagPairs.push(['状态', Object.keys(info.states).length + ' 种']);
+    if (info && info.values) tagPairs.push(['枚举', Object.keys(info.values).length + ' 种']);
+    for (const [k, v] of tagPairs) {
+      const t = document.createElement('span');
+      t.className = 'sig-tag';
+      t.textContent = k + ' ' + v;
+      tags.appendChild(t);
+    }
+    if (tags.childNodes.length) detail.appendChild(tags);
+    item.appendChild(detail);
+    if (S.ui.expanded.has(eid)) item.classList.add('open');
     S.liveRows.set(eid, val);
-    return rowEl;
+    return item;
   }
 
   function renderVars(body, q) {
@@ -3077,12 +3221,13 @@
       return ga - gb;
     });
     let shown = 0;
+    let headIdx = 0;
     for (const [g, list] of ordered) {
       const open = !!q || S.ui.openGroups.has(g);
       const box = document.createElement('div');
       box.className = 'cat-group' + (open ? ' open' : '');
       const head = document.createElement('div');
-      head.className = 'cat-group-head';
+      head.className = 'cat-group-head' + ((headIdx++ % 2) ? ' alt' : '');
       head.dataset.group = g;
       head.innerHTML = '<span class="arrow">▶</span><span class="gname"></span><span class="gcount"></span>';
       head.querySelector('.gname').textContent = g;
@@ -3428,10 +3573,30 @@
     body.appendChild(box);
   }
 
+  const PERIPH_CN = {
+    SYS: '系统控制', FLASH: '闪存', SPI: '串行外设接口', I2C: 'I2C 接口',
+    CMP: '比较器', HALL: '霍尔接口', ADC: '模数转换器', TIMER: '通用定时器',
+    QEP: '正交编码器', MCPWM: '电机 PWM', GPIO: '通用输入输出', EXTI: '外部中断',
+    CRC: 'CRC 校验', UART: '串口', DMA: '直接存储器访问', DSP: '数学运算单元',
+    IWDG: '独立看门狗', AON: '电源管理', SIF: '单线接口', CL0: '可配置逻辑',
+    CAN: 'CAN 总线', ATIM: '高级定时器', GTIM: '通用定时器', LPTIM: '低功耗定时器',
+    SYSCTRL: '系统控制', DBG: '调试', RCC: '复位与时钟',
+    GPIOA: '通用输入输出', GPIOB: '通用输入输出', GPIOC: '通用输入输出',
+    GPIOD: '通用输入输出', GPIOE: '通用输入输出', GPIOF: '通用输入输出',
+    AFIO: '复用功能', PWR: '电源控制',
+  };
+
+  function periphCn(name) {
+    const s = String(name || '').toUpperCase();
+    const base = s.replace(/[0-9]+$/, '');
+    return PERIPH_CN[s] || PERIPH_CN[base] || '';
+  }
+
   function renderPeriphInto(body, q) {
     const list = peripheralList();
     const frag = document.createDocumentFragment();
     let any = false;
+    let headIdx = 0;
     for (const p of list) {
       const regs = [];
       for (const r of p.regs || []) {
@@ -3452,11 +3617,18 @@
       const box = document.createElement('div');
       box.className = 'cat-group' + (open ? ' open' : '');
       const head = document.createElement('div');
-      head.className = 'periph-head';
+      head.className = 'periph-head' + ((headIdx++ % 2) ? ' alt' : '');
       head.dataset.periph = p.name;
-      head.innerHTML = '<span class="arrow">▶</span><span class="pname"></span><span class="pbase"></span>';
+      head.innerHTML = '<span class="arrow">▶</span><span class="pname"></span><span class="pcn"></span>' +
+        '<button class="periph-read" type="button" data-periph-read="" title="连续读取该外设全部寄存器一次">读</button>' +
+        '<span class="pbase"></span>';
       head.querySelector('.pname').textContent = p.name;
-      head.querySelector('.pbase').textContent = hex(p.base, 8);
+      head.querySelector('.pcn').textContent = periphCn(p.name);
+      const pbase = head.querySelector('.pbase');
+      pbase.textContent = hex(p.base, 8);
+      const prb = head.querySelector('.periph-read');
+      prb.dataset.periphRead = p.name;
+      prb.title = '连续读取 ' + p.name + ' 全部寄存器一次（' + (p.regs || []).length + ' 个）';
       box.appendChild(head);
       const inner = document.createElement('div');
       inner.className = 'cat-group-body';
@@ -3513,14 +3685,20 @@
     body.appendChild(form);
     const list = Array.from(S.rows.values()).filter((s) => s.id.startsWith('custom.'));
     if (list.length) {
+      const open = S.ui.openGroups.has('__custom');
+      const box = document.createElement('div');
+      box.className = 'cat-group' + (open ? ' open' : '');
+      box.dataset.group = '__custom';
       const head = document.createElement('div');
-      head.className = 'side-title';
-      head.style.margin = '14px 0 4px';
-      head.textContent = '自定义信号';
-      body.appendChild(head);
-      for (const s of list) {
-        body.appendChild(sigRow(s, 'var', { tree: true }));
-      }
+      head.className = 'cat-group-head';
+      head.dataset.group = '__custom';
+      head.innerHTML = '<span class="arrow">▶</span><span class="gname">自定义信号</span><span class="gcount"></span>';
+      head.querySelector('.gcount').textContent = list.length + ' 项';
+      const inner = document.createElement('div');
+      inner.className = 'cat-group-body';
+      for (const s of list) inner.appendChild(sigRow(s, 'var', { tree: true }));
+      box.append(head, inner);
+      body.appendChild(box);
     }
     $('#custAdd')?.addEventListener('click', () => {
       const raw = ($('#custAddr')?.value || '').trim();
@@ -3552,12 +3730,12 @@
 
   // ---------------------------------------------------------------- selected / legend
   function renderSelected() {
+    S.selRows.clear();
     const box = D.selectedList;
     if (!box) return;
     box.innerHTML = '';
-    S.selRows.clear();
     const rows = selectedRows();
-    D.selCount.textContent = String(rows.length);
+    if (D.selCount) D.selCount.textContent = String(rows.length);
     if (!rows.length) {
       box.innerHTML = '<div class="cat-empty muted">把左侧“表”或“波”打开，加入已选择</div>';
       return;
@@ -3690,9 +3868,24 @@
   function updateViewSeg() {
     const seg = $('#viewSeg');
     if (!seg) return;
+    S.ui.view = 'list';
     for (const b of seg.querySelectorAll('button')) {
-      b.classList.toggle('active', b.dataset.view === S.ui.view);
+      b.classList.toggle('active', b.dataset.view === 'list');
     }
+  }
+
+  function collapseAll() {
+    if (S.ui.search) {
+      S.ui.search = '';
+      if (D.search) D.search.value = '';
+    }
+    S.ui.openGroups.clear();
+    S.ui.openNodes.clear();
+    S.ui.openPeriph.clear();
+    S.ui.openRegs.clear();
+    S.ui.expanded.clear();
+    renderCatalog();
+    toast('已全部收起', 'ok');
   }
 
   function renderValueTable() {
@@ -4315,6 +4508,7 @@
     });
 
     D.btnPause.addEventListener('click', togglePause);
+    D.btnReset?.addEventListener('click', resetTarget);
     $('#btnSidebar')?.addEventListener('click', () => D.sidebar?.classList.toggle('open'));
     $('#btnClear').addEventListener('click', clearAll);
     $('#btnShot').addEventListener('click', snapshot);
@@ -4330,11 +4524,16 @@
       renderCatalog();
     }));
     $$('#viewSeg button').forEach((b) => b.addEventListener('click', () => {
-      S.ui.view = b.dataset.view === 'tree' ? 'tree' : 'list';
+      if (b.dataset.view === 'tree') {
+        toast('树视图暂时下线，后续替换', 'ok');
+        return;
+      }
+      S.ui.view = 'list';
       updateViewSeg();
       saveLocal();
       renderCatalog();
     }));
+    D.btnCollapseAll?.addEventListener('click', collapseAll);
     $('#btnReloadSymbols').addEventListener('click', reloadCatalog);
 
     // value table collapse
@@ -4469,6 +4668,8 @@
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
     $('#btnImportVars').addEventListener('click', importAxf);
     $('#btnImportRegs').addEventListener('click', importRegisters);
+    D.btnImportRegInfo?.addEventListener('click', () => D.regInfoFile?.click());
+    D.regInfoFile?.addEventListener('change', () => { if (D.regInfoFile.files?.length) importRegInfo(); });
     D.btnRecReset?.addEventListener('click', async () => {
       if (!confirm('确定丢弃当前录制数据并重新计时？')) return;
       try {
@@ -4500,7 +4701,102 @@
     });
   }
 
+  function setReadDisplay(id, value) {
+    const entry = S.index.get(id);
+    if (!entry) return;
+    S.readVals.set(id, value);
+    const row = S.rows.get(id);
+    const txt = fmtValue(row || entry, value);
+    const staticOnly = !!(row && (row.table || row.plot));
+    const live = S.liveRows.get(id);
+    if (live) live.textContent = txt;
+    const sel = S.selRows.get(id);
+    if (sel) { const el = sel.querySelector('.sel-val'); if (el) el.textContent = txt; }
+    for (const el of document.querySelectorAll('.sig-row')) {
+      if (el.dataset.id !== id) continue;
+      const v = el.querySelector('.sig-val');
+      if (v) v.textContent = txt;
+      const d = el.querySelector('.sig-desc');
+      if (d) {
+        const t = descFor(entry, staticOnly);
+        d.textContent = t;
+        d.title = t;
+      }
+    }
+  }
+
+  function decodeRegBits(regId, word) {
+    const w = Number(word) >>> 0;
+    for (const [id, entry] of S.index) {
+      if (!entry.bit || !id.startsWith(regId + '.')) continue;
+      const shift = Number(entry.bit[0]) || 0;
+      const width = Number(entry.bit[1]) || 1;
+      const mask = width >= 32 ? 0xFFFFFFFF : ((1 << width) - 1);
+      setReadDisplay(id, (w >>> shift) & mask);
+    }
+  }
+
+  async function readOne(id) {
+    const entry = S.index.get(id);
+    if (!entry) { toast('找不到信号: ' + id, 'err'); return; }
+    if (!sourceConnected(S.source)) { toast('未连接，无法读取', 'err'); return; }
+    try {
+      const r = await post('/api/read', {
+        addr: entry.addr, size: entry.size || 4,
+        signed: !!entry.signed, bit: entry.bit || null,
+      });
+      if (!r.ok) throw new Error(r.error || '读取失败');
+      setReadDisplay(id, r.value);
+      // 寄存器行：用同一次读回的 word 刷新所有子位域，不额外读
+      if (!entry.bit && entry.kind === 'reg') decodeRegBits(id, r.word);
+    } catch (e) {
+      toast('读取失败: ' + brief(e.message), 'err');
+    }
+  }
+
+  async function readPeripheral(name) {
+    if (!sourceConnected(S.source)) { toast('未连接，无法读取', 'err'); return; }
+    const p = peripheralList().find((x) => x.name === name);
+    if (!p) { toast('找不到外设: ' + name, 'err'); return; }
+    let btn = null;
+    for (const b of document.querySelectorAll('[data-periph-read]')) {
+      if (b.dataset.periphRead === name) { btn = b; break; }
+    }
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    let ok = 0, fail = 0;
+    for (const r of p.regs || []) {
+      const id = name + '.' + r.name;
+      const entry = S.index.get(id);
+      if (!entry) continue;
+      try {
+        const rsp = await post('/api/read', {
+          addr: entry.addr, size: entry.size || 4, signed: !!entry.signed,
+        });
+        if (rsp.ok) {
+          setReadDisplay(id, rsp.value);
+          decodeRegBits(id, rsp.word);
+          ok++;
+        } else {
+          fail++;
+        }
+      } catch (e) {
+        fail++;
+      }
+      await new Promise((res) => setTimeout(res, 0));
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '读'; }
+    toast(name + ' 读取完成：' + ok + ' 个寄存器' + (fail ? '，' + fail + ' 个失败' : ''),
+      fail ? 'err' : 'ok');
+  }
+
   function onCatalogClick(e) {
+    const rd = e.target.closest('[data-row-read]');
+    if (rd) {
+      e.preventDefault();
+      e.stopPropagation();
+      readOne(rd.dataset.rowRead);
+      return;
+    }
     const wtgl = e.target.closest('[data-row-write]');
     if (wtgl) {
       e.preventDefault();
@@ -4544,6 +4840,13 @@
       group.parentElement.classList.toggle('open');
       return;
     }
+    const periphRead = e.target.closest('[data-periph-read]');
+    if (periphRead) {
+      e.preventDefault();
+      e.stopPropagation();
+      readPeripheral(periphRead.dataset.periphRead);
+      return;
+    }
     const periph = e.target.closest('.periph-head');
     if (periph) {
       const p = periph.dataset.periph;
@@ -4563,13 +4866,11 @@
     if (!row) return;
     const id = row.dataset.id;
     if (!id) return;
-    const existing = S.rows.get(id);
-    if (existing) {
-      // 两个开关都关是合法状态；行点击只在这两种状态间切换
-      setBothFlags(id, !(existing.table || existing.plot));
-      return;
-    }
-    addSignal(id, { table: true, plot: true });
+    // 行点击只展开/收起详情，不再加入波/表；波/表/写/读都在右侧按钮
+    const item = row.closest('.sig-item');
+    if (!item) return;
+    item.classList.toggle('open');
+    if (S.ui.expanded.has(id)) S.ui.expanded.delete(id); else S.ui.expanded.add(id);
   }
 
   // ---------------------------------------------------------------- 卡片悬浮面板
@@ -4710,6 +5011,31 @@
     if (typeof fitTopbar === 'function') fitTopbar();
   }
 
+  async function resetTarget() {
+    if (!sourceConnected(S.source)) {
+      toast('未连接，不能复位', 'err');
+      return;
+    }
+    if (!confirm('复位目标？电机会按固件从复位向量重新启动。')) return;
+    const btn = D.btnReset;
+    const old = btn ? btn.querySelector('.btn-label')?.textContent : '';
+    if (btn) { btn.disabled = true; const l = btn.querySelector('.btn-label'); if (l) l.textContent = '复位中'; }
+    try {
+      const r = await post('/api/reset', {});
+      if (!r.ok) throw new Error(r.error || '复位失败');
+      toast('已复位目标' + (r.method ? '（' + r.method + '）' : ''), 'ok');
+      setTimeout(refreshStatus, 400);
+    } catch (e) {
+      toast('复位失败: ' + brief(e.message), 'err');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        const l = btn.querySelector('.btn-label');
+        if (l) l.textContent = old || '复位';
+      }
+    }
+  }
+
   function clearAll() {
     S.samples = [];
     S.lastT = 0;
@@ -4759,6 +5085,7 @@
 
   function applyCatalog(catalog, note = '') {
     S.catalog = catalog;
+    S.readVals.clear();
     buildIndex();
     S.samples = [];
     S.lastT = 0;
@@ -4852,6 +5179,34 @@
       toast('导入失败: ' + e.message, 'err');
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = old || '导入寄存器表'; }
+    }
+  }
+
+  async function importRegInfo() {
+    const f = D.regInfoFile?.files?.[0];
+    if (!f) { toast('先选择寄存器信息 JSON', 'err'); return; }
+    const btn = D.btnImportRegInfo;
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
+    try {
+      const data = JSON.parse(await f.text());
+      if (!data || !Array.isArray(data.entries)) {
+        throw new Error('不是寄存器信息 JSON（缺少 entries 数组）');
+      }
+      const model = S.mcu.active || S.catalog.meta?.mcu || '';
+      if (!model) throw new Error('未确定型号');
+      const r = await post('/api/reginfo/import', Object.assign({}, data, { model }));
+      if (!r.ok) throw new Error(r.error || '导入失败');
+      await loadReginfo(model);
+      renderCatalog();
+      S.dirty = true;
+      const un = r.counts && r.counts.unmatched ? '，' + r.counts.unmatched + ' 条与模板不匹配' : '';
+      toast('寄存器信息已导入：' + r.counts.entries + ' 条（' + model + un + '）', 'ok');
+    } catch (e) {
+      toast('导入寄存器信息失败: ' + e.message, 'err');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = old || '导入寄存器信息'; }
+      if (D.regInfoFile) D.regInfoFile.value = '';
     }
   }
 

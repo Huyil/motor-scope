@@ -1,6 +1,8 @@
 # MotorScope HTTP API（给 Agent / 脚本用）
 
-服务默认跑在 Windows 的 `http://127.0.0.1:8765`，无鉴权、只绑本机。
+服务默认跑在 Windows 的 `http://127.0.0.1:8765`，并监听 `0.0.0.0`：
+同网段可用 `http://<本机IP>:80` 访问（局域网固定 80，启动时会打印 `LAN:` URL）。
+**无鉴权**，同一网络内的设备都能调写/复位接口；只在本机使用时加 `--host 127.0.0.1`。
 页面本身就是这套 API 的客户端；Agent 可以直接读，不需要解析 HTML。
 
 ## 1. 数据模型
@@ -83,6 +85,7 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | --- | --- |
 | `GET /api/status` | 连接状态、实际采样率、`generation`、`history` 点数、`oldest_t`/`latest_t`、`config.signals` |
 | `GET /api/catalog` | 当前机型的变量/外设，地址/类型/位域/默认堵转信号 |
+| `GET /api/reginfo?model=<ID>` | 该型号的寄存器描述（entries 数组；没有就返回空） |
 | `GET /api/profiles` | 机型列表：`id/name/mcu/arch/available/variables/peripherals/source_axf` + `active` |
 | `GET /api/log` | 服务 + OpenOCD 尾部日志 |
 | `GET /api/record.csv` | 后端录制 CSV（需要先 POST `/api/record` 开启） |
@@ -96,10 +99,13 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `POST /api/record` | `{"active":true}` 开始后端录制 |
 | `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach"}` 重新连 |
 | `POST /api/disconnect` | 断开并释放 OpenOCD/H7-TOOL |
+| `POST /api/reset` | **会复位目标**：ARM 写 `AIRCR.SYSRESETREQ`，RISC-V 用 OpenOCD `reset run`；电机可能重新启动 |
 | `POST /api/catalog/reload` | 从当前机型的源 AXF/SVD 重建 signals.json |
 | `POST /api/profiles/switch` | `{"id":"LKS32-FOC"}` 切换机型；返回 `catalog/config/profile(s)`，会断开调试源 |
 | `POST /api/profiles/config` | `{"config":{...},"manual":true}` 保存前端工程快照到 `profiles/<ID>/config.json` |
 | `POST /api/profiles/build` | `{"id":"LKS32-FOC"}` 重建该机型符号表；返回新 `catalog/counts` |
+| `POST /api/read` | `{"addr":..., "size":1\|2\|4, "signed":bool, "bit":[shift,width]?}` 读一次（不加入采样），返回 `value/word` |
+| `POST /api/reginfo/import` | `{"model":"LKS32MC07x","entries":[...]}` 独立导入寄存器描述；写到 `web/mcu/<model>.info.json` |
 | `POST /api/catalog/import` | multipart：`axf`（必填）+ `header`（可选 cw32l011.h），导入任意 AXF/ELF 并重建 |
 | `POST /api/probe` | 一次性 TCL 握手，读 CPUID |
 | `POST /api/write` | **会改目标内存**；写 RAM/SFR 并回读，见 5.1 |
@@ -170,9 +176,10 @@ curl -s -X POST http://127.0.0.1:8765/api/write \
 
 然后 `current >= thresholdLast`。注意：**600ms 抖动合并、触发计数、自动暂停是网页前端算的**，服务端不返回这些派生值。
 
-## 7. 从 WSL 访问
+## 7. 从 WSL / 局域网访问
 
-服务在 Windows loopback，WSL 直接 `curl http://127.0.0.1:8765` 不通；走 Windows 命令：
+服务默认监听 `0.0.0.0`，局域网固定 80：同网段设备直接访问 `http://<Windows 局域网 IP>:80`。
+WSL 里访问 Windows 本机仍走 `cmd.exe /c curl`（WSL 的 127.0.0.1 不是 Windows 的）：
 
 ```bash
 cmd.exe /c "curl -s http://127.0.0.1:8765/api/status"

@@ -20,19 +20,19 @@ exit /b 1
 :run_bundled
 echo Starting MotorScope...
 echo Python: %BUNDLED%
-"%BUNDLED%" scope_server.py --auto --open %*
+"%BUNDLED%" scope_server.py --open %*
 goto :done
 
 :run_python
 echo Starting MotorScope...
 echo Python: python (系统 PATH)
-python scope_server.py --auto --open %*
+python scope_server.py --open %*
 goto :done
 
 :run_py
 echo Starting MotorScope...
 echo Python: py (系统 PATH)
-py scope_server.py --auto --open %*
+py scope_server.py --open %*
 goto :done
 
 :done

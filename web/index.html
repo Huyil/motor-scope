@@ -31,6 +31,10 @@
         <svg viewBox="0 0 24 24" class="ico-play hidden"><path d="M8 5l12 7-12 7z"/></svg>
         <span class="btn-label">暂停</span>
       </button>
+      <button id="btnReset" class="btn" title="复位目标（SWD SYSRESETREQ；电机可能重新启动）" aria-label="复位">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
+        <span class="btn-label">复位</span>
+      </button>
       <button id="btnClear" class="btn" title="清空 (C)" aria-label="清空">
         <svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13"/></svg>
         <span class="btn-label">清空</span>
@@ -68,23 +72,20 @@
         <button class="tab active" data-tab="vars">变量</button>
         <button class="tab" data-tab="periph">外设</button>
         <button class="tab" data-tab="custom">自定义</button>
-        <button class="tab" data-tab="waves">波形</button>
+        <button class="tab" data-tab="waves">已选择</button>
       </div>
 
       <div class="view-row">
         <div class="view-seg" id="viewSeg" role="group" aria-label="目录视图">
           <button data-view="list" class="active" title="列表视图">列表</button>
-          <button data-view="tree" title="树状视图">树</button>
+          <button data-view="tree" title="树视图暂时下线，后续替换" disabled>树</button>
         </div>
         <span class="view-note" id="viewNote">对象 · 结构体 · 数组</span>
+        <button id="btnCollapseAll" class="mini view-collapse" type="button" title="收起所有分组、外设和展开的位域">全部收起</button>
       </div>
 
       <div id="catalogBody" class="catalog-body"></div>
 
-      <div class="selected-block">
-        <div class="side-title">已选择 <span id="selCount" class="badge">0</span></div>
-        <div id="selectedList" class="selected-list"></div>
-      </div>
     </aside>
 
 
@@ -159,7 +160,9 @@
         <button id="btnImportVars" class="btn primary" type="button" style="width:100%;margin-top:6px">导入 AXF/ELF</button>
         <div class="field" style="margin-top:10px"><label>寄存器表（.svd / .json）</label><input id="hdrFile" type="file" accept=".svd,.json"></div>
         <button id="btnImportRegs" class="btn" type="button" style="width:100%;margin-top:6px">导入寄存器表</button>
-        <p class="hint">AXF/ELF 只更新变量；寄存器表单独更新外设，支持 SVD 或 web/mcu 生成的 JSON。CW32 已内置模板，不再需要头文件。</p>
+        <div class="field" style="margin-top:10px"><label>寄存器信息（.json，描述）</label><input id="regInfoFile" type="file" accept=".json,application/json"></div>
+        <button id="btnImportRegInfo" class="btn" type="button" style="width:100%;margin-top:6px">导入寄存器信息</button>
+        <p class="hint">AXF/ELF 只更新变量；寄存器表和寄存器信息是两份独立 JSON，可分别导入、互不覆盖。寄存器表支持 SVD 或 web/mcu 生成的 JSON；寄存器信息按当前型号保存。</p>
       </div>
       <div class="row2" style="margin-top:8px">
         <button id="btnReloadCatalog" class="btn">从当前 AXF 重新生成</button>
@@ -357,22 +360,6 @@
   </div>
 </div>
 
-<!-- 首次连接 / 断开提示 -->
-<div id="overlay" class="overlay hidden">
-  <div class="overlay-card">
-    <div class="overlay-icon">
-      <svg viewBox="0 0 48 48"><path d="M6 28h9l3-13 6 22 4.5-15 3 6H42" fill="none" stroke="#22d3ee" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </div>
-    <h2>连接目标</h2>
-    <p class="muted">活体读取目标内存，不暂停 CPU。连接后会读取芯片 ID，自动识别型号并与符号表比对。</p>
-    <div class="overlay-actions">
-      <button id="btnQuickConnect" class="btn primary big">连接 OpenOCD</button>
-      <button id="btnQuickSim" class="btn big">先看仿真</button>
-    </div>
-    <p id="overlayHint" class="overlay-hint">将自动寻找 OpenOCD，启动 tcl_port 并读芯片签名。</p>
-    <button id="btnOverlayAdvanced" class="link">高级设置（路径 / 附加已有 TCL 端口）</button>
-  </div>
-</div>
 
 <!-- 日志 -->
 <div id="logPanel" class="log-panel hidden">

@@ -55,11 +55,14 @@ start_scope.bat
 
 它会：
 
-1. 自动找 `tools\openocd`（本工程外层 `D:\Code\DR2159\tools\openocd`，
-   没有就退回 `D:\Code\CW32L012_FLASH_Programming\tools\openocd`）；
-2. 选一个空闲端口起 `openocd.exe`，`tcl_port` + 关 telnet/gdb；
-3. 读 `CPUID=0x410CC601` 握手；
-4. 打开 `http://127.0.0.1:8765/`（被占用会自动 +1，看控制台输出的 URL）。
+1. 启动 `scope_server.py`，打开 `http://127.0.0.1:8765/`（本地端口被占用会自动 +1，看控制台）；
+   默认监听 `0.0.0.0`，并把局域网固定到 **80** 出口：
+   控制台打印 `LAN : http://192.168.x.x:80/`，同网段设备直接打开即可；
+   本地端口怎么变都不影响 80。只要本机访问时加 `--host 127.0.0.1`；
+2. **不自动连接**：页面停在“待连接 · 待运行”，点顶栏 **“连接”** 或信号源卡片后才启动 OpenOCD；
+3. 连接时自动找 `tools\openocd`（本工程外层 `D:\Code\DR2159\tools\openocd`，
+   没有就退回 `D:\Code\CW32L012_FLASH_Programming\tools\openocd`），选空闲端口起
+   `openocd.exe`（`tcl_port` + 关 telnet/gdb），再读 CPUID/芯片 ID 握手。
 
 启动参数可以覆写，例如：
 
@@ -105,9 +108,27 @@ python scope_server.py --attach 127.0.0.1:6666 --open
   按 `motor`、`adc`、`sys` 等对象分组；搜索支持名字/地址。
 - **左栏 · 外设**：`ADC`、`ATIM`、`GTIM1/2`、`GPIOA/B/C`、`SYSCTRL`……
   寄存器按 `TypeDef` 展开；点 `+` 看位域（`ADC.CR.EN` 这种）。
-- **左栏 · 四键**：每行是 2×2 的 `表 / 波 / 写 / 保留位`：
-  `表` 加入数值表，`波` 加入波形，`写` 加入下方写入窗口；右下角保留给后续功能。
+- **左栏 · 四键**：每行右侧是 2×2 的 `表 / 波 / 写 / 读`：
+  `表` 加入数值表，`波` 加入波形，`写` 加入下方写入窗口，
+  `读` 只读一次并刷新该行的 `sig-val` 和简述（不加入采样）。
   添加 `表/波` 是**追加**：已有曲线/历史保留，新通道从当前时刻接着画，不整屏重置。
+- **点击整行**只展开/收起详述（地址/类型 + 手册完整描述），**不再**加入波/表；
+  波/表/写/读都只在右侧四键里按。
+- 寄存器行按 **读**：一次读回该寄存器的 word，同时刷新它下面所有位域的
+  `sig-val` 和简述（不额外读、不加入采样）；折叠着的位域也会缓存，展开即显示。
+- 外设大标题右侧有独立的 **读** 按钮：连续读该外设全部寄存器一次（读队列），
+  适合 ADC/MCPWM/GPIO 这种整组寄存器一起刷新的场景；标题同时显示中文名
+  （如 `ADC` = 模数转换器）。
+- **树视图暂时下线**，`列表 / 树` 的“树”按钮保留（禁用），后续替换；
+  `view-row` 右侧有 **“全部收起”**，一键收起所有分组、外设、寄存器位域和行详情。
+- 列表始终以 `cat-group-head` 分组展示，不再有裸的 `sig-item`；分组/外设/寄存器/位域
+  用不同字体颜色区分（青 / 蓝 / 浅蓝 / 紫），`reg-toggle` 加大到 20×20 并带悬浮高亮。
+- 长变量名（>24 字符）按第一个 `.` 拆成两行，例如
+  `poweronbreakhandle` / `.power_on_break_flag`；寄存器/位域显示 `.CFG` / `.TBS`，
+  用前导点表示层级。相邻分组标题用青/紫两套淡底色交替，便于区分边界。
+- **行内简述**：变量/寄存器行第二行显示该寄存器的手册简述；有位域状态的
+  （bool 的 0/1、枚举值的含义）在点 `读` 后切换成当前值的描述；
+  如果开了波/表，只显示静态简述，避免每个采样都刷新。
 - **左栏 · 自定义**：直接填 `0x20000344` + 长度 + 有无符号，读任意地址。
 - **左栏 · 波形**：第 4 个标签，管理波形分组：
   - 默认分组内的每一路**独立显示、独立 Y 轴**（每个 pane 一套刻度）；
@@ -121,7 +142,7 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 - **数值表 / 写入表**：同一行 **1 : 2** 两列（写入表 2 倍宽）；窗口变窄时优先压缩写入表，
   820px 以下自动上下堆叠。数值列按约 6 位数字宽排，带千分位逗号；
   超长数字换行并用更小字号挤在同一行高内。
-- **顶部**：连接、暂停/继续、清空、录制、CSV、截图、设置；最右侧是缩小的
+- **顶部**：连接、暂停/继续、**复位**（SWD SYSRESETREQ）、清空、录制、CSV、截图、设置；最右侧是缩小的
   SWD 占用指示（信号源 + 实际速率），窄屏自动隐藏速率。
 - **底部**：样本数、实际速率、延迟、录制状态、OpenOCD 日志。
 
@@ -214,6 +235,10 @@ runtime\python\python.exe tools\build_profiles.py --only LKS32-FOC
 - **不依赖工程路径**：设置 → 符号与录制 → 选择 `DR2159.axf`（可同时选 `cw32l011.h`）
   → “导入并重建符号”。AXF 存到 `imports/`，解析失败不会覆盖原 `signals.json`；
   没有头文件时变量仍可用，但外设寄存器为空（会提示）。
+- **寄存器表 / 寄存器信息分开导入**：`寄存器表`（SVD/JSON）决定外设、地址、位偏移；
+  `寄存器信息`（描述 JSON）决定行内简述、展开详述和 bool/枚举状态。两者互不覆盖：
+  换模板不会丢描述，换描述也不会动地址。寄存器信息按当前型号存成
+  `web/mcu/<型号>.info.json`，LKS32MC07x 的由手册 v1.69 抽取。
 
 ### 4.2 本工程最常用的信号
 
@@ -374,13 +399,14 @@ motor-scope/
 ├─ profiles.py          机型工程存储 / 生成 / 切换
 ├─ profiles/            四套机型工程（symbols + chip + config，见 profiles/README.md）
 ├─ tools/build_profiles.py  重建机型符号表
-├─ start_scope.bat      一键启动（自动连 OpenOCD，优先用自带 Python）
+├─ start_scope.bat      启动服务并开页面（不自动连接，优先用自带 Python）
 ├─ start_scope_sim.bat  一键仿真
 ├─ regen_signals.bat    重新生成符号
 ├─ requirements.txt     pyelftools（改用系统 Python 时才需要）
 ├─ runtime/             自带便携 Python 3.13.3 + pyelftools（见 runtime/README.md）
 ├─ API.md              Agent/脚本用的 HTTP API（history/next/status/catalog）
 ├─ web/                 index.html / style.css / app.js（原生 canvas，无前端依赖）
+│  └─ mcu/<型号>.info.json  寄存器描述（与 <型号>.json 模板分开导入）
 ├─ tests/               mock_tcl.py + core/history/flash/profiles/chip_probe 单测
 └─ docs/                截图
 ```
@@ -397,6 +423,7 @@ motor-scope/
 | 数值全 0 / 明显不对 | 板子里的固件和 `DR2159.axf` 不是同一次 build；重新生成符号并烧录。看设置页底部 AXF 时间 |
 | 实际速率远低于目标 | 信号太多/地址太散；减少信号、降低频率，或把相邻变量一起选 |
 | 浏览器打开是空白/端口跳了 | 看控制台 URL；8765 被占用会自动 +1 |
+| 手机/另一台电脑打不开 | 默认已监听 `0.0.0.0`，局域网固定 80；确认同一网段、看控制台的 `LAN:` URL；Windows 防火墙放行 TCP 80（专用网络）：`New-NetFirewallRule -DisplayName "MotorScope 80" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow -Profile Private` |
 | 读某个寄存器后系统异常 | 该寄存器可能是读清零/读后触发；不要高频扫，先查用户手册 |
 | 暂停后画面不动 | 正常；数据仍在后台缓存，点继续会追上 |
 | 想连已有 openocd | “附加 TCL”，填 `127.0.0.1:6666` |
@@ -409,6 +436,10 @@ motor-scope/
 ## 10. 默认只读与写入边界
 
 - 默认只读：采样只调用 `read_memory`，不写内存、不 halt、不 reset、不烧录、不发电机命令。
+- **默认监听 `0.0.0.0`，局域网固定 80 出口**：HTTP API 没有鉴权，同网段的任何设备都能读、
+  写目标 RAM/SFR、执行复位；只在可信网络使用，或加 `--host 127.0.0.1` 只开本机。
+  80 被占用时会尝试用 Windows portproxy 转发到当前本地端口；不想固定 80 时用 `--lan-port 0`。
+  不要把这个端口映射到公网。
 - 写入是**显式解锁后的独立接口** `POST /api/write`：只写 RAM（`0x2000_0000..0x2000_2000`）
   或 SFR（`0x4000_0000..0x5000_0000`），1/2/4 字节且地址对齐；位域用读-改-写；
   每次写后回读并返回 `verified`。非法地址/未连接/未解锁在前端和后端都会被拒绝。

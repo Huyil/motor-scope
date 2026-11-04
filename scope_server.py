@@ -30,6 +30,7 @@ import queue
 import random
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -1687,6 +1688,192 @@ class App:
         self.add_log("采样配置: %d 路, %.0f Hz" % (len(signals), rate))
         return {"ok": True, "signals": [s.to_dict() for s in signals], "rate": rate}
 
+    def read_value(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """一次性读取任意地址/位域（“读”按钮用），不加入采样。"""
+        src = self.source
+        if src is None:
+            raise RuntimeError("未连接，不能读取")
+        try:
+            addr = int(payload.get("addr"))
+            size = int(payload.get("size") or 4)
+        except (TypeError, ValueError):
+            raise RuntimeError("addr/size 无效")
+        if size not in (1, 2, 4):
+            raise RuntimeError("只支持 1/2/4 字节读取")
+        signed = bool(payload.get("signed"))
+        bit = payload.get("bit")
+        span_addr = addr & ~0x3
+        try:
+            word = int(src.read_word(span_addr)) & 0xFFFFFFFF
+        except Exception as exc:
+            raise RuntimeError("读取 0x%08x 失败: %s" % (span_addr, exc))
+        if isinstance(bit, (list, tuple)) and len(bit) >= 2:
+            shift, width = int(bit[0]), int(bit[1])
+            if width <= 0 or shift < 0 or shift + width > 32:
+                raise RuntimeError("位域范围无效")
+            value = (word >> shift) & ((1 << width) - 1)
+            if signed and width < 32 and (value & (1 << (width - 1))):
+                value -= 1 << width
+        else:
+            off = (addr & 0x3) * 8
+            width = size * 8
+            value = (word >> off) & ((1 << width) - 1)
+            if signed and width < 32 and (value & (1 << (width - 1))):
+                value -= 1 << width
+        return {"ok": True, "addr": addr, "size": size, "value": value, "word": word}
+
+    def reset_target(self) -> Dict[str, Any]:
+        """SWD 复位：ARM 用 AIRCR.SYSRESETREQ，RISC-V 用 OpenOCD reset。
+
+        不 halt 常驻：复位后目标从复位向量重新运行；采样线程会自动恢复读取。
+        """
+        src = self.source
+        if src is None:
+            raise RuntimeError("未连接，不能复位")
+        client = getattr(src, "client", None)
+        if client is None:
+            raise RuntimeError("当前信号源不支持复位（仿真源没有调试器）")
+        if getattr(src, "riscv", False) or str(getattr(self, "arch", "")) == "riscv":
+            try:
+                client.command("reset run", timeout=10.0)
+                self.add_log("已复位目标 (RISC-V reset run)")
+                return {"ok": True, "method": "reset run"}
+            except Exception as exc:
+                try:
+                    client.command("reset halt", timeout=5.0)
+                    client.command("resume", timeout=5.0)
+                    self.add_log("已复位目标 (RISC-V reset halt + resume)")
+                    return {"ok": True, "method": "reset halt + resume",
+                            "warning": str(exc)}
+                except Exception as exc2:
+                    raise RuntimeError("RISC-V 复位失败: %s / %s" % (exc, exc2))
+        # Cortex-M: 直接写 AIRCR.SYSRESETREQ，不依赖 srst 是否接线
+        err = ""
+        try:
+            client.write_mem(0xE000ED0C, 4, 0x05FA0004)
+            time.sleep(0.15)
+            self.add_log("已复位目标 (AIRCR SYSRESETREQ)")
+            return {"ok": True, "method": "SYSRESETREQ"}
+        except Exception as exc:
+            err = str(exc)
+        try:
+            client.command("reset run", timeout=10.0)
+            self.add_log("已复位目标 (OpenOCD reset run)")
+            return {"ok": True, "method": "reset run", "warning": err}
+        except Exception as exc:
+            # mww 可能因为目标立刻复位而返回错误；能重新读 CPUID 就认为已复位
+            time.sleep(0.25)
+            try:
+                client.read_words(0xE000ED00, 1)
+                self.add_log("已复位目标 (SYSRESETREQ, 写回读报错但目标已响应)")
+                return {"ok": True, "method": "SYSRESETREQ", "warning": err}
+            except Exception:
+                raise RuntimeError("复位失败: %s / %s" % (err, exc))
+
+    def _mcu_info_path(self, model: str) -> str:
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(model or ""))[:64]
+        return os.path.join(WEB_DIR, "mcu", (safe or "unknown") + ".info.json")
+
+    def load_reginfo(self, model: str = "") -> Dict[str, Any]:
+        model = str(model or self.mcu or (self.catalog.get("meta") or {}).get("mcu") or "")
+        path = self._mcu_info_path(model)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return {"schema": 1, "model": model, "entries": []}
+        if not isinstance(data, dict):
+            return {"schema": 1, "model": model, "entries": []}
+        data.setdefault("model", model)
+        if not isinstance(data.get("entries"), list):
+            data["entries"] = []
+        return data
+
+    def import_reginfo(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """独立导入寄存器描述（与寄存器模板互不影响）。"""
+        model = str(payload.get("model") or self.mcu or
+                    (self.catalog.get("meta") or {}).get("mcu") or "").strip()
+        if not model:
+            raise RuntimeError("未指定型号，无法保存寄存器信息")
+        raw = payload.get("entries")
+        if not isinstance(raw, list) or not raw:
+            raise RuntimeError("缺少 entries 数组（或为空）")
+        keep = ("key", "kind", "periph", "reg", "bit", "addr", "offset",
+                "shift", "width", "page", "access", "reset", "static", "full",
+                "states", "values")
+        entries: List[Dict[str, Any]] = []
+        seen = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out: Dict[str, Any] = {}
+            for k in keep:
+                if k not in item:
+                    continue
+                v = item[k]
+                if k in ("addr", "offset", "shift", "width", "page"):
+                    try:
+                        v = int(v)
+                    except (TypeError, ValueError):
+                        continue
+                elif k in ("static", "full", "access", "reset", "kind",
+                           "periph", "reg", "bit", "key"):
+                    v = str(v or "")
+                elif k in ("states", "values"):
+                    if not isinstance(v, dict):
+                        continue
+                    v = {str(a): str(b)[:200] for a, b in v.items()}
+                out[k] = v
+            if not out.get("kind"):
+                out["kind"] = "bit" if out.get("bit") else "reg"
+            if out.get("static"):
+                out["static"] = out["static"][:200]
+            if out.get("full"):
+                out["full"] = out["full"][:2000]
+            entries.append(out)
+        if not entries:
+            raise RuntimeError("没有有效的 entries")
+        data = {
+            "schema": 1,
+            "model": model,
+            "source": str(payload.get("source") or "LKS32MC07x User Manual"),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "entries": entries,
+        }
+        path = self._mcu_info_path(model)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tmp, path)
+        nreg = sum(1 for e in entries if e.get("kind") != "bit")
+        # 和当前型号模板做一次 key 对账，方便发现导错型号/旧版本
+        unmatched = 0
+        try:
+            tpl_path = os.path.join(WEB_DIR, "mcu",
+                                    re.sub(r"[^A-Za-z0-9_.-]+", "_", model)[:64] + ".json")
+            with open(tpl_path, "r", encoding="utf-8") as f:
+                tpl = json.load(f)
+            keys = set()
+            for p in tpl.get("peripherals") or []:
+                pn = str(p.get("name") or "")
+                for r in p.get("regs") or []:
+                    rk = pn + "." + str(r.get("name") or "")
+                    keys.add(rk)
+                    for b in r.get("bits") or []:
+                        keys.add(rk + "." + str(b.get("name") or ""))
+            unmatched = sum(1 for e in entries if e.get("key") not in keys)
+        except Exception:
+            pass
+        self.add_log("寄存器信息已导入: %s (%d 条, %d 寄存器描述, %d 条与模板不匹配)" % (
+            model, len(entries), nreg, unmatched))
+        return {"ok": True, "model": model, "counts": {
+            "entries": len(entries), "registers": nreg,
+            "bits": len(entries) - nreg, "unmatched": unmatched}, "path": path}
+
     def write_value(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         src = self.source
         if src is None:
@@ -1875,6 +2062,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.app.catalog)
             if path == "/api/profiles":
                 return self._json(self.app.profiles_payload())
+            if path == "/api/reginfo":
+                qs = parse_qs(urlparse(self.path).query)
+                model = (qs.get("model") or [""])[0]
+                return self._json(self.app.load_reginfo(model))
             if path == "/api/history/next":
                 qs = parse_qs(urlparse(self.path).query)
                 after = None
@@ -1967,6 +2158,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.app.build_profile(payload.get("id")))
             if path == "/api/chip/probe":
                 return self._json(self.app.probe_chip_now())
+            if path == "/api/read":
+                return self._json(self.app.read_value(payload))
+            if path == "/api/reset":
+                return self._json(self.app.reset_target())
+            if path == "/api/reginfo/import":
+                return self._json(self.app.import_reginfo(payload))
             if path == "/api/write":
                 return self._json(self.app.write_value(payload))
             if path == "/api/record":
@@ -2105,7 +2302,10 @@ class Server(ThreadingHTTPServer):
 def parse_args(argv: Optional[Sequence[str]] = None):
     ap = argparse.ArgumentParser(description="MotorScope - OpenOCD motor current scope")
     ap.add_argument("--port", type=int, default=8765, help="HTTP 端口 (默认 8765)")
-    ap.add_argument("--host", default="127.0.0.1", help="HTTP 绑定地址")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="本地 HTTP 绑定地址（默认 127.0.0.1；0.0.0.0 会同时把本地端口开到局域网）")
+    ap.add_argument("--lan-port", type=int, default=80,
+                    help="局域网固定出口端口（默认 80；0=不额外开 80，沿用本地端口）")
     ap.add_argument("--project", default="", help="DR2159_Project 目录")
     ap.add_argument("--axf", default="", help="AXF 路径")
     ap.add_argument("--header", default="", help="cw32l011.h 路径")
@@ -2120,6 +2320,77 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     ap.add_argument("--rate", type=float, default=100.0, help="默认采样率 Hz")
     ap.add_argument("--verbose", action="store_true", help="打印 OpenOCD / HTTP 日志")
     return ap.parse_args(argv)
+
+
+def _lan_rank(ip: str) -> Tuple[int, str]:
+    """局域网地址排序：默认路由/常见家用网段优先，虚拟网卡（172.x）靠后."""
+    if ip.startswith("192.168."):
+        return (0, ip)
+    if ip.startswith("10."):
+        return (1, ip)
+    if ip.startswith("172."):
+        try:
+            second = int(ip.split(".")[1])
+        except (ValueError, IndexError):
+            second = 0
+        if 16 <= second <= 31:
+            return (2, ip)
+    return (3, ip)
+
+
+def lan_ipv4_addresses() -> List[str]:
+    """本机可用的 IPv4 地址（默认路由优先，其次 192.168/10/172.16-31）."""
+    ips = set()
+    default_ip = ""
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET, socket.SOCK_STREAM):
+            ip = str(info[4][0])
+            if ip.startswith("127.") or ip.startswith("169.254.") or ip == "0.0.0.0":
+                continue
+            ips.add(ip)
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))   # 只查路由，不真正发包
+            default_ip = str(s.getsockname()[0])
+            if default_ip and not default_ip.startswith("127.") and default_ip != "0.0.0.0":
+                ips.add(default_ip)
+        finally:
+            s.close()
+    except OSError:
+        pass
+    ordered = sorted(ips, key=_lan_rank)
+    if default_ip and default_ip in ordered:
+        ordered.remove(default_ip)
+        ordered.insert(0, default_ip)
+    return ordered
+
+
+def setup_windows_portproxy(lan_port: int, local_port: int) -> Tuple[bool, str]:
+    """把 0.0.0.0:<lan_port> 转发到 127.0.0.1:<local_port>（需管理员）.
+
+    只更新已存在的 v4tov4 规则；不新增，避免和别的 80 服务冲突。
+    """
+    if os.name != "nt":
+        return False, "仅 Windows 支持 portproxy"
+    netsh = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                         "System32", "netsh.exe")
+    if not os.path.isfile(netsh):
+        netsh = "netsh"
+    cmd = [netsh, "interface", "portproxy", "set", "v4tov4",
+           "listenport=%d" % lan_port, "listenaddress=0.0.0.0",
+           "connectport=%d" % local_port, "connectaddress=127.0.0.1"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return False, str(exc)
+    if p.returncode == 0:
+        return True, ""
+    msg = ((p.stdout or "") + (p.stderr or "")).strip()
+    return False, (msg[:300] or "netsh 返回 %d" % p.returncode)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -2147,9 +2418,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 1
             port += 1
     server.app = app  # type: ignore[attr-defined]
+    lan_port = int(getattr(args, "lan_port", 0) or 0)
+    lan_server = None
+    lan_proxy = False
+    lan_active_port = port
+    lan_error = ""
+    lan_attempt = bool(lan_port) and lan_port != port
+    if lan_attempt:
+        try:
+            lan_server = Server(("0.0.0.0", lan_port), Handler)
+            lan_server.app = app  # type: ignore[attr-defined]
+            lan_active_port = lan_port
+        except OSError as exc:
+            lan_error = str(exc)
+            # 80 常被 Windows iphlpsvc 的 portproxy 占着；改规则指向本地端口
+            ok, msg = setup_windows_portproxy(lan_port, port)
+            if ok:
+                lan_proxy = True
+                lan_error = ""
+                lan_active_port = lan_port
+            else:
+                lan_error = "%s；portproxy: %s" % (exc, msg)
+                lan_active_port = port
+
+    lan_visible = bool(lan_server or lan_proxy or
+                       (args.host in ("0.0.0.0", "", "::") and lan_port in (0, port)))
     url = "http://%s:%d/" % (args.host if args.host != "0.0.0.0" else "127.0.0.1", port)
+    lan = lan_ipv4_addresses() if (lan_visible or lan_error) else []
     print("MotorScope %s" % VERSION)
     print("  UI   : %s" % url)
+    if lan_visible:
+        for i, ip in enumerate(lan):
+            print("  %s: http://%s:%d/" % ("LAN " if i == 0 else "LAN+", ip, lan_active_port))
+        if lan_server is not None:
+            print("  INFO : 局域网固定出口 :%d（本地端口变化不影响）" % lan_active_port)
+        elif lan_proxy:
+            print("  INFO : 局域网 :%d 由 Windows portproxy 转发到 127.0.0.1:%d"
+                  % (lan_active_port, port))
+        print("  WARN : 局域网可读/写目标内存、复位；无鉴权，仅限可信网络")
+        app.add_log("局域网端口 %d（本地 %d，无鉴权）" % (lan_active_port, port))
+    elif lan_error:
+        print("  WARN : 局域网 %d 端口不可用（%s），本地仍可用"
+              % (lan_port, lan_error))
+        print("         管理员可执行: netsh interface portproxy set v4tov4 "
+              "listenport=%d listenaddress=0.0.0.0 connectport=%d "
+              "connectaddress=127.0.0.1" % (lan_port, port))
+    else:
+        print("  LAN  : 关闭（--lan-port 0 或 --host 127.0.0.1）")
     print("  AXF  : %s" % app.axf)
     print("  JSON : %s" % app.signals_path)
     oc = app._openocd_info()
@@ -2163,6 +2478,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             pass
     atexit.register(_atexit)
     app.sampler.start()
+
+    if lan_server is not None:
+        threading.Thread(target=lan_server.serve_forever,
+                         kwargs={"poll_interval": 0.25},
+                         name="motor-scope-lan", daemon=True).start()
 
     if args.open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -2188,6 +2508,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("\n退出...")
     finally:
         app.shutdown()
+        if lan_server is not None:
+            try:
+                lan_server.shutdown()
+                lan_server.server_close()
+            except Exception:
+                pass
         server.shutdown()
         server.server_close()
     return 0

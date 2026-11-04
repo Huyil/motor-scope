@@ -14,6 +14,7 @@ HTTP 读取（`scope_server` 静态目录就是 `web/`）：
 | `GET /mcu/CH32V203C8T6.json` | CH32V203C8T6（LQFP48） |
 | `GET /mcu/CH32V203K8T6.json` | CH32V203K8T6（LQFP32） |
 | `GET /mcu/LKS32MC07x.json` | LKS32MC07x（Linko Cortex-M0） |
+| `GET /mcu/LKS32MC07x.info.json` | LKS32MC07x 寄存器描述（手册 v1.69 抽取，独立导入） |
 
 后端 `scope_server.load_mcu_index()` 读同一个 `index.json`，`/api/chip/probe` 用其中的
 `identify` 与 `flash_kb` 做型号识别；`web/app.js` 的 `peripheralList()` 按
@@ -29,6 +30,7 @@ HTTP 读取（`scope_server` 静态目录就是 `web/`）：
 | CH32V203C8T6 | `CH32V203C8T6.json` | 315,302 B (307.9 KiB) | 51 | 1090 | 5764 | LQFP48 |
 | CH32V203K8T6 | `CH32V203K8T6.json` | 315,302 B (307.9 KiB) | 51 | 1090 | 5764 | LQFP32 |
 | LKS32MC07x | `LKS32MC07x.json` | 96,934 B (94.7 KiB) | 30 | 410 | 1542 | — |
+| LKS32MC07x 描述 | `LKS32MC07x.info.json` | ~752 KiB | — | 401 | 1515 | 手册 v1.69 |
 | 索引 | `index.json` | 5,142 B | — | — | — | — |
 | **合计** | | **~1.1 MB** | **233** | **3710** | **20269** | |
 
@@ -229,6 +231,24 @@ CW32L010 使用同一家族布局；CW32L012 的 `note` 已注明“未逐型号
 | `flash_kb` | CH32 | ESIG `F_SIZE` 的期望值（KB） |
 | `exact` | 全部 | 该型号是否能被唯一确定（CH32 两型号为 `false`） |
 | `note`/`source` | 可选 | 局限说明与手册出处 |
+
+### 3.6 寄存器描述（`.info.json`）
+
+模板之外的**第二份 JSON**，只放描述，不参与地址/位偏移：
+
+```json
+{"key":"FLASH.READY.READY","kind":"bit","periph":"FLASH","reg":"READY","bit":"READY",
+ "addr":131096,"offset":24,"size":4,"shift":0,"width":1,
+ "static":"FLASH 忙/闲状态",
+ "states":{"0":"FLASH 处于 Busy 状态","1":"FLASH 处于 Idle 状态"},
+ "values":null,
+ "full":"READY[0]：1 表示 FLASH 处于 Idle 状态...","access":"RO","reset":"0","page":99}
+```
+
+- 扁平 `entries` 数组，key 与模板一致；前端加载成 Map；
+- 1 bit 用 `states`，多 bit 枚举用 `values`，纯数值只留 `static`；
+- 独立导入：`POST /api/reginfo/import`，只写 `web/mcu/<型号>.info.json`；
+- 抽取/合并流程见 [docs/reginfo-extraction.md](../docs/reginfo-extraction.md)。
 
 ## 4. 抽样核对
 
