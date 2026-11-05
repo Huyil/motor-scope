@@ -3504,6 +3504,12 @@
     return (row.scale ?? 1) !== 1 || (row.offset ?? 0) !== 0;
   }
 
+  function hasCustomCalibration(row) {
+    if (!row) return false;
+    if (row.kind === 'virtual') return String(row.unit || '').trim() !== '';
+    return (row.scale ?? 1) !== 1 || (row.offset ?? 0) !== 0 || String(row.unit || '').trim() !== '';
+  }
+
   function rawValue(row, vals) {
     if (!row) return null;
     if (row.kind === 'virtual') {
@@ -3522,16 +3528,9 @@
     return v === undefined || v === null || !isFinite(v) ? null : v;
   }
 
-  // 同一组里只要有一个未换算（或单位不一致），整组按原始值画
-  function paneUseScale(rows) {
-    if (!rows || !rows.length) return false;
-    if (!rows.every(isCalibrated)) return false;
-    const units = new Set(rows.map((r) => String(r.unit || '').trim().toLowerCase()));
-    return units.size === 1;
-  }
-
   function plotValue(row, vals, pane) {
-    return pane && pane.useScale ? rowValue(row, vals) : rawValue(row, vals);
+    // 共享组也按每行自己的换算值绘制；未设置换算的行 scale=1/offset=0，等价原始值。
+    return rowValue(row, vals);
   }
 
   function convertedValue(row, raw) {
@@ -4907,7 +4906,12 @@
         ? row.name + ' · 数组平均 · ' + (row.unit || '')
         : row.name + ' · ' + hex(row.addr) + ' · ' + (row.unit || '') + (row.step ? ' · step' : '') +
           '\n单击聚焦（其他路淡出），再次单击取消';
-      chip.innerHTML = '<span class="dot"></span><span class="lname"></span><span class="lax"></span><span class="lval">—</span>';
+      chip.innerHTML = '<span class="lmod"></span><span class="dot"></span><span class="lname"></span><span class="lax"></span><span class="lval">—</span>';
+      const lmod = chip.querySelector('.lmod');
+      if (hasCustomCalibration(row)) {
+        lmod.textContent = '※';
+        lmod.title = '已修改换算/单位';
+      }
       const dot = chip.querySelector('.dot');
       dot.style.background = row.color;
       dot.style.color = row.color;
@@ -5060,6 +5064,25 @@
     D.calAxis.value = row.axis === 'right' ? 'right' : 'left';
     D.calScale.disabled = row.kind === 'virtual';
     D.calOffset.disabled = row.kind === 'virtual';
+    const hint = $('#calibHint');
+    if (hint) {
+      const base = '值 = 原始 × 比例 + 偏移。提示：右键图例里变暗的通道也能打开这里。';
+      if (row.kind === 'virtual') {
+        hint.textContent = base + ' 数组平均虚拟行：比例/偏移不可直接改；波形使用源行换算后的平均值，单位/轴只影响显示。';
+      } else if (!plotRows().some((r) => r.id === row.id)) {
+        hint.textContent = base + ' 该行当前未开波形；换算会反映在数值表/悬浮值；如果它被数组 AVG 引用，也会进入 AVG 波形。';
+      } else {
+        const group = S.wave.groups.find((g) => g.id === (row.groupId || 'default'));
+        const peers = plotRows().filter((r) => (r.groupId || 'default') === (row.groupId || 'default'));
+        if (group && !group.auto && peers.length > 1) {
+          hint.textContent = base + ' 当前共享组有 ' + peers.length + ' 路：每行按各自换算值绘制，未设置的行按原始值绘制。';
+        } else if (isCalibrated(row)) {
+          hint.textContent = base + ' 当前波形会使用换算值。';
+        } else {
+          hint.textContent = base + ' 当前只设置了单位/轴，数值仍是原始值（比例为 1、偏移为 0）；Y 轴会显示新单位。';
+        }
+      }
+    }
     D.calibModal.classList.remove('hidden');
     setTimeout(() => D.calScale.focus(), 30);
   }
@@ -5093,7 +5116,9 @@
     S.dirty = true;
     closeCalibModal();
     toast('已更新换算：' + shortName(row.name) +
-      (isCalibrated(row) ? ' · ' + row.scale + '× + ' + row.offset + (row.unit ? ' ' + row.unit : '') : ' · 未设置'), 'ok');
+      (isCalibrated(row)
+        ? ' · ' + row.scale + '× + ' + row.offset + (row.unit ? ' ' + row.unit : '')
+        : (row.unit ? ' · 单位 ' + row.unit : ' · 未设置换算')), 'ok');
   }
 
   // ---------------------------------------------------------------- chart
@@ -5258,8 +5283,8 @@
       const pane = panes[pi];
       pane.top = y0 + pi * (each + gap);
       pane.h = each;
-      pane.useScale = paneUseScale(pane.rows);
-      pane.unit = pane.useScale ? String(pane.rows[0].unit || '').trim() : '';
+      const paneUnits = new Set(pane.rows.map((r) => String(r.unit || '').trim()).filter(Boolean));
+      pane.unit = paneUnits.size === 1 ? [...paneUnits][0] : '';
       pane.range = axisRange(pane.rows, pane) || { min: 0, max: 1 };
       pane.Y = (v) => pane.top + pane.h - ((v - pane.range.min) / Math.max(1e-9, pane.range.max - pane.range.min)) * pane.h;
       pane.primary = pane.rows[0] || null;
@@ -5535,19 +5560,8 @@
       const pane = (view.panes || []).find((p) => p.rows.includes(row));
       const v = plotValue(row, near[1], pane);
       if (v === null) continue;
-      const unit = pane && pane.useScale ? String(row.unit || '') : '';
-      let main;
-      if (pane && pane.useScale) {
-        main = fmtPhysical(row, v) + (unit ? ' ' + unit : '');
-      } else {
-        main = fmtTableNum(v);
-        if (isCalibrated(row)) {
-          const cv = convertedValue(row, rawValue(row, near[1]));
-          if (cv !== null) {
-            main += ' <span class="ct-conv">→ ' + esc(fmtTableNum(cv) + (row.unit ? ' ' + row.unit : '')) + '</span>';
-          }
-        }
-      }
+      const unit = String(row.unit || '');
+      const main = (row.kind === 'virtual' ? fmtTableNum(v) : fmtPhysical(row, v)) + (unit ? ' ' + unit : '');
       rows.push('<div class="ct-row"><span class="dot" style="background:' + row.color + ';color:' + row.color + '"></span>' +
         '<span>' + esc(shortName(row.name)) + '</span><span class="v">' + main + '</span></div>');
     }

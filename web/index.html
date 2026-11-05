@@ -374,7 +374,7 @@
       <label>单位<input id="calUnit" type="text" placeholder="如 V / A / °C"></label>
       <label>轴<select id="calAxis"><option value="left">左轴</option><option value="right">右轴</option></select></label>
     </div>
-    <p class="hint">值 = 原始 × 比例 + 偏移。同组波形只要有一个未换算，整组按原始值绘制；鼠标悬浮时换算行会额外显示换算值。提示：右键图例里变暗的通道也能打开这里。</p>
+    <p class="hint" id="calibHint">值 = 原始 × 比例 + 偏移。共享组内每行按各自换算值绘制，未设置换算的行按原始值绘制；有换算/单位的通道在波形图例左侧标 ※。提示：右键图例里变暗的通道也能打开这里。</p>
     <div class="calib-foot"><button id="btnCalibCancel" class="btn">取消</button><button id="btnCalibApply" class="btn primary">应用</button></div>
   </div>
 </div>

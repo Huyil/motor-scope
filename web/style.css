@@ -692,6 +692,8 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .legend-chip:hover { border-color: var(--line2); }
 .legend-chip.off { opacity: .38; }
 .legend-chip .dot { width: 7px; height: 7px; }
+.legend-chip .lmod { color: #fbbf24; font-size: 10px; line-height: 1; flex: 0 0 auto; }
+.legend-chip .lmod:empty { display: none; }
 .legend-chip .lname { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .legend-chip .lax { font-family: var(--mono); font-size: 8px; line-height: 1; color: #9db2ca; border: 1px solid var(--line2); border-radius: 3px; padding: 1px 3px; flex: 0 0 auto; }
 .legend-chip .lval { font-family: var(--mono); color: var(--text); margin-left: 2px; font-variant-numeric: tabular-nums; }
