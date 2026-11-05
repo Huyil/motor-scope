@@ -2239,6 +2239,12 @@
       if (spec.write !== undefined && setWriteFlagForRow(row, !!spec.write)) {
         changed = true;
       }
+      if (typeof spec.color === 'string' &&
+          /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(spec.color) &&
+          row.color !== spec.color) {
+        row.color = spec.color;
+        changed = true;
+      }
       if (row.table || row.plot) {
         if (row.support) { row.support = false; changed = true; }
         const g = waveGroupFor(row);

@@ -85,7 +85,8 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | --- | --- |
 | `GET /api/status` | 连接状态、实际采样率、`generation`、`history` 点数、`oldest_t`/`latest_t`、`config.signals`、`lan.ips/port`（分享链接优先用 192.*） |
 | `GET /api/config` | 只读当前共享采样配置：`signals`（与 history 列同序）、`rate`、`generation`、`signal_flags`。**没有空表语义**；之前误用的 GET 现在是合法只读接口 |
-| `GET /api/signal-flags` | API 侧表/波/写覆盖：`{"ok":true,"flags":{id:{table,plot,write}}}` |
+| `GET /api/docs` | 人类可读的 API 文档页（HTML，实时渲染自本文件；`?format=md` 返回 Markdown 原文） |
+| `GET /api/signal-flags` | API 侧表/波/写/颜色覆盖：`{"ok":true,"flags":{id:{table,plot,write}}}` |
 | `GET /api/catalog` | 当前机型的变量/外设，地址/类型/位域/默认堵转信号；变量可带 `desc`（由 `profiles/<ID>/annotations.json` 合并） |
 | `GET /api/reginfo?model=<ID>` | 该型号的寄存器描述（entries 数组；没有就返回空） |
 | `GET /api/profiles` | 机型列表：`id/name/mcu/arch/available/variables/peripherals/source_axf` + `active` |
@@ -101,7 +102,7 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `POST /api/share` | 保存当前前端快照（信号集 + 分组布局 + 时间窗口/图表开关），返回 `{"ok":true,"id":"..."}`；链接 `#share=<id>` |
 | `POST /api/view` | `{"clientId":"c1","label":"dsh","visible":["信号id",...],"layout":{groups,rows,table,plot,axes,write}}`：上报本端表/波显示集合与波形分组布局，用于其他端“正在查看”提示、删除确认和“复制布局”；`layout.write` 为写入模块快照；不影响采样 |
 | `POST /api/config` | `{"signals":[...],"rate":100}`，**单调试器共享采样配置**：应用后广播 `config` 给所有 SSE 客户端；通道变了清历史。多客户端时新客户端采用服务器当前配置，不自动覆盖 |
-| `POST /api/signal-flags` | `{"id":"x","table":true,"plot":false,"write":false}` 或批量 `{"flags":{"id":{...}}}`；`read:true` 只做一次读取，`clear:true` 撤销该 id 的覆盖。浏览器轮询/SSE 应用后重新下发采样配置 |
+| `POST /api/signal-flags` | `{"id":"x","table":true,"plot":false,"write":false,"color":"#22d3ee"}` 或批量 `{"flags":{"id":{...}}}`；`read:true` 只做一次读取，`clear:true` 撤销该 id 的覆盖。浏览器轮询/SSE 应用后重新下发采样配置 |
 | `POST /api/record` | `{"active":true}` 开始后端录制 |
 | `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach"}` 重新连 |
 | `POST /api/disconnect` | 断开并释放 OpenOCD/H7-TOOL |
@@ -193,9 +194,11 @@ POST /api/record-cache/save               # 标记当前会话 saved=true, clear
 
 ### 5.2 API 侧表 / 波 / 写 / 读
 
-- `POST /api/signal-flags` 只影响 UI 的“表/波/写”开关；打开页面收到 SSE `flags`（或 3s 轮询
-  `GET /api/signal-flags`）后应用并重新 POST `/api/config`。**没有表/波/写任何一项的行不会进入采样**，
-  因此 `/api/config` 与 `/api/history` 的列会减少。
+- `POST /api/signal-flags` 影响 UI 的“表/波/写”开关和波形颜色；打开页面收到 SSE `flags`
+  （或 3s 轮询 `GET /api/signal-flags`）后应用并重新 POST `/api/config`。
+  **没有表/波/写任何一项的行不会进入采样**，因此 `/api/config` 与 `/api/history` 的列会减少。
+- `color` 接受 `#RGB` / `#RRGGBB`（可省略 `#`）；会立即同步到 `/api/config` 的
+  `config.signals[].color`（已采样行），并广播给页面，用于图例/波形颜色。
 - `write:true` 等价于把该信号加入写入模块；`write:false` 移除。写入仍需页面手动解锁。
 - `read:true` 是一次性读取，**不会**变成开关；也可继续用 `POST /api/read` 按地址读。
 - API 覆盖是服务端内存态（重启丢失）；页面本地手动点表/波/写会撤销对应 id 的 API 覆盖。

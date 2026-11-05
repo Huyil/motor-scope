@@ -54,6 +54,24 @@ class SignalFlagsTest(unittest.TestCase):
         # 采样通道没有被 read 改变
         self.assertEqual(len(self.app.sampler.signals), len(self.ids))
 
+    def test_color_update_and_validation(self):
+        sid = self.ids[0]
+        res = self.app.set_signal_flags({"id": sid, "color": "#ff8800"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["flags"][sid]["color"], "#ff8800")
+        cfg = self.app.config_payload()
+        active = [s for s in cfg["signals"] if s["id"] == sid]
+        self.assertTrue(active)
+        self.assertEqual(active[0]["color"], "#ff8800")
+        # 允许省略 #，统一补成 #RRGGBB
+        res = self.app.set_signal_flags({"id": sid, "color": "0af"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["flags"][sid]["color"], "#0af")
+        # 非法颜色整单拒绝
+        bad = self.app.set_signal_flags({"id": sid, "color": "red"})
+        self.assertFalse(bad["ok"])
+        self.assertIn("颜色格式", bad["error"])
+
     def test_unknown_signal_rejected(self):
         res = self.app.set_signal_flags({"id": "no.such.signal", "plot": True})
         self.assertFalse(res["ok"])

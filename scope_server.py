@@ -42,6 +42,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
+import api_docs
 import profiles
 from record_cache import RecordCache
 
@@ -1130,7 +1131,7 @@ class App:
         self.shares_lock = threading.Lock()
         self.shares = self._load_shares()
         # API 侧“表/波/写”开关（浏览器轮询/SSE 应用；服务端不直接改采样列）
-        self.signal_flags: Dict[str, Dict[str, bool]] = {}
+        self.signal_flags: Dict[str, Dict[str, Any]] = {}
         self.signal_flags_lock = threading.Lock()
         # 机型工程: 一个机型 = 一套符号表 + 芯片/连接参数 + 前端配置
         self.profiles_root = PROFILES_DIR
@@ -1679,7 +1680,7 @@ class App:
             "port": int(getattr(self, "lan_port", 0) or 0),
         }
 
-    def signal_flags_snapshot(self) -> Dict[str, Dict[str, bool]]:
+    def signal_flags_snapshot(self) -> Dict[str, Dict[str, Any]]:
         with self.signal_flags_lock:
             return {str(k): dict(v) for k, v in self.signal_flags.items()}
 
@@ -1716,10 +1717,12 @@ class App:
         }
 
     def set_signal_flags(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """更新 API 侧表/波/写开关；read=true 只做一次读取，不落开关。
+        """更新 API 侧表/波/写/颜色；read=true 只做一次读取，不落开关。
 
-        请求：{"id":"x","table":true,"plot":false,"write":false,"read":true,"clear":false}
+        请求：{"id":"x","table":true,"plot":false,"write":false,"color":"#22d3ee",
+               "read":true,"clear":false}
         或批量：{"flags":{"id1":{"table":true}, "id2":{"clear":true}}}
+        color 接受 #RGB / #RRGGBB（可省略 #）；read 只读一次，不落开关。
         """
         raw_batch = payload.get("flags") if isinstance(payload.get("flags"), dict) else None
         specs: Dict[str, Dict[str, Any]] = {}
@@ -1733,8 +1736,8 @@ class App:
                 return {"ok": False, "error": "缺少 id"}
             specs[sid] = {
                 "table": payload.get("table"), "plot": payload.get("plot"),
-                "write": payload.get("write"), "read": payload.get("read"),
-                "clear": payload.get("clear"),
+                "write": payload.get("write"), "color": payload.get("color"),
+                "read": payload.get("read"), "clear": payload.get("clear"),
             }
         updated = []
         read_result = None
@@ -1750,6 +1753,16 @@ class App:
                     return {"ok": False, "error": "未知信号 id: %s" % sid}
                 entry = current.get(sid, {})
                 touched = False
+                color = None
+                if "color" in spec and spec.get("color") is not None:
+                    raw_color = str(spec.get("color")).strip()
+                    if raw_color and not raw_color.startswith("#"):
+                        raw_color = "#" + raw_color
+                    if not re.fullmatch(r"#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})", raw_color):
+                        return {"ok": False, "error": "颜色格式应为 #RGB 或 #RRGGBB"}
+                    entry["color"] = raw_color
+                    color = raw_color
+                    touched = True
                 for key in ("table", "plot", "write"):
                     if key in spec and spec.get(key) is not None:
                         entry[key] = bool(spec[key])
@@ -1757,6 +1770,18 @@ class App:
                 if touched:
                     current[sid] = entry
                     updated.append(sid)
+                if color:
+                    # 已采样的 Signal 立即同步颜色（/api/config 与 status 立刻可见）
+                    try:
+                        with self.sampler._lock:
+                            for active in self.sampler.signals:
+                                if str(active.id) == sid:
+                                    active.color = color
+                    except Exception:
+                        pass
+                    for item in self.catalog.get("variables", []) or []:
+                        if str(item.get("id") or item.get("name") or "") == sid:
+                            item["color"] = color
                 if spec.get("read"):
                     try:
                         bit = [sig.shift, sig.width] if sig.width else None
@@ -2419,6 +2444,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.app.load_reginfo(model))
             if path == "/api/config":
                 return self._json(self.app.config_payload())
+            if path == "/api/docs":
+                # 每次请求重新读取 API.md，改文档不需要重启；?format=md 返回原文。
+                qs = parse_qs(urlparse(self.path).query)
+                fmt = (qs.get("format") or [""])[0].lower()
+                try:
+                    markdown_text = api_docs.read_doc()
+                except OSError as exc:
+                    return self._json(
+                        {"ok": False, "error": "无法读取 API.md: %s" % exc}, 500)
+                if fmt == "md":
+                    return self._bytes(markdown_text.encode("utf-8"),
+                                       "text/markdown; charset=utf-8")
+                page = api_docs.render_page(markdown_text, version=VERSION)
+                return self._bytes(page.encode("utf-8"),
+                                   "text/html; charset=utf-8",
+                                   extra={"X-Content-Type-Options": "nosniff"})
             if path == "/api/signal-flags":
                 return self._json({"ok": True,
                                    "flags": self.app.signal_flags_snapshot()})
