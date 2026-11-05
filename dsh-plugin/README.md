@@ -33,10 +33,13 @@ DSH 里的 MotorScope 面板：左侧栏新增一个 `sidebar.panellist` 行（�
 ## 局域网
 
 - **默认关闭**：不启动 0.0.0.0 监听，也不加 80 portproxy/防火墙规则。
-- 第一开关“局域网共享”：用当前 MotorScope 端口监听 `0.0.0.0`，首次会弹 Windows
-  防火墙提示；面板显示共享地址 `http://<IP>:<端口>/`。
-- 第二开关“80 端口”（可选）：再开 portproxy 80 → 当前端口 + 防火墙规则，
+- 第一开关“局域网共享”：启动独立的 Windows TCP 转发器
+  `dsh-lan-forward.py`（`0.0.0.0:<系统分配端口>` → `127.0.0.1:<MotorScope端口>`）；
+  **不重启 scope_server.py**，采样/OpenOCD 连接不断。首次监听会弹 Windows 防火墙提示；
+  面板显示实际共享地址 `http://<IP>:<端口>/`。
+- 第二开关“80 端口”（可选）：再开 portproxy 80 → 当前 MotorScope 端口 + 防火墙规则，
   显示 `http://<IP>/`；需要管理员权限。
+- 转发器是独立进程，开/关只启动/停止它，不碰主服务；端口由系统分配，避免冲突。
 - Windows IPv4 自动探测（`[System.Net.Dns]` + `Get-NetIPAddress`），**优先 192.168.\***，
   其次 10.x / 172.16-31；不写死 `192.168.0.71`。
 - iframe 会带 `?lan=<当前共享URL>`；MotorScope 的分享链接优先使用它。

@@ -9,10 +9,11 @@
  * The browser talks to /motorscope/api/* on the DSH origin; the page itself is
  * served by the Windows process and embedded as an iframe by the client half.
  */
-import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-motorscope'
 export const inject = ['webServer']
@@ -25,6 +26,14 @@ const WIN_PYTHON = WIN_PROJECT + '\\runtime\\python\\python.exe'
 const WSL_PYTHON = WSL_PROJECT + '/runtime/python/python.exe'
 const WIN_LAUNCHER = WIN_PROJECT + '\\runtime\\dsh-launch.cmd'
 const WSL_LAUNCHER = WSL_PROJECT + '/runtime/dsh-launch.cmd'
+const WIN_FORWARDER = WIN_PROJECT + '\\runtime\\dsh-lan-forward.py'
+const WSL_FORWARDER = WSL_PROJECT + '/runtime/dsh-lan-forward.py'
+const WIN_FORWARD_READY = WIN_PROJECT + '\\runtime\\dsh-lan-forward.port'
+const WSL_FORWARD_READY = WSL_PROJECT + '/runtime/dsh-lan-forward.port'
+const WIN_FORWARD_LOG = WIN_PROJECT + '\\runtime\\dsh-lan-forward.log'
+const WIN_FORWARD_OUT = WIN_PROJECT + '\\runtime\\dsh-lan-forward.out'
+const WSL_FORWARD_OUT = WSL_PROJECT + '/runtime/dsh-lan-forward.out'
+const PLUGIN_FORWARDER = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lan_forward.py')
 const DEFAULT_ARGS = ['--auto', '--port', '8765']
 const API_PREFIX = '/motorscope/api'
 
@@ -116,6 +125,16 @@ async function ps(script, timeout = 20000) {
     }
   }
   throw lastError ?? new Error('powershell.exe not found')
+}
+
+/** Fire-and-forget a PowerShell snippet; ignore stdio so a long-lived child cannot hold our pipes. */
+function spawnDetached(script) {
+  const bin = psBin || PS_CANDIDATES[0]
+  const child = spawn(bin, [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script,
+  ], { detached: true, stdio: 'ignore', windowsHide: true })
+  child.unref()
+  return child.pid || 0
 }
 
 function sleep(ms) {
@@ -285,6 +304,18 @@ function winQuote(argument) {
   return /[\s&|<>^"]/.test(text) ? '"' + text.replace(/"/g, '\\"') + '"' : text
 }
 
+/** The plugin manages LAN via the independent forwarder; never bind scope_server to 0.0.0.0. */
+function serverArgs(args) {
+  const out = []
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i])
+    if (a === '--host' || a === '--lan-port') { i++; continue }
+    if (a.startsWith('--host=') || a.startsWith('--lan-port=')) continue
+    out.push(a)
+  }
+  return out
+}
+
 function launcherText(args) {
   const python = existsSync(WSL_PYTHON) ? WIN_PYTHON : 'python.exe'
   return [
@@ -298,6 +329,7 @@ function launcherText(args) {
 }
 
 async function launch(args) {
+  args = serverArgs(args)
   mkdirSync(dirname(WSL_LAUNCHER), { recursive: true })
   writeFileSync(WSL_LAUNCHER, launcherText(args), 'utf8')
   const script = [
@@ -399,39 +431,111 @@ function sameOrigin(req) {
   }
 }
 
-function argValue(args, name) {
-  for (let i = 0; i < args.length; i++) {
-    const a = String(args[i])
-    if (a === name) return args[i + 1] ?? ''
-    if (a.startsWith(name + '=')) return a.slice(name.length + 1)
-  }
-  return null
+const FORWARD_DISCOVER_SCRIPT = String.raw`
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+$ErrorActionPreference='SilentlyContinue'
+$rows=@()
+$procs=@(Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object { $_.CommandLine -match 'dsh-lan-forward\.py' })
+foreach($p in $procs){
+  $rows += [pscustomobject]@{ pid=$p.ProcessId; cmd=$p.CommandLine }
+}
+@{ rows = @($rows) } | ConvertTo-Json -Compress -Depth 3
+`
+
+function ensureForwarderScript() {
+  if (!existsSync(PLUGIN_FORWARDER)) throw new Error('缺少 scripts/lan_forward.py')
+  mkdirSync(dirname(WSL_FORWARDER), { recursive: true })
+  copyFileSync(PLUGIN_FORWARDER, WSL_FORWARDER)
 }
 
-function shareFromArgs(args) {
-  const host = argValue(args, '--host')
-  return host === '0.0.0.0' || host === '::'
+/** Running forwarder processes (independent from scope_server.py). */
+async function discoverForwarder() {
+  try {
+    const { stdout } = await ps(FORWARD_DISCOVER_SCRIPT, 15000)
+    const text = String(stdout ?? '').trim()
+    const at = text.indexOf('{')
+    if (at < 0) return []
+    const data = JSON.parse(text.slice(at))
+    const raw = Array.isArray(data) ? data : (Array.isArray(data.rows) ? data.rows : [])
+    const rows = raw.map(row => ({
+      pid: Number(row.pid) || 0,
+      cmd: String(row.cmd ?? ''),
+    })).filter(row => row.pid > 0)
+    let port = 0
+    try {
+      if (existsSync(WSL_FORWARD_READY)) {
+        port = Number(readFileSync(WSL_FORWARD_READY, 'utf8').trim()) || 0
+      }
+    } catch { /* missing ready file only hides the port */ }
+    return rows.map(row => Object.assign(row, { port }))
+  } catch {
+    return []
+  }
 }
 
-function stripArg(args, name) {
-  const out = []
-  for (let i = 0; i < args.length; i++) {
-    const a = String(args[i])
-    if (a === name) { i++; continue }
-    if (a.startsWith(name + '=')) continue
-    out.push(a)
+async function stopForwarder() {
+  const rows = await discoverForwarder()
+  const pids = rows.map(row => row.pid).filter(Boolean)
+  if (pids.length > 0) {
+    const script = [
+      '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
+      "$ErrorActionPreference='SilentlyContinue'",
+      'Stop-Process -Id ' + pids.join(',') + ' -Force',
+    ].join('\n')
+    await ps(script, 10000).catch(() => {})
   }
-  return out
+  try {
+    if (existsSync(WSL_FORWARD_READY)) unlinkSync(WSL_FORWARD_READY)
+  } catch { /* ignore */ }
 }
 
-function withLanArgs(args, share) {
-  let next = stripArg(stripArg(args, '--host'), '--lan-port')
-  if (!next.includes('--port') && !next.some(a => String(a).startsWith('--port='))) {
-    next = next.concat(['--port', '8765'])
+/**
+ * Start the independent Windows-side TCP forwarder:
+ *   0.0.0.0:<actual> -> 127.0.0.1:<scope port>
+ * It does NOT restart scope_server.py; the sampler stays connected.
+ */
+async function startForwarder(targetPort) {
+  ensureForwarderScript()
+  await stopForwarder()
+  try {
+    if (existsSync(WSL_FORWARD_LOG)) unlinkSync(WSL_FORWARD_LOG)
+    if (existsSync(WSL_FORWARD_OUT)) unlinkSync(WSL_FORWARD_OUT)
+  } catch { /* ignore */ }
+  const forwarderArgs = [
+    '-u', WIN_FORWARDER,
+    '--listen', '0.0.0.0',
+    '--port', '0',
+    '--target-host', '127.0.0.1',
+    '--target-port', String(targetPort),
+    '--ready-file', WIN_FORWARD_READY,
+  ]
+  const argText = forwarderArgs.map(arg => '"' + String(arg).replace(/"/g, '\\"') + '"').join(' ')
+  const script = [
+    '[Console]::OutputEncoding=[Text.Encoding]::UTF8',
+    "$ErrorActionPreference='Stop'",
+    "Start-Process -FilePath '" + WIN_PYTHON + "' -ArgumentList '" + argText + "'"
+      + " -WorkingDirectory '" + WIN_PROJECT + "' -WindowStyle Hidden"
+      + " -RedirectStandardError '" + WIN_FORWARD_LOG + "'"
+      + " -RedirectStandardOutput '" + WIN_FORWARD_OUT + "'",
+  ].join('\n')
+  spawnDetached(script)
+  const deadline = Date.now() + 6000
+  while (Date.now() < deadline) {
+    await sleep(200)
+    try {
+      if (existsSync(WSL_FORWARD_READY)) {
+        const port = Number(readFileSync(WSL_FORWARD_READY, 'utf8').trim()) || 0
+        if (port > 0) return { pid: 0, port, targetPort }
+      }
+    } catch { /* retry */ }
   }
-  if (share) next = next.concat(['--host', '0.0.0.0'])
-  next = next.concat(['--lan-port', '0'])
-  return next
+  const rows = await discoverForwarder()
+  if (rows.length > 0 && rows[0].port > 0) {
+    return { pid: rows[0].pid, port: rows[0].port, targetPort }
+  }
+  let log = ''
+  try { log = readFileSync(WSL_FORWARD_LOG, 'utf8').slice(-800) } catch { /* ignore */ }
+  throw new Error('转发器启动失败' + (log ? '：' + log : '（详见 runtime/dsh-lan-forward.log）'))
 }
 
 const LAN_STATE_SCRIPT = String.raw`
@@ -461,21 +565,21 @@ async function lanState() {
 }
 
 async function lanShareSet(enabled) {
-  const current = await state()
-  const base = current.args && current.args.length > 0 ? current.args : DEFAULT_ARGS
-  const args = withLanArgs(base, enabled)
   if (!enabled) {
+    await stopForwarder()
     try { await lanSet(false) } catch { /* port 80 cleanup is best-effort */ }
+    return await state(true)
   }
-  const rows = await discover()
-  if (rows.length > 0) await stopRows(rows)
-  return launch(args)
+  const current = await state()
+  if (!current.running || !current.port) throw new Error('先启动 MotorScope')
+  await startForwarder(current.port)
+  return await state(true)
 }
 
 async function lanSet(enabled) {
   if (enabled) {
-    const current = await state()
-    if (!shareFromArgs(current.args)) throw new Error('先打开局域网共享')
+    const forwarders = await discoverForwarder()
+    if (forwarders.length === 0) throw new Error('先打开局域网共享')
   }
   const info = await lanInfo()
   const subnet = info.subnet || '192.168.0.0/24'
@@ -512,14 +616,15 @@ async function lanSet(enabled) {
 }
 
 async function lanPayload() {
-  const current = await state()
   const info = await lanInfo()
+  const forwarders = await discoverForwarder()
+  const forwarder = forwarders[0] || null
   let p80 = await lanState()
-  const share = shareFromArgs(current.args)
+  const share = Boolean(forwarder)
   if (!share && p80.enabled) {
     try { await lanSet(false); p80 = await lanState() } catch { /* needs admin */ }
   }
-  const port = current.port || 8765
+  const port = forwarder ? forwarder.port : 0
   return {
     share,
     port80: p80.enabled,
@@ -527,7 +632,7 @@ async function lanPayload() {
     ip: info.ip,
     subnet: info.subnet,
     port,
-    url: share && info.ip ? 'http://' + info.ip + ':' + port + '/' : '',
+    url: share && info.ip && port ? 'http://' + info.ip + ':' + port + '/' : '',
     url80: p80.enabled && info.ip ? 'http://' + info.ip + '/' : '',
     portproxy: p80.portproxy,
     firewall: p80.firewall,
