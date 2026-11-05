@@ -2703,8 +2703,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     lan_visible = bool(lan_server or lan_proxy or
                        (args.host in ("0.0.0.0", "", "::") and lan_port in (0, port)))
     url = "http://%s:%d/" % (args.host if args.host != "0.0.0.0" else "127.0.0.1", port)
-    lan = lan_ipv4_addresses() if (lan_visible or lan_error) else []
-    app.lan_ips = list(lan) if lan_visible else []
+    lan = lan_ipv4_addresses()
+    # 即使局域网共享关闭，也把本机 LAN IP 报给前端，分享链接优先用 192.*；
+    # 分享链接是否可达取决于是否打开共享（主开关/--host 0.0.0.0）。
+    app.lan_ips = list(lan)
     app.lan_port = int(lan_active_port) if lan_visible else 0
     print("MotorScope %s" % VERSION)
     print("  UI   : %s" % url)
