@@ -97,6 +97,11 @@
     cacheToken: 0,
     cacheWindowTimer: 0,
     cacheError: '',
+    // API 侧表/波/写开关（服务端 POST /api/signal-flags 下发；本地可覆盖）
+    signalFlags: {},
+    signalFlagsKey: '',
+    signalFlagsBusy: false,
+    signalFlagsTimer: 0,
     autoZero: false,
     fillOn: true,
     gridOn: true,
@@ -781,8 +786,9 @@
   }
 
   // ---------------------------------------------------------------- rows / channels
-  // 设计：S.rows 是用户拥有的行（含隐藏支撑通道、两个开关都关的行）；
-  // S.signals 只放真正要下发给 /api/config 的通道，samples 的列与它一一对应。
+  // 设计：S.rows 是用户拥有的行（含隐藏支撑通道、表/波/写全关的行）；
+  // S.signals 只放真正要下发给 /api/config 的通道：至少勾选表/波/写之一，
+  // 或作为 AVG 支撑/写入目标；samples 的列与它一一对应。
   const MAX_SAMPLED = 24;
 
   function byId(id) { return S.signals.find((s) => s.id === id) || null; }
@@ -895,7 +901,7 @@
     return ids.size;
   }
 
-  // “已选择”= 共享监视集；表/波开关只决定本端是否显示，不改变监视集
+  // “已选择”保留本地拥有的行；真正进入采样的是表/波/写至少一个打开的行（见 syncChannels）
   function selectedRows() {
     const out = [];
     const seen = new Set();
@@ -1014,6 +1020,7 @@
   function addRow(entry, opts = {}) {
     if (!entry) return null;
     const id = entry.id || entry.name;
+    clearSignalFlag(id);
     const old = S.rows.get(id);
     if (old) {
       if (opts.table !== undefined) old.table = !!opts.table;
@@ -1070,6 +1077,7 @@
   }
 
   function removeSignal(id) {
+    clearSignalFlag(id);
     const row = S.rows.get(id);
     const vr = S.virtuals.find((v) => v.id === id);
     if (!row && !vr) return;
@@ -1134,6 +1142,7 @@
 
   function setRowFlag(id, flag, on, entry) {
     if (flag !== 'table' && flag !== 'plot') return;
+    clearSignalFlag(id);
     let row = S.rows.get(id);
     if (!row) {
       if (!on) return;
@@ -1159,6 +1168,7 @@
   }
 
   function setBothFlags(id, on) {
+    clearSignalFlag(id);
     let row = S.rows.get(id);
     if (!row) {
       if (!on) return;
@@ -1192,7 +1202,16 @@
     const beforeIds = S.signals.map((s) => s.id);
     const before = beforeIds.join('|');
     const need = new Set();
-    for (const r of S.rows.values()) if (r.monitor) need.add(r.id);
+    const avgSrc = new Set();
+    for (const v of S.virtuals) for (const id of v.sourceIds) avgSrc.add(id);
+    // 只有勾选了“表/波/写”的行才进入采样；数组 AVG 的支撑通道例外。
+    for (const r of S.rows.values()) {
+      const inWrite = !!writeModForRow(r.id);
+      if (r.table || r.plot || r.writeOnly || inWrite || r.support ||
+          avgSrc.has(r.id) || r.configRole === 'support' || r.configRole === 'write') {
+        need.add(r.id);
+      }
+    }
     for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
     // 写入模块即使不在表/波形里，也要采样，才能显示当前值和回读
     for (const m of S.write.mods) if (m.rowId && S.rows.has(m.rowId)) need.add(m.rowId);
@@ -1342,6 +1361,7 @@
   }
 
   function toggleWriteRow(rowId) {
+    clearSignalFlag(rowId);
     const existing = writeModForRow(rowId);
     if (existing) {
       S.write.mods = S.write.mods.filter((m) => m !== existing);
@@ -2162,6 +2182,102 @@
     S.dirty = true;
   }
 
+  // ---- API 侧 表/波/写 开关 ----
+  function setWriteFlagForRow(row, on) {
+    if (!row) return false;
+    const existing = writeModForRow(row.id);
+    if (on) {
+      if (existing) return false;
+      if (!row.addr) return false;
+      row.monitor = true;
+      S.write.mods.push(makeWriteMod(row));
+      ensureWriteMods();
+      return true;
+    }
+    if (!existing) {
+      let changed = false;
+      if (row.writeOnly) { row.writeOnly = false; changed = true; }
+      if (row.configRole === 'write') { row.configRole = ''; changed = true; }
+      return changed;
+    }
+    S.write.mods = S.write.mods.filter((m) => m !== existing);
+    stopLiveWrite(existing);
+    stopLockWrite(existing);
+    existing.liveHeld = false;
+    row.writeOnly = false;
+    if (row.configRole === 'write') row.configRole = '';
+    ensureWriteMods();
+    return true;
+  }
+
+  function applySignalFlags(flags) {
+    if (!flags || typeof flags !== 'object') return;
+    const key = JSON.stringify(flags);
+    if (key === S.signalFlagsKey) return;
+    S.signalFlags = flags;
+    S.signalFlagsKey = key;
+    let changed = false;
+    for (const [id, spec] of Object.entries(flags)) {
+      if (!spec || typeof spec !== 'object') continue;
+      let row = S.rows.get(id);
+      if (!row) {
+        const entry = S.index.get(id);
+        if (!entry || !entry.addr) continue;
+        row = newRow(entry, { table: false, plot: false, support: false });
+        row.monitor = true;
+        S.rows.set(id, row);
+        changed = true;
+      }
+      if (spec.table !== undefined && !!row.table !== !!spec.table) {
+        row.table = !!spec.table;
+        changed = true;
+      }
+      if (spec.plot !== undefined && !!row.plot !== !!spec.plot) {
+        row.plot = !!spec.plot;
+        changed = true;
+      }
+      if (spec.write !== undefined && setWriteFlagForRow(row, !!spec.write)) {
+        changed = true;
+      }
+      if (row.table || row.plot) {
+        if (row.support) { row.support = false; changed = true; }
+        const g = waveGroupFor(row);
+        if (g) g.visible = true;
+      }
+    }
+    if (changed) {
+      ensureWaveGroups();
+      afterSignalsChanged();
+    }
+  }
+
+  async function refreshSignalFlags() {
+    if (S.signalFlagsBusy) return;
+    S.signalFlagsBusy = true;
+    try {
+      const r = await fetchJSON('/api/signal-flags', { timeout: 5000 });
+      if (r && r.ok) applySignalFlags(r.flags || {});
+    } catch {
+      // 老服务端没有该接口时保持本地开关
+    } finally {
+      S.signalFlagsBusy = false;
+    }
+  }
+
+  function startSignalFlagsPolling() {
+    if (S.signalFlagsTimer) clearInterval(S.signalFlagsTimer);
+    refreshSignalFlags();
+    S.signalFlagsTimer = setInterval(refreshSignalFlags, 3000);
+  }
+
+  // 本地手动点“表/波/写”后，撤掉该信号的 API 覆盖，避免下一次轮询又改回去
+  function clearSignalFlag(id) {
+    if (!S.signalFlags || !Object.prototype.hasOwnProperty.call(S.signalFlags, id)) return;
+    delete S.signalFlags[id];
+    S.signalFlagsKey = JSON.stringify(S.signalFlags);
+    post('/api/signal-flags', { id, clear: true }).catch(() => {});
+  }
+
   // ---------------------------------------------------------------- boot
   async function ensureBootMachine() {
     if (!S.profiles.items.length) {
@@ -2215,6 +2331,7 @@
     resizeChart();
     updateOverlay();
     startCachePolling();
+    startSignalFlagsPolling();
     connectSSE();
     setTimeout(() => maybeApplyShare(), 4000); // SSE 未及时 hello 时的分享兜底
     setTimeout(() => saveLocal(), 1500);   // 启动后把当前机型的配置自动保存一份
@@ -3037,6 +3154,17 @@
       });
       S.rows.set(row.id, row);
     }
+    // 保留本地“已选择但表/波/写全关”的行：它们不在采样集里，但用户仍要能在
+    // 已选择列表里重新打开，不能因为共享 config 里没有采样列就被清掉。
+    for (const [id, row] of prev) {
+      if (S.rows.has(id)) continue;
+      const inWrite = !!writeModForRow(id);
+      const used = S.virtuals.some((v) => v.sourceIds.indexOf(id) >= 0);
+      if (!row.table && !row.plot && !row.writeOnly && !inWrite && !row.support &&
+          row.configRole !== 'write' && row.configRole !== 'support' && !used) {
+        S.rows.set(id, row);
+      }
+    }
     if (rate) S.rate = Number(rate) || S.rate;
     if (D.rateSel) D.rateSel.value = String(S.rate);
     ensureWaveGroups();
@@ -3066,7 +3194,7 @@
   function monitorConfigPayload() {
     return {
       rate: S.rate,
-      // 共享监视集：只发 monitor 通道，表/波形可见性不影响采样
+      // 共享采样集：只有勾选表/波/写（或支撑/写入目标）的行才会进入这里
       signals: S.signals.map((s) => ({
         id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
         bit: s.bit, scale: s.scale, offset: s.offset, unit: s.unit,
@@ -3453,6 +3581,9 @@
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'hello') {
         applyStatus(msg.status);
+        if (msg.config && msg.config.signal_flags) {
+          applySignalFlags(msg.config.signal_flags);
+        }
         S.sseReady = true;
         S.clientId = String(msg.clientId || '');
         S.clientNo = Number(msg.clientNo) || 0;
@@ -3485,6 +3616,8 @@
         updatePresence(msg.presence);
       } else if (msg.type === 'status') {
         applyStatus(msg.status);
+      } else if (msg.type === 'flags') {
+        applySignalFlags(msg.flags || {});
       } else if (msg.type === 's') {
         onSamples(msg.b || []);
       }
@@ -4058,7 +4191,7 @@
     add.addEventListener('click', addWaveGroup);
     const hint = document.createElement('span');
     hint.className = 'wave-hint';
-    hint.textContent = '本端 ' + (S.clientLabel || '?') + ' · 共享 ' + ((S.presence && S.presence.length) || 1) + ' 端 · 表/波仅本端 · 拖动行 = 共享轴';
+    hint.textContent = '本端 ' + (S.clientLabel || '?') + ' · 共享 ' + ((S.presence && S.presence.length) || 1) + ' 端 · 表/波/写决定采样 · 拖动行 = 共享轴';
     const share = document.createElement('button');
     share.type = 'button';
     share.className = 'mini';

@@ -1129,6 +1129,9 @@ class App:
         self.shares_path = os.path.join(self.import_dir, "shares.json")
         self.shares_lock = threading.Lock()
         self.shares = self._load_shares()
+        # API 侧“表/波/写”开关（浏览器轮询/SSE 应用；服务端不直接改采样列）
+        self.signal_flags: Dict[str, Dict[str, bool]] = {}
+        self.signal_flags_lock = threading.Lock()
         # 机型工程: 一个机型 = 一套符号表 + 芯片/连接参数 + 前端配置
         self.profiles_root = PROFILES_DIR
         self.profile: Optional[Dict[str, Any]] = None
@@ -1676,6 +1679,106 @@ class App:
             "port": int(getattr(self, "lan_port", 0) or 0),
         }
 
+    def signal_flags_snapshot(self) -> Dict[str, Dict[str, bool]]:
+        with self.signal_flags_lock:
+            return {str(k): dict(v) for k, v in self.signal_flags.items()}
+
+    def _find_signal(self, sid: str) -> Optional[Signal]:
+        sid = str(sid or "")
+        if not sid:
+            return None
+        try:
+            for s in list(self.sampler.signals):
+                if str(s.id) == sid:
+                    return s
+        except Exception:
+            pass
+        for item in self.catalog.get("variables", []) or []:
+            if str(item.get("id") or item.get("name") or "") == sid:
+                try:
+                    return Signal(item)
+                except Exception:
+                    return None
+        return None
+
+    def config_payload(self) -> Dict[str, Any]:
+        """只读配置：与 POST /api/config 的 signals/rate 同形，附带信号开关。"""
+        with self.sampler._lock:
+            sigs = [s.to_dict() for s in self.sampler.signals]
+            rate = self.sampler.rate
+            generation = self.sampler.generation
+        return {
+            "ok": True,
+            "signals": sigs,
+            "rate": rate,
+            "generation": generation,
+            "signal_flags": self.signal_flags_snapshot(),
+        }
+
+    def set_signal_flags(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """更新 API 侧表/波/写开关；read=true 只做一次读取，不落开关。
+
+        请求：{"id":"x","table":true,"plot":false,"write":false,"read":true,"clear":false}
+        或批量：{"flags":{"id1":{"table":true}, "id2":{"clear":true}}}
+        """
+        raw_batch = payload.get("flags") if isinstance(payload.get("flags"), dict) else None
+        specs: Dict[str, Dict[str, Any]] = {}
+        if raw_batch is not None:
+            for sid, spec in raw_batch.items():
+                if isinstance(spec, dict):
+                    specs[str(sid)] = dict(spec)
+        else:
+            sid = str(payload.get("id") or "")
+            if not sid:
+                return {"ok": False, "error": "缺少 id"}
+            specs[sid] = {
+                "table": payload.get("table"), "plot": payload.get("plot"),
+                "write": payload.get("write"), "read": payload.get("read"),
+                "clear": payload.get("clear"),
+            }
+        updated = []
+        read_result = None
+        with self.signal_flags_lock:
+            current = {k: dict(v) for k, v in self.signal_flags.items()}
+            for sid, spec in specs.items():
+                if spec.get("clear"):
+                    current.pop(sid, None)
+                    updated.append(sid)
+                    continue
+                sig = self._find_signal(sid)
+                if sig is None:
+                    return {"ok": False, "error": "未知信号 id: %s" % sid}
+                entry = current.get(sid, {})
+                touched = False
+                for key in ("table", "plot", "write"):
+                    if key in spec and spec.get(key) is not None:
+                        entry[key] = bool(spec[key])
+                        touched = True
+                if touched:
+                    current[sid] = entry
+                    updated.append(sid)
+                if spec.get("read"):
+                    try:
+                        bit = [sig.shift, sig.width] if sig.width else None
+                        read_result = self.read_value({
+                            "addr": sig.addr, "size": sig.size,
+                            "signed": bool(sig.signed), "bit": bit,
+                        })
+                        read_result = dict(read_result)
+                        read_result["id"] = sid
+                    except Exception as exc:
+                        read_result = {"ok": False, "id": sid, "error": str(exc)}
+            self.signal_flags = current
+            flags = {k: dict(v) for k, v in current.items()}
+        try:
+            self.hub.publish({"type": "flags", "flags": flags})
+        except Exception:
+            pass
+        out: Dict[str, Any] = {"ok": True, "updated": updated, "flags": flags}
+        if read_result is not None:
+            out["read"] = read_result
+        return out
+
     def status_payload(self) -> Dict[str, Any]:
         src = self.source
         info = src.info() if src else {"kind": "none", "connected": False}
@@ -1700,7 +1803,9 @@ class App:
                 "signals_json": self.signals_path,
             },
             "config": {"signals": [s.to_dict() for s in self.sampler.signals],
-                       "rate": self.sampler.rate},
+                       "rate": self.sampler.rate,
+                       "signal_flags": self.signal_flags_snapshot()},
+            "signal_flags": self.signal_flags_snapshot(),
             "lan": self.lan_payload(),
             "error": self.error,
             "connect_error": self.last_connect_error,
@@ -2312,6 +2417,11 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(urlparse(self.path).query)
                 model = (qs.get("model") or [""])[0]
                 return self._json(self.app.load_reginfo(model))
+            if path == "/api/config":
+                return self._json(self.app.config_payload())
+            if path == "/api/signal-flags":
+                return self._json({"ok": True,
+                                   "flags": self.app.signal_flags_snapshot()})
             if path == "/api/history/next":
                 qs = parse_qs(urlparse(self.path).query)
                 after = None
@@ -2439,6 +2549,9 @@ class Handler(BaseHTTPRequestHandler):
                 if changed or after != before:
                     self.app.hub.publish({"type": "presence", "presence": after})
                 return self._json({"ok": True})
+            if path == "/api/signal-flags":
+                res = self.app.set_signal_flags(payload)
+                return self._json(res, 200 if res.get("ok") else 400)
             if path == "/api/config":
                 res = self.app.apply_config(payload)
                 sigs = res.get("signals") or []
@@ -2450,7 +2563,8 @@ class Handler(BaseHTTPRequestHandler):
                     s["role"] = roles.get(str(s.get("id") or ""), "signal")
                 self.app.hub.publish({"type": "config",
                                       "config": {"signals": sigs,
-                                                 "rate": res.get("rate")}})
+                                                 "rate": res.get("rate"),
+                                                 "signal_flags": self.app.signal_flags_snapshot()}})
                 return self._json(res)
             if path == "/api/profiles/switch":
                 return self._json(self.app.switch_profile(payload.get("id")))
@@ -2521,7 +2635,8 @@ class Handler(BaseHTTPRequestHandler):
                             "clientNo": cno,
                             "presence": app.presence_payload(),
                             "config": {"signals": [s.to_dict() for s in app.sampler.signals],
-                                       "rate": app.sampler.rate}})
+                                       "rate": app.sampler.rate,
+                                       "signal_flags": app.signal_flags_snapshot()}})
             self.wfile.flush()
             app.hub.publish({"type": "presence", "presence": app.presence_payload()})
             last_status = time.monotonic()
