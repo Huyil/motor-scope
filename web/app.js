@@ -77,6 +77,26 @@
     record: {},
     rate: 100,
     windowSec: 20,
+    // 波形时间轴：follow=实时滚动窗口；overview=在完整可用历史上框选
+    chartFollow: true,
+    chartFull: false,        // 波形全屏：仅隐藏顶部 hero 卡片
+    chartRange: null,        // overview 的 {start,end}（ms，绝对时间戳）
+    chartAutoFull: false,    // 恢复页面时先自动铺满，直到用户真正操作时间轴
+    chartRightLock: false,   // overview 右端锁定实时（不切 follow）
+    cacheLockAt: 0,          // 锁定时缓存窗口的节流刷新时间
+    tlDrag: null,            // 时间轴拖拽会话
+    tlUiKey: '',
+    tlSaveTimer: 0,
+    // 服务端分块压缩录制缓存（旁路；只用于 overview/进度条，不改变 live 语义）
+    cacheInfo: null,
+    cacheInfoBusy: false,
+    cacheInfoTimer: 0,
+    cacheSaveBusy: false,
+    cacheSamples: null,      // overview 选中窗口的缓存样本 [[t,[raw...]],...]
+    cacheRange: null,        // 上述样本对应的请求窗口 {start,end}
+    cacheToken: 0,
+    cacheWindowTimer: 0,
+    cacheError: '',
     autoZero: false,
     fillOn: true,
     gridOn: true,
@@ -270,9 +290,23 @@
     D.topbar = $('#topbar');
     D.actions = $('#topActions');
     D.chart = $('#chart');
+    D.btnChartFull = $('#btnChartFull');
     D.wrap = $('#canvasWrap');
     D.tip = $('#cursorTip');
     D.pinTip = $('#pinTip');
+    D.timelineBar = $('#timelineBar');
+    D.tlMode = $('#tlMode');
+    D.tlModeText = $('#tlModeText');
+    D.tlRail = $('#tlRail');
+    D.tlWindow = $('#tlWindow');
+    D.tlFirst = $('#tlFirst');
+    D.tlLast = $('#tlLast');
+    D.tlWin = $('#tlWin');
+    D.tlCache = $('#tlCache');
+    D.tlCacheSize = $('#tlCacheSize');
+    D.tlCacheLimit = $('#tlCacheLimit');
+    D.tlCacheState = $('#tlCacheState');
+    D.tlCacheSave = $('#tlCacheSave');
     D.empty = $('#emptyHint');
     D.statSamples = $('#statSamples');
     D.statRate = $('#statRate');
@@ -1315,7 +1349,12 @@
       stopLockWrite(existing);
       existing.liveHeld = false;
       const row = S.rows.get(rowId);
-      if (row) { row.writeOnly = false; row.monitor = true; }
+      if (row) {
+        row.writeOnly = false;
+        row.monitor = true;
+        // 从共享配置继承来的 write 角色不要在关闭本地写入模块后继续把自己隐藏掉
+        if (row.configRole === 'write') row.configRole = '';
+      }
       ensureWriteMods();
       afterSignalsChanged();
       toast('已取消写入：' + (S.index.get(rowId)?.name || rowId) + '（仍保留在已选择）', 'ok');
@@ -1378,21 +1417,9 @@
     ui.slider.style.setProperty('--p', p.toFixed(1) + '%');
   }
 
-  function syncWriteCardHeight() {
-    if (!D.writeCard) return;
-    const tableH = D.tableCard ? D.tableCard.getBoundingClientRect().height : 0;
-    const base = Math.max(180, Math.round(tableH || 0));
-    const expanded = S.write.mods.some((m) => m.expanded);
-    const h = expanded
-      ? Math.max(base, Math.min(Math.round(window.innerHeight * 0.6), 520))
-      : base;
-    D.writeCard.style.height = h + 'px';
-    D.writeCard.style.flexBasis = h + 'px';
-  }
-
   function syncWriteCardExpanded() {
+    // 卡片高度由 CSS 保持，展开只影响列表内部滚动，不再压到旁边数值表的高度。
     if (D.writeCard) D.writeCard.classList.toggle('has-expanded', S.write.mods.some((m) => m.expanded));
-    syncWriteCardHeight();
   }
 
   function setSwitchButtons(ui, which) {
@@ -1686,7 +1713,7 @@
     del.type = 'button';
     del.className = 'wm-del';
     del.textContent = '×';
-    del.title = '从写入窗口移除';
+    del.title = '从写入窗口移除（保留在已选择）';
     bar.append(name, switchBtns, type, addr, num, lock, expand, del);
 
     const sliderRow = document.createElement('div');
@@ -1735,7 +1762,7 @@
     del.type = 'button';
     del.className = 'wm-del';
     del.textContent = '×';
-    del.title = '从写入窗口移除';
+    del.title = '从写入窗口移除（保留在已选择）';
     top.append(name, type, addr, lock, expand, del);
 
     const body = document.createElement('div');
@@ -2187,6 +2214,7 @@
     renderCards();
     resizeChart();
     updateOverlay();
+    startCachePolling();
     connectSSE();
     setTimeout(() => maybeApplyShare(), 4000); // SSE 未及时 hello 时的分享兜底
     setTimeout(() => saveLocal(), 1500);   // 启动后把当前机型的配置自动保存一份
@@ -2267,6 +2295,12 @@
           restored = S.rows.size > 0;
         }
         S.windowSec = Number(c.windowSec) || S.windowSec;
+        // 时间轴模式持久化；overview 的具体 range 不落盘，避免跨会话拿到过期窗口，
+        // 载入后由 ensureChartRange() 按当前可用历史重新 clamp（默认整体历史）。
+        S.chartFollow = c.chartFollow !== false;
+        S.chartFull = !!c.chartFull;
+        S.chartRange = null;
+        S.chartAutoFull = !S.chartFollow;
         S.rate = Number(c.rate) || S.rate;
         S.autoZero = !!c.autoZero;
         S.fillOn = c.fillOn !== false;
@@ -2365,6 +2399,8 @@
     ensureWaveGroups();
     syncChannels();
     syncToggles();
+    syncChartModeUI();
+    syncChartFullUI();
     updateViewSeg();
     syncTablePanel();
     syncSections();
@@ -2380,9 +2416,40 @@
     }
   }
 
+  function syncWindowSecSelects() {
+    const v = String(S.windowSec);
+    for (const sel of [D.winSel, D.winSel2]) {
+      if (!sel) continue;
+      for (const opt of Array.from(sel.options)) {
+        if (opt.dataset && opt.dataset.dynamic) opt.remove();
+      }
+      if (!Array.from(sel.options).some((o) => o.value === v)) {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = fmtSpanMs(S.windowSec * 1000);
+        o.dataset.dynamic = '1';
+        sel.appendChild(o);
+      }
+      sel.value = v;
+    }
+  }
+
+  function setWindowSec(value, opts = {}) {
+    let v = Number(value);
+    if (!isFinite(v) || v <= 0) return S.windowSec;
+    const max = Number(opts.max) > 0 ? Number(opts.max) : 86400;
+    v = clamp(v, 0.5, max);
+    // 0.1 s 分辨率，避免滚轮/拖拽产生 12.345678 这种值
+    v = Math.round(v * 10) / 10;
+    S.windowSec = v;
+    syncWindowSecSelects();
+    if (opts.save !== false) scheduleTimelineSave();
+    S.dirty = true;
+    return v;
+  }
+
   function syncToggles() {
-    if (D.winSel) D.winSel.value = String(S.windowSec);
-    if (D.winSel2) D.winSel2.value = String(S.windowSec);
+    syncWindowSecSelects();
     if (D.rateSel) { D.rateSel.value = String(S.rate); syncRateOptions(); }
     const az = $('#autoZero'); if (az) az.checked = S.autoZero;
     const fo = $('#fillOn'); if (fo) fo.checked = S.fillOn;
@@ -2410,6 +2477,8 @@
         })),
         rate: S.rate,
         windowSec: S.windowSec,
+        chartFollow: S.chartFollow !== false,
+        chartFull: !!S.chartFull,
         autoZero: S.autoZero,
         fillOn: S.fillOn,
         gridOn: S.gridOn,
@@ -2751,6 +2820,7 @@
   }
 
   function renderAfterProjectLoad() {
+    resetChartTimeline();
     renderCatalog();
     renderSelected();
     renderLegend();
@@ -2982,7 +3052,7 @@
     renderMarginSelects();
     syncToggles();
     updateEmptyHint();
-    if (channelChanged) { S.samples = []; S.lastT = 0; }
+    if (channelChanged) { S.samples = []; S.lastT = 0; resetChartTimeline(); }
     S.lastConfigKey = incomingKey;
     S.configDirty = false;
     saveLocal();
@@ -3327,10 +3397,8 @@
 
   function applyShareChart(share) {
     if (share.windowSec != null && Number.isFinite(Number(share.windowSec))) {
-      S.windowSec = Number(share.windowSec);
+      setWindowSec(Number(share.windowSec), { save: false });
       S.view = null;
-      if (D.winSel) D.winSel.value = String(S.windowSec);
-      if (D.winSel2) D.winSel2.value = String(S.windowSec);
     }
     const c = share.chart;
     if (c && typeof c === 'object') {
@@ -3433,7 +3501,18 @@
 
   async function loadHistory() {
     try {
-      const r = await fetchJSON('/api/history?seconds=60');
+      // 优先按点数拉满服务端 history deque（上限 40000，约 100 Hz × 400 s），
+      // 时间轴 overview 需要“当前可用历史”而不是固定 60 s。
+      let r = null;
+      try {
+        r = await fetchJSON('/api/history?limit=40000');
+      } catch (e) {
+        r = null;
+      }
+      if (!r || !Array.isArray(r.samples) || !r.samples.length) {
+        // 老服务端不支持 limit 时退回 seconds（服务端上限 180 s）
+        r = await fetchJSON('/api/history?seconds=180');
+      }
       if (r && Array.isArray(r.samples) && r.samples.length) mergeHistory(r.samples);
     } catch {}
   }
@@ -3452,6 +3531,7 @@
     S.samples = arr;
     if (arr.length) S.lastT = Math.max(S.lastT, arr[arr.length - 1][0]);
     pruneSamples();
+    syncAutoFullRange();
     S.dirty = true;
     refreshLiveValues();
   }
@@ -3470,16 +3550,14 @@
     }
     S.sampleCountSeen += batch.length;
     pruneSamples();
+    syncAutoFullRange();
     S.dirty = true;
     refreshLiveValues();
   }
 
   function pruneSamples() {
-    const keep = Math.max(120000, S.windowSec * 1000 + 30000);
-    const cutoff = S.lastT - keep;
-    let i = 0;
-    while (i < S.samples.length && S.samples[i][0] < cutoff) i++;
-    if (i > 0) S.samples.splice(0, i);
+    // 时间轴 overview 要能看到客户端已缓存的全部历史，因此不再按 windowSec 裁掉旧样本。
+    // 只保留内存硬上限（20 万点）；服务端 deque 本身最多 4 万点，正常不会触顶。
     if (S.samples.length > 200000) S.samples.splice(0, S.samples.length - 200000);
   }
 
@@ -3701,6 +3779,7 @@
       S.pauseAt = 0;
       S.paused = false;
       S.hoverT = null;
+      resetChartTimeline();
       updatePauseUI();
       S.dirty = true;
     }
@@ -5147,8 +5226,7 @@
     requestAnimationFrame(drawLoop);
   }
 
-  function sampleRange(t0, t1) {
-    const a = S.samples;
+  function sampleRange(t0, t1, a = S.samples) {
     let lo = 0, hi = a.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
@@ -5161,6 +5239,760 @@
       if (a[mid][0] <= t1) lo = mid + 1; else hi = mid;
     }
     return [start, lo];
+  }
+
+  // ---------------------------------------------------------------- timeline
+  // 时间轴（框选条）。数据源统一走 getTimelineSamples()：当前只包含客户端
+  // 已拉取的 /api/history（服务端 deque 最多 40000 点，约 100 Hz × 400 s）。
+  // 以后若服务端提供完整录制索引，只需替换这个函数和 loadHistory()。
+  const TL_MIN_SPAN_MS = 500;
+
+  function getTimelineSamples() {
+    return S.samples;
+  }
+
+  function sampleTimelineBounds() {
+    const a = getTimelineSamples();
+    if (!a.length) return null;
+    const first = a[0][0];
+    const last = a[a.length - 1][0];
+    return { first, last, span: Math.max(0, last - first) };
+  }
+
+  // 服务端缓存会话的完整时间范围；不可用/未就绪时返回 null。
+  function cacheTimelineBounds() {
+    const c = S.cacheInfo;
+    if (!c || !c.enabled) return null;
+    const first = Number(c.start);
+    const last = Number(c.end);
+    if (!isFinite(first) || !isFinite(last) || last <= first) return null;
+    if (!(Number(c.count) > 0)) return null;
+    return { first, last, span: last - first };
+  }
+
+  function timelineBounds() {
+    const cache = cacheTimelineBounds();
+    const live = sampleTimelineBounds();
+    if (!cache) return live;
+    if (!live) return cache;
+    // 轨道起点用服务端缓存（完整录制周期）；终点取缓存尾部或尚未落盘的实时尾巴。
+    const last = Math.max(cache.last, live.last);
+    return { first: cache.first, last, span: Math.max(0, last - cache.first) };
+  }
+
+  function timelineMinSpan(bounds) {
+    const full = bounds ? bounds.span : 0;
+    return full > 0 ? Math.min(TL_MIN_SPAN_MS, full) : 0;
+  }
+
+  function clampRangeToBounds(range, bounds) {
+    if (!bounds) return null;
+    if (bounds.span <= 0) return { start: bounds.first, end: bounds.last };
+    const minSpan = timelineMinSpan(bounds);
+    let s = Number.isFinite(range && range.start) ? range.start : bounds.first;
+    let e = Number.isFinite(range && range.end) ? range.end : bounds.last;
+    if (e < s) { const t = s; s = e; e = t; }
+    // 完全落在当前缓存之外（例如服务重启/换工程后时间戳整体变化）→ 回到完整历史
+    if (e < bounds.first || s > bounds.last) return { start: bounds.first, end: bounds.last };
+    s = clamp(s, bounds.first, bounds.last);
+    e = clamp(e, bounds.first, bounds.last);
+    if (e - s < minSpan) {
+      const c = (s + e) / 2;
+      s = clamp(c - minSpan / 2, bounds.first, bounds.last - minSpan);
+      e = s + minSpan;
+    }
+    return { start: s, end: e };
+  }
+
+  // overview 的 range 唯一入口：越界自动 clamp，数据变化后也能自愈。
+  function ensureChartRange() {
+    const bounds = timelineBounds();
+    if (!bounds) return null;
+    S.chartRange = clampRangeToBounds(S.chartRange, bounds);
+    return S.chartRange;
+  }
+
+  // 页面恢复成 overview 但用户还没动过时间轴：跟着“当前可用历史”持续铺满，
+  // 避免首次渲染只看到 1~2 个样本时把窗口永久钉在 500 ms。
+  function syncAutoFullRange() {
+    if (S.chartFollow || !S.chartAutoFull) return;
+    const bounds = timelineBounds();
+    if (!bounds) return;
+    S.chartRange = { start: bounds.first, end: bounds.last };
+  }
+
+  // 时间轴 / 波形区当前实际可见窗口。follow 时取 draw() 算出的 S.view；
+  // overview 时取 S.chartRange。
+  function currentTimelineWindow() {
+    const bounds = timelineBounds();
+    if (!bounds) return null;
+    let start, end;
+    if (S.chartFollow) {
+      start = (S.view ? S.view.start : S.lastT - S.windowSec * 1000);
+      end = (S.view ? S.view.end : S.lastT);
+    } else {
+      const r = ensureChartRange();
+      if (!r) return null;
+      start = r.start;
+      end = r.end;
+    }
+    if (!isFinite(start) || !isFinite(end)) return null;
+    if (end < start) { const t = start; start = end; end = t; }
+    const ds = clamp(start, bounds.first, bounds.last);
+    const de = clamp(end, bounds.first, bounds.last);
+    return {
+      first: bounds.first, last: bounds.last, span: bounds.span,
+      start: ds, end: de, rawStart: start, rawEnd: end,
+      len: Math.max(0, end - start), follow: S.chartFollow,
+    };
+  }
+
+  function fmtClockMs(ms) {
+    // 采样时间戳是“服务启动后的相对毫秒”（scope_server 的 t_ms），不是墙上时钟；
+    // 这里按 hh:mm:ss（相对时间）显示，避免出现 1970 年。
+    if (!isFinite(ms)) return '--';
+    const total = Math.max(0, Math.round(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return (h > 0 ? pad2(h) + ':' : '') + pad2(m) + ':' + pad2(s);
+  }
+
+  function fmtSpanMs(ms) {
+    const s = Math.max(0, Number(ms) || 0) / 1000;
+    if (s < 1) return Math.round(s * 1000) + ' ms';
+    if (s < 10) return s.toFixed(1) + ' s';
+    if (s < 60) return Math.round(s) + ' s';
+    const m = Math.floor(s / 60);
+    const r = Math.round(s - m * 60);
+    if (r === 60) return (m + 1) + 'm';
+    return m + 'm' + (r ? ' ' + r + 's' : '');
+  }
+
+  function syncChartFullUI() {
+    document.body.classList.toggle('hero-hidden', !!S.chartFull);
+    if (!D.btnChartFull) return;
+    D.btnChartFull.classList.toggle('active', !!S.chartFull);
+    D.btnChartFull.setAttribute('aria-pressed', S.chartFull ? 'true' : 'false');
+    D.btnChartFull.title = S.chartFull
+      ? '退出全屏（恢复顶部卡片）'
+      : '全屏波形（仅隐藏顶部卡片）';
+    const label = D.btnChartFull.querySelector('.cf-label');
+    if (label) label.textContent = S.chartFull ? '退出' : '全屏';
+  }
+
+  function setChartFull(on) {
+    S.chartFull = !!on;
+    syncChartFullUI();
+    saveLocal();
+    requestAnimationFrame(() => { try { resizeChart(); } catch {} });
+  }
+
+  function syncChartModeUI() {
+    if (!D.timelineBar || !D.tlMode) return;
+    const overview = !S.chartFollow;
+    D.timelineBar.dataset.mode = overview ? 'overview' : 'follow';
+    D.tlMode.classList.toggle('overview', overview);
+    if (D.tlModeText) D.tlModeText.textContent = overview ? '整体' : '跟随';
+    D.tlMode.setAttribute('aria-pressed', overview ? 'true' : 'false');
+    D.tlMode.title = overview
+      ? '整体历史（点击回到跟随实时）'
+      : '跟随实时（点击查看整体历史）';
+  }
+
+  function scheduleTimelineSave() {
+    if (S.tlSaveTimer) clearTimeout(S.tlSaveTimer);
+    S.tlSaveTimer = setTimeout(() => { S.tlSaveTimer = 0; saveLocal(); }, 500);
+  }
+
+  function setChartFollow(on) {
+    const follow = !!on;
+    if (follow === S.chartFollow && (follow || S.chartRange)) {
+      syncChartModeUI();
+      return;
+    }
+    S.chartFollow = follow;
+    setChartRightLock(false);
+    if (follow) {
+      S.chartRange = null;
+      S.chartAutoFull = false;
+    } else {
+      const bounds = timelineBounds();
+      // 按钮进入整体：初始选中完整可用历史；还没有数据时等首批样本到达再铺满
+      S.chartRange = bounds ? { start: bounds.first, end: bounds.last } : null;
+      S.chartAutoFull = !bounds;
+      ensureChartRange();
+    }
+    S.tlDrag = null;
+    syncChartModeUI();
+    scheduleTimelineSave();
+    if (!follow) scheduleCacheWindow(60);
+    S.dirty = true;
+  }
+
+  function updateTimelineUI(force) {
+    if (!D.tlRail || !D.tlWindow || !D.timelineBar) return;
+    const cur = currentTimelineWindow();
+    const has = !!cur && cur.span > 0 && cur.len > 0;
+    D.timelineBar.classList.toggle('no-data', !has);
+    if (!has) {
+      D.tlWindow.classList.add('hidden');
+      if (force || S.tlUiKey !== 'none') {
+        S.tlUiKey = 'none';
+        if (D.tlFirst) D.tlFirst.textContent = '--';
+        if (D.tlLast) D.tlLast.textContent = '--';
+        if (D.tlWin) D.tlWin.textContent = '暂无历史';
+        D.tlRail.setAttribute('aria-valuetext', '暂无历史');
+      }
+      return;
+    }
+    D.tlWindow.classList.remove('hidden');
+    const l = clamp((cur.start - cur.first) / cur.span, 0, 1);
+    const r = clamp((cur.end - cur.first) / cur.span, 0, 1);
+    D.tlWindow.style.left = (l * 100).toFixed(4) + '%';
+    D.tlWindow.style.width = (Math.max(0, r - l) * 100).toFixed(4) + '%';
+    const key = [cur.first, cur.last, cur.start, cur.end,
+      S.chartFollow ? 1 : 0, S.chartRightLock ? 1 : 0].join('|');
+    if (!force && key === S.tlUiKey) return;
+    S.tlUiKey = key;
+    if (D.tlFirst) D.tlFirst.textContent = '起 ' + fmtClockMs(cur.first);
+    if (D.tlLast) D.tlLast.textContent = '止 ' + fmtClockMs(cur.last);
+    if (D.tlWin) {
+      D.tlWin.textContent = (S.chartFollow ? '跟随 ' : '窗口 ') +
+        fmtClockMs(cur.start) + ' → ' + fmtClockMs(cur.end) +
+        ' · ' + fmtSpanMs(cur.end - cur.start) +
+        (S.chartRightLock ? ' · 右端锁定' : '');
+    }
+    const title = '完整历史 ' + fmtClockMs(cur.first) + ' → ' + fmtClockMs(cur.last) +
+      '（' + fmtSpanMs(cur.span) + '，相对服务启动）· 拖手柄调整窗口（follow 仅左手柄）；' +
+      '空白处点击居中；普通滚轮：整体=平移 / 跟随=缩放' +
+      (S.chartRightLock ? '；右端已锁定实时（拖右手柄/滚轮解锁）' : '');
+    D.tlRail.title = title;
+    D.tlRail.setAttribute('aria-valuetext', title +
+      '；当前窗口 ' + fmtClockMs(cur.start) + ' → ' + fmtClockMs(cur.end) +
+      '，' + fmtSpanMs(cur.end - cur.start));
+  }
+
+  // ---- 服务端分块压缩缓存（旁路） ----
+  function fmtBytes(n) {
+    const v = Number(n) || 0;
+    if (v >= 1024 * 1024 * 1024) return (v / (1024 * 1024 * 1024)).toFixed(v >= 10 * 1024 * 1024 * 1024 ? 0 : 1) + ' GB';
+    if (v >= 1024 * 1024) return (v / (1024 * 1024)).toFixed(v >= 10 * 1024 * 1024 ? 0 : 1) + ' MB';
+    if (v >= 1024) return Math.round(v / 1024) + ' KB';
+    return Math.round(v) + ' B';
+  }
+
+  function updateCacheUI() {
+    if (!D.tlCache) return;
+    const c = S.cacheInfo;
+    if (!c || !c.enabled) {
+      D.tlCache.classList.add('hidden');
+      return;
+    }
+    D.tlCache.classList.remove('hidden');
+    const saved = !!c.saved;
+    const clearable = !!c.clearable;
+    const session = !!c.session;
+    D.tlCache.classList.toggle('saved', saved);
+    D.tlCache.classList.toggle('clearable', !saved && clearable);
+    D.tlCache.classList.toggle('warn', !!c.error);
+    if (D.tlCacheSize) D.tlCacheSize.textContent = '缓存 ' + fmtBytes(c.total_bytes);
+    if (D.tlCacheLimit) D.tlCacheLimit.textContent = ' / ' + fmtBytes(c.limit_bytes);
+    if (D.tlCacheState) {
+      let state = '无会话';
+      if (c.error) state = '容量告警';
+      else if (saved) state = '已保存';
+      else if (session && (c.active || clearable)) state = c.active ? '未保存' : '可清理';
+      else if (session) state = '未保存';
+      D.tlCacheState.textContent = ' · ' + state;
+    }
+    if (D.tlCacheSave) D.tlCacheSave.classList.toggle('hidden', !session || saved);
+    const bits = [];
+    if (c.session) bits.push(c.session);
+    if (session) bits.push((c.blocks || 0) + ' 块 · ' + fmtInt(c.count || 0) + ' 点');
+    if (session) bits.push('会话 ' + fmtBytes(c.session_bytes || 0));
+    if (c.error) bits.push(c.error);
+    D.tlCache.title = '服务端分块压缩缓存（本地，不上传）' +
+      (bits.length ? '\n' + bits.join(' · ') : '') +
+      (clearable && !saved ? '\n会话未保存：退出后可被清理' : '') +
+      '\n总上限 ' + fmtBytes(c.limit_bytes) + '，满了先清未保存会话，再覆盖最旧已保存会话';
+  }
+
+  async function refreshCacheInfo(force) {
+    if (S.cacheInfoBusy) return;
+    S.cacheInfoBusy = true;
+    let next = null;
+    try {
+      const r = await fetchJSON('/api/record-cache', { timeout: 6000 });
+      if (r && r.ok !== false) next = r;
+      else next = { ok: false, enabled: false, error: (r && r.error) || '缓存不可用' };
+    } catch (e) {
+      next = { ok: false, enabled: false, error: brief(e.message || String(e)) };
+    } finally {
+      S.cacheInfoBusy = false;
+    }
+    if (!next) return;
+    const prev = S.cacheInfo;
+    const prevUsable = !!prev && prev.enabled && Number(prev.count) > 0;
+    const prevSession = prev && prev.session;
+    S.cacheInfo = next;
+    const usable = !!next.enabled && Number(next.count) > 0;
+    if (!next.enabled) {
+      S.cacheSamples = null;
+      S.cacheRange = null;
+    } else if (prevSession && next.session && prevSession !== next.session) {
+      // 通道变更/重连会换会话；旧窗口数据不能再用
+      S.cacheSamples = null;
+      S.cacheRange = null;
+    }
+    const oldRange = S.chartRange ? (S.chartRange.start + '|' + S.chartRange.end) : '';
+    if (!S.chartFollow) {
+      if (S.chartAutoFull) syncAutoFullRange();
+      else ensureChartRange();
+      const newRange = S.chartRange ? (S.chartRange.start + '|' + S.chartRange.end) : '';
+      if (usable && (force || !prevUsable || newRange !== oldRange ||
+          (prevSession && next.session && prevSession !== next.session))) {
+        scheduleCacheWindow(80);
+      }
+    }
+    updateCacheUI();
+    S.dirty = true;
+  }
+
+  function startCachePolling() {
+    if (S.cacheInfoTimer) clearInterval(S.cacheInfoTimer);
+    refreshCacheInfo(true);
+    S.cacheInfoTimer = setInterval(() => refreshCacheInfo(false), 4000);
+  }
+
+  async function saveCacheSession() {
+    if (S.cacheSaveBusy || !D.tlCacheSave) return;
+    S.cacheSaveBusy = true;
+    D.tlCacheSave.disabled = true;
+    try {
+      const r = await post('/api/record-cache/save', {});
+      if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
+      S.cacheInfo = r;
+      updateCacheUI();
+      toast('缓存已标记保存（本地，不上传）', 'ok');
+    } catch (e) {
+      toast('保存缓存失败: ' + brief(e.message), 'err');
+    } finally {
+      S.cacheSaveBusy = false;
+      if (D.tlCacheSave) D.tlCacheSave.disabled = false;
+    }
+  }
+
+  // overview 当前视图使用的数据序列：缓存窗口覆盖视图时优先用缓存，否则回退实时样本。
+  function viewSeries(start, end) {
+    if (!S.chartFollow && Array.isArray(S.cacheSamples) && S.cacheSamples.length) {
+      const cs = S.cacheSamples[0][0];
+      const ce = S.cacheSamples[S.cacheSamples.length - 1][0];
+      if (cs <= end && ce >= start) {
+        // 缓存块比实时样本晚落盘（默认最多一个块）：把缓存末尾之后的实时尾巴接上，
+        // 这样 overview 右侧不会缺最新一段。数值仍是真实样本，不做插值。
+        if (end > ce + 0.5) {
+          const out = S.cacheSamples.slice();
+          // S.samples 有序：二分找到缓存末尾之后的第一条，避免每帧遍历全部样本
+          let lo = 0, hi = S.samples.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (S.samples[mid][0] <= ce) lo = mid + 1; else hi = mid;
+          }
+          for (let i = lo; i < S.samples.length; i++) {
+            const row = S.samples[i];
+            if (row[0] > end + 0.5) break;
+            out.push(row);
+          }
+          return out;
+        }
+        return S.cacheSamples;
+      }
+    }
+    return S.samples;
+  }
+
+  function scheduleCacheWindow(delay = 120) {
+    if (S.chartFollow || !cacheTimelineBounds()) return;
+    // 节流而不是防抖：持续拖拽时也每 ~140 ms 取一次当前窗口，
+    // 同时避免每个 pointermove 都发请求。
+    if (S.cacheWindowTimer) return;
+    S.cacheWindowTimer = setTimeout(() => {
+      S.cacheWindowTimer = 0;
+      loadCacheWindow();
+    }, Math.max(20, delay));
+  }
+
+  async function loadCacheWindow() {
+    if (S.chartFollow || !cacheTimelineBounds()) return;
+    const r = ensureChartRange();
+    if (!r) return;
+    const token = ++S.cacheToken;
+    const maxPoints = Math.round(clamp((S.view ? S.view.pw : 900) * 8, 2000, 60000));
+    const q = 'start=' + encodeURIComponent(r.start) + '&end=' + encodeURIComponent(r.end) +
+      '&max_points=' + maxPoints;
+    try {
+      const res = await fetchJSON('/api/record-cache/window?' + q, { timeout: 20000 });
+      if (token !== S.cacheToken || S.chartFollow) return;
+      if (!res || !res.ok || res.empty || !Array.isArray(res.samples) || !res.samples.length) {
+        S.cacheSamples = [];
+        S.cacheRange = { start: r.start, end: r.end };
+        S.cacheError = (res && res.error) || '';
+        S.dirty = true;
+        return;
+      }
+      const order = (res.signals || []).map((x) => String(x.id));
+      const pos = new Map(order.map((id, i) => [id, i]));
+      const ids = S.signals.map((x) => x.id);
+      const samples = [];
+      for (const row of res.samples) {
+        const t = Number(row && row[0]);
+        if (!isFinite(t)) continue;
+        const vals = (row && row[1]) || [];
+        const mapped = ids.map((id) => {
+          if (!order.length) return null;
+          const i = pos.get(id);
+          return i === undefined ? null : vals[i];
+        });
+        samples.push([t, order.length ? mapped : vals]);
+      }
+      S.cacheSamples = samples;
+      S.cacheRange = { start: r.start, end: r.end };
+      S.cacheError = '';
+      S.dirty = true;
+    } catch (e) {
+      if (token !== S.cacheToken) return;
+      S.cacheSamples = [];
+      S.cacheRange = null;
+      S.cacheError = brief(e.message || String(e));
+      S.dirty = true;
+    }
+  }
+
+  // ---- 时间轴交互 ----
+  function tlEventTime(e) {
+    const bounds = timelineBounds();
+    if (!bounds || bounds.span <= 0 || !D.tlRail) return null;
+    const rect = D.tlRail.getBoundingClientRect();
+    if (!rect.width) return null;
+    const x = clamp(e.clientX - rect.left, 0, rect.width);
+    return bounds.first + (x / rect.width) * bounds.span;
+  }
+
+  function applyTimelineResize(drag, t, bounds) {
+    S.chartAutoFull = false;
+    const minSpan = timelineMinSpan(bounds);
+    let s = drag.origStart;
+    let e = drag.origEnd;
+    if (drag.mode === 'l') s = clamp(t, bounds.first, e - minSpan);
+    else e = clamp(t, s + minSpan, bounds.last);
+    if (e <= s) return;
+    const tol = Math.max(2, bounds.span * 0.0005);
+    if (Math.abs(t - drag.startT) > 0.5) drag.moved = true;
+    if (drag.mode === 'r') drag.rightAtEnd = e >= bounds.last - tol;
+    S.chartRange = { start: s, end: e };
+  }
+
+  function onTlPointerDown(e) {
+    if (e.button !== 0 || !D.tlRail) return;
+    const bounds = timelineBounds();
+    if (!bounds || bounds.span <= 0) return;
+    const t = tlEventTime(e);
+    if (t === null) return;
+    const handle = e.target.closest ? e.target.closest('.tl-handle') : null;
+    const inWindow = e.target.closest ? e.target.closest('.tl-window') : null;
+
+    if (S.chartFollow) {
+      // follow：只允许拖左手柄增大/缩小窗口，右端始终贴实时。
+      // 右手柄/窗口中间/轨道空白都不响应，也不切 overview。
+      if (!handle || handle.dataset.h !== 'l') return;
+      e.preventDefault();
+      S.tlDrag = { mode: 'follow-l', startT: t, pointerId: e.pointerId };
+      try { D.tlRail.setPointerCapture(e.pointerId); } catch {}
+      S.dirty = true;
+      return;
+    }
+
+    // overview：窗口中间不再可拖动；只有左右手柄可拖。
+    if (inWindow && !handle) return;
+    e.preventDefault();
+    const cur = ensureChartRange();
+    if (!cur) return;
+    if (handle) {
+      S.chartAutoFull = false;
+      S.tlDrag = {
+        mode: handle.dataset.h === 'r' ? 'r' : 'l',
+        startT: t, origStart: cur.start, origEnd: cur.end,
+        pointerId: e.pointerId, moved: false, rightAtEnd: false,
+      };
+      try { D.tlRail.setPointerCapture(e.pointerId); } catch {}
+      S.dirty = true;
+      return;
+    }
+    // 轨道空白：单击把窗口居中（离散跳转，不进入拖动）；保持 overview。
+    setChartRightLock(false);
+    const len = Math.max(timelineMinSpan(bounds), cur.end - cur.start);
+    let cs = clamp(t - len / 2, bounds.first, Math.max(bounds.first, bounds.last - len));
+    S.chartAutoFull = false;
+    S.chartRange = { start: cs, end: cs + len };
+    syncWindowSecFromRange();
+    scheduleCacheWindow(80);
+    scheduleTimelineSave();
+    S.dirty = true;
+  }
+
+  function onTlPointerMove(e) {
+    const drag = S.tlDrag;
+    if (!drag) return;
+    const bounds = timelineBounds();
+    if (!bounds || bounds.span <= 0) return;
+    const t = tlEventTime(e);
+    if (t === null) return;
+    if (drag.mode === 'follow-l') {
+      applyFollowLeftDrag(t, bounds);
+      S.dirty = true;
+      return;
+    }
+    applyTimelineResize(drag, t, bounds);
+    scheduleCacheWindow(140);
+    S.dirty = true;
+  }
+
+  function endTlDrag() {
+    const drag = S.tlDrag;
+    if (!drag) return;
+    S.tlDrag = null;
+    if (D.tlRail) {
+      try { D.tlRail.releasePointerCapture(drag.pointerId); } catch {}
+    }
+    if (drag.mode === 'follow-l') {
+      scheduleTimelineSave();
+      S.dirty = true;
+      return;
+    }
+    if (!S.chartFollow) {
+      if (drag.mode === 'r') {
+        if (drag.rightAtEnd) setChartRightLock(true);
+        else if (drag.moved) setChartRightLock(false);
+      }
+      if (S.chartRightLock) syncChartRightLock();
+      else ensureChartRange();
+      syncWindowSecFromRange();
+    }
+    scheduleTimelineSave();
+    S.dirty = true;
+  }
+
+  function wheelZoomFactor(e) {
+    const d = clamp(Number(e.deltaY) || 0, -120, 120);
+    return Math.exp(d * 0.0022);
+  }
+
+  function zoomTimelineAt(anchorT, factor) {
+    const bounds = timelineBounds();
+    if (!bounds || bounds.span <= 0) return false;
+    // 只有 overview 可围绕鼠标时间点缩放；不再自动切换模式。
+    if (S.chartFollow) return false;
+    S.chartAutoFull = false;
+    const cur = ensureChartRange();
+    if (!cur) return false;
+    const minSpan = timelineMinSpan(bounds);
+    const curLen = Math.max(1, cur.end - cur.start);
+    const newLen = clamp(curLen * factor, minSpan, bounds.span);
+    if (Math.abs(newLen - curLen) < 0.5) return false;
+    const anchor = clamp(isFinite(anchorT) ? anchorT : (cur.start + cur.end) / 2,
+      bounds.first, bounds.last);
+    const ratio = clamp((anchor - cur.start) / curLen, 0, 1);
+    let s = anchor - ratio * newLen;
+    let e = s + newLen;
+    if (s < bounds.first) { s = bounds.first; e = s + newLen; }
+    if (e > bounds.last) { e = bounds.last; s = e - newLen; }
+    S.chartRange = { start: s, end: e };
+    S.dirty = true;
+    scheduleTimelineSave();
+    scheduleCacheWindow(120);
+    return true;
+  }
+
+  function applyWindowSecToOverview() {
+    if (S.chartFollow) return;
+    S.chartAutoFull = false;
+    const bounds = timelineBounds();
+    const cur = ensureChartRange();
+    if (!bounds || !cur) return;
+    const minSpan = timelineMinSpan(bounds);
+    const len = clamp(S.windowSec * 1000, minSpan, Math.max(minSpan, bounds.span));
+    if (S.chartRightLock) {
+      // 锁定右端时改窗口长度：右端不动，往左扩/缩
+      const end = bounds.last;
+      S.chartRange = { start: Math.max(bounds.first, end - len), end };
+      scheduleCacheWindow(80);
+      return;
+    }
+    const c = (cur.start + cur.end) / 2;
+    const s = clamp(c - len / 2, bounds.first, Math.max(bounds.first, bounds.last - len));
+    S.chartRange = { start: s, end: s + len };
+    scheduleCacheWindow(80);
+  }
+
+  // follow 模式拖左手柄：左端跟指针，右端保持实时；窗口只增/减长度，不切 overview。
+  function applyFollowLeftDrag(t, bounds) {
+    const end = (S.view && isFinite(S.view.end))
+      ? S.view.end
+      : (S.paused ? (S.pauseAt || S.lastT) : S.lastT);
+    const avail = Math.max(0.5, (end - bounds.first) / 1000);
+    const span = clamp((end - t) / 1000, 0.5, avail);
+    setWindowSec(span, { max: avail, save: false });
+  }
+
+  function wheelDeltaAmount(e) {
+    const scale = e.deltaMode === 1 ? 40 : (e.deltaMode === 2 ? 800 : 1);
+    const x = (Number(e.deltaX) || 0) * scale;
+    const y = (Number(e.deltaY) || 0) * scale;
+    return Math.abs(x) > Math.abs(y) ? x : y;
+  }
+
+  // overview 里用手柄改完窗口后，让窗口下拉框反映真实跨度（而不是停留在旧值）
+  function syncWindowSecFromRange() {
+    if (!S.chartRange) return;
+    const span = Math.max(0.5, (S.chartRange.end - S.chartRange.start) / 1000);
+    setWindowSec(span, { save: false, max: Math.max(0.5, span) });
+  }
+
+  // overview 右端锁定：右边缘钉在实时右端，窗口按原跨度随实时滑动，但不切 follow。
+  function setChartRightLock(on) {
+    const next = !!on && !S.chartFollow;
+    const changed = next !== S.chartRightLock;
+    S.chartRightLock = next;
+    if (!next) S.cacheLockAt = 0;
+    D.timelineBar?.classList.toggle('right-lock', next);
+    if (next) {
+      S.chartAutoFull = false;
+      syncChartRightLock();
+    }
+    if (changed) S.dirty = true;
+  }
+
+  function syncChartRightLock() {
+    if (!S.chartRightLock || S.chartFollow || S.tlDrag) return;
+    const bounds = timelineBounds();
+    const cur = ensureChartRange();
+    if (!bounds || !cur) return;
+    const span = Math.max(timelineMinSpan(bounds),
+      Math.min(cur.end - cur.start, bounds.span));
+    const end = bounds.last;
+    const start = Math.max(bounds.first, end - span);
+    S.chartRange = { start, end };
+    S.chartAutoFull = false;
+    // 缓存窗口节流刷新；波形右侧本来就会用 live 尾巴补齐
+    const now = Date.now();
+    if (!S.cacheLockAt || now - S.cacheLockAt > 2500) {
+      S.cacheLockAt = now;
+      scheduleCacheWindow(300);
+    }
+  }
+
+  // follow：缩放时间窗口（右端仍贴实时），不切换模式。
+  function zoomFollowWindowByFactor(factor) {
+    if (!S.chartFollow) return false;
+    const bounds = timelineBounds();
+    if (!bounds || bounds.span <= 0) return false;
+    const end = S.view ? S.view.end : S.lastT;
+    const max = Math.max(0.5, (end - bounds.first) / 1000);
+    setWindowSec(S.windowSec * factor, { max, save: false });
+    scheduleTimelineSave();
+    return true;
+  }
+
+  function zoomFollowWithWheel(e) {
+    if (!S.chartFollow) return false;
+    const d = clamp(wheelDeltaAmount(e), -240, 240);
+    if (!d) return false;
+    return zoomFollowWindowByFactor(Math.exp(d * 0.0016));
+  }
+
+  // overview：普通滚轮左右滑动窗口（不改变跨度）。
+  function panOverviewWithWheel(e) {
+    if (S.chartFollow) return false;
+    const bounds = timelineBounds();
+    const cur = ensureChartRange();
+    if (!bounds || !cur) return false;
+    const d = clamp(wheelDeltaAmount(e), -360, 360);
+    if (!d) return false;
+    const len = Math.max(1, cur.end - cur.start);
+    // 细粒度横移：约 3% 窗口/格，单格 300 ms ~ 3 s；比原来的 15% 小约 5 倍
+    const unit = clamp(len * 0.03, 300, 3000);
+    const step = (d / 100) * unit;
+    if (S.chartRightLock && step < 0) setChartRightLock(false);
+    const s = clamp(cur.start + step, bounds.first, Math.max(bounds.first, bounds.last - len));
+    S.chartRange = { start: s, end: s + len };
+    S.chartAutoFull = false;
+    const tol = Math.max(2, bounds.span * 0.0005);
+    // 滚轮横移接近/撞到右端：磁吸到右端并锁定（不切 follow）；左移则解锁
+    if (step > 0 && len < bounds.span - tol) {
+      const gap = bounds.last - (s + len);
+      const snap = Math.max(1000, len * 0.02);
+      if (gap <= snap) setChartRightLock(true);
+    }
+    scheduleCacheWindow(80);
+    scheduleTimelineSave();
+    S.dirty = true;
+    return true;
+  }
+
+  function onTlKeyDown(e) {
+    const bounds = timelineBounds();
+    if (!bounds || bounds.span <= 0) return;
+    const keys = ['ArrowLeft', 'ArrowRight', '+', '=', '-', '_', 'Home', 'End'];
+    if (!keys.includes(e.key)) return;
+    if (S.chartFollow) {
+      // follow 下只有 +/- 有意义：缩放窗口；方向键不再自动切 overview。
+      if (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        zoomFollowWindowByFactor(e.key === '+' || e.key === '=' ? 0.8 : 1.25);
+      }
+      return;
+    }
+    if (S.chartRightLock) setChartRightLock(false);
+    const cur = ensureChartRange();
+    if (!cur) return;
+    const len = cur.end - cur.start;
+    const step = Math.max(100, len * 0.1);
+    let handled = true;
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const delta = e.key === 'ArrowLeft' ? -step : step;
+      let s = clamp(cur.start + delta, bounds.first, Math.max(bounds.first, bounds.last - len));
+      S.chartRange = { start: s, end: Math.min(bounds.last, s + len) };
+    } else if (e.key === 'Home' || e.key === 'End') {
+      const s = e.key === 'Home' ? bounds.first : Math.max(bounds.first, bounds.last - len);
+      S.chartRange = { start: s, end: Math.min(bounds.last, s + len) };
+    } else if (e.key === '+' || e.key === '=') {
+      handled = zoomTimelineAt((cur.start + cur.end) / 2, 0.8);
+    } else if (e.key === '-' || e.key === '_') {
+      handled = zoomTimelineAt((cur.start + cur.end) / 2, 1.25);
+    }
+    if (handled) {
+      e.preventDefault();
+      scheduleCacheWindow(120);
+      S.dirty = true;
+    }
+  }
+
+  // 时间轴影响到的“重置”入口：清空缓冲、切机型/工程、服务重启、通道变化。
+  function resetChartTimeline() {
+    S.chartFollow = true;
+    S.chartRange = null;
+    S.chartAutoFull = false;
+    S.chartRightLock = false;
+    S.cacheLockAt = 0;
+    D.timelineBar?.classList.remove('right-lock');
+    S.tlDrag = null;
+    S.tlUiKey = '';
+    S.cacheSamples = null;
+    S.cacheRange = null;
+    if (S.cacheWindowTimer) { clearTimeout(S.cacheWindowTimer); S.cacheWindowTimer = 0; }
+    syncChartModeUI();
+    S.dirty = true;
   }
 
   function ensureGlowBuffer(pw, ph) {
@@ -5228,7 +6060,7 @@
     const cv = D.chart;
     const ctx = cv.getContext('2d');
     const W = S.size.w, H = S.size.h;
-    if (!W || !H) return;
+    if (!W || !H) { updateTimelineUI(); return; }
     ctx.clearRect(0, 0, W, H);
 
     const rows = visiblePlotRows();
@@ -5238,12 +6070,21 @@
     const x0 = pad.l, y0 = pad.t;
     const pw = Math.max(10, W - pad.l - pad.r);
     const ph = Math.max(10, H - pad.t - pad.b);
-    const end = S.paused ? (S.pauseAt || S.lastT) : S.lastT;
-    const start = end - S.windowSec * 1000;
-    const range = sampleRange(start, end);
+    if (!S.chartFollow && S.chartRightLock) syncChartRightLock();
+    let end = S.paused ? (S.pauseAt || S.lastT) : S.lastT;
+    let start = end - S.windowSec * 1000;
+    if (!S.chartFollow) {
+      // overview：使用用户框选的历史窗口（自动 clamp 到当前可用历史）
+      const r = ensureChartRange();
+      if (r) { start = r.start; end = r.end; }
+    }
+    const series = viewSeries(start, end);
+    const range = sampleRange(start, end, series);
     const i0 = range[0], i1 = range[1];
-    S.view = { x0, y0, pw, ph, start, end, panes };
+    const usingCache = !S.chartFollow && series !== S.samples;
+    S.view = { x0, y0, pw, ph, start, end, panes, series, usingCache };
     updatePinTipPosition(S.view);
+    updateTimelineUI();
 
     if (!panes.length) {
       if (D.pinTip) D.pinTip.classList.add('hidden');
@@ -5261,7 +6102,7 @@
       let mn = Infinity, mx = -Infinity, dmin = Infinity;
       for (const row of list) {
         for (let i = i0; i < i1; i++) {
-          const tv = plotValue(row, S.samples[i][1], pane);
+          const tv = plotValue(row, series[i][1], pane);
           if (tv === null || !isFinite(tv)) continue;
           if (tv < mn) mn = tv;
           if (tv < dmin) dmin = tv;
@@ -5347,15 +6188,17 @@
       if (S.zeroLine) drawZeroLine(ctx, pane.range, pane.Y, x0, pw, pane.top, pane.h, 'rgba(190,214,240,.26)');
     }
 
-    // bottom time labels
+    // bottom time labels（follow 显示相对秒；overview 显示绝对时钟，便于对照历史）
     ctx.font = '9.5px ' + mono;
     ctx.fillStyle = 'rgba(127,147,173,.75)';
+    const clockAxis = !S.chartFollow;
     for (let i = 0; i <= xt; i++) {
       const x = Math.round(x0 + pw * i / xt) + 0.5;
       ctx.textAlign = 'center'; ctx.textBaseline = 'top';
       const t = start + (end - start) * i / xt;
       const rel = (t - end) / 1000;
-      ctx.fillText((rel >= -0.05 ? '0' : rel.toFixed(0)) + 's', x, y0 + ph + 8);
+      ctx.fillText(clockAxis ? fmtClockMs(t) : ((rel >= -0.05 ? '0' : rel.toFixed(0)) + 's'),
+        x, y0 + ph + 8);
     }
 
     const focus = S.focusId;
@@ -5367,21 +6210,60 @@
       panes.some((p) => p.primary && p.primary.id === row.id) ? 2.1 : 1.15
     );
 
+    // overview 下可能一次显示 4 万点：按像素列做 min/max 包络抽稀，
+    // 保留尖峰形态；hover/PIN 仍走 nearestSample() 取真实最近样本。
+    const visibleSamples = Math.max(0, i1 - i0);
+    const decimate = visibleSamples > Math.max(1, pw) * 2.5;
+    const XOf = (t) => x0 + ((t - start) / Math.max(1, end - start)) * pw;
+    function tracePoints(row, pane) {
+      const pts = [];
+      if (!decimate || visibleSamples <= 2) {
+        for (let i = i0; i < i1; i++) {
+          const v = plotValue(row, series[i][1], pane);
+          if (v === null || !isFinite(v)) continue;
+          pts.push([XOf(series[i][0]), pane.Y(v)]);
+        }
+        return pts;
+      }
+      const buckets = Math.max(1, Math.round(pw));
+      const per = visibleSamples / buckets;
+      const add = (i) => {
+        const v = plotValue(row, series[i][1], pane);
+        if (v === null || !isFinite(v)) return;
+        const x = XOf(series[i][0]);
+        const y = pane.Y(v);
+        const p = pts[pts.length - 1];
+        if (p && Math.abs(p[0] - x) < 0.01 && Math.abs(p[1] - y) < 0.01) return;
+        pts.push([x, y]);
+      };
+      for (let b = 0; b < buckets; b++) {
+        const a = i0 + Math.floor(b * per);
+        const z = Math.min(i1, i0 + Math.floor((b + 1) * per));
+        let minI = -1, maxI = -1, minV = Infinity, maxV = -Infinity;
+        for (let i = a; i < z; i++) {
+          const v = plotValue(row, series[i][1], pane);
+          if (v === null || !isFinite(v)) continue;
+          if (v < minV) { minV = v; minI = i; }
+          if (v > maxV) { maxV = v; maxI = i; }
+        }
+        if (minI < 0) continue;
+        if (minI === maxI) add(minI);
+        else if (minI < maxI) { add(minI); add(maxI); }
+        else { add(maxI); add(minI); }
+      }
+      return pts;
+    }
+
     // fills (primary per pane)
     if (S.fillOn) {
       for (const pane of panes) {
         const row = pane.primary;
         if (!row || i1 - i0 <= 1) continue;
+        const pts = tracePoints(row, pane);
+        if (pts.length <= 1) continue;
         ctx.beginPath();
-        let started = false;
-        for (let i = i0; i < i1; i++) {
-          const v = plotValue(row, S.samples[i][1], pane);
-          if (v === null) continue;
-          const x = x0 + ((S.samples[i][0] - start) / Math.max(1, end - start)) * pw;
-          const y = pane.Y(v);
-          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-        }
-        if (!started) continue;
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
         ctx.lineTo(x0 + pw, pane.top + pane.h);
         ctx.lineTo(x0, pane.top + pane.h);
         ctx.closePath();
@@ -5398,13 +6280,12 @@
       for (const row of pane.rows) {
         const isPrimary = pane.primary && row.id === pane.primary.id;
         const alpha = alphaFor(row);
+        const pts = tracePoints(row, pane);
+        if (!pts.length) continue;
         ctx.beginPath();
         let started = false, prevY = 0;
-        for (let i = i0; i < i1; i++) {
-          const v = plotValue(row, S.samples[i][1], pane);
-          if (v === null) continue;
-          const x = x0 + ((S.samples[i][0] - start) / Math.max(1, end - start)) * pw;
-          const y = pane.Y(v);
+        for (const p of pts) {
+          const x = p[0], y = p[1];
           if (!started) {
             ctx.moveTo(x, y); started = true;
           } else if (row.step) {
@@ -5518,7 +6399,8 @@
   }
 
   function nearestSample(t) {
-    const a = S.samples;
+    const a = (S.view && Array.isArray(S.view.series) && S.view.series.length)
+      ? S.view.series : S.samples;
     if (!a.length) return null;
     let lo = 0, hi = a.length - 1;
     while (lo < hi) {
@@ -5683,14 +6565,36 @@
     initPanels();
     window.addEventListener('resize', () => { resizeChart(); fitTopbar(); });
     if (window.ResizeObserver) new ResizeObserver(resizeChart).observe(D.wrap);
-    if (window.ResizeObserver && D.tableCard) {
-      new ResizeObserver(() => syncWriteCardHeight()).observe(D.tableCard);
-    }
-    window.addEventListener('resize', syncWriteCardHeight);
     setupTopbarFit();
 
     D.chart.addEventListener('pointermove', onPointerMove);
     D.chart.addEventListener('pointerleave', onPointerLeave);
+    D.chart.addEventListener('wheel', (e) => {
+      // Ctrl+滚轮：围绕鼠标时间点缩放（follow 下会切 overview）。
+      // 普通滚轮：overview=左右平移窗口；follow=缩放时间窗口（右端仍贴实时）。
+      if (!e.ctrlKey) {
+        const b = timelineBounds();
+        if (!b || b.span <= 0) return;
+        e.preventDefault();
+        if (S.chartFollow) zoomFollowWithWheel(e);
+        else panOverviewWithWheel(e);
+        return;
+      }
+      if (S.chartFollow) {
+        if (!timelineBounds()) return;
+        e.preventDefault();
+        zoomFollowWindowByFactor(wheelZoomFactor(e));
+        return;
+      }
+      if (S.chartRightLock) setChartRightLock(false);
+      const view = S.view;
+      if (!view || !view.pw) return;
+      e.preventDefault();
+      const rect = D.chart.getBoundingClientRect();
+      const x = clamp(e.clientX - rect.left, view.x0, view.x0 + view.pw);
+      const anchor = view.start + ((x - view.x0) / view.pw) * (view.end - view.start);
+      zoomTimelineAt(anchor, wheelZoomFactor(e));
+    }, { passive: false });
     D.chart.addEventListener('click', (e) => {
       if (e.button !== 0) return;
       const view = S.view;
@@ -5711,6 +6615,41 @@
       if (e.key === 'Escape' && S.pinT !== null) clearPin();
     });
 
+    // 时间轴（框选条）
+    D.tlMode?.addEventListener('click', () => setChartFollow(!S.chartFollow));
+    if (D.tlRail) {
+      D.tlRail.addEventListener('pointerdown', onTlPointerDown);
+      D.tlRail.addEventListener('pointermove', onTlPointerMove);
+      D.tlRail.addEventListener('pointerup', endTlDrag);
+      D.tlRail.addEventListener('pointercancel', endTlDrag);
+      D.tlRail.addEventListener('lostpointercapture', endTlDrag);
+      D.tlRail.addEventListener('wheel', (e) => {
+        if (!e.ctrlKey) {
+          const b = timelineBounds();
+          if (!b || b.span <= 0) return;
+          e.preventDefault();
+          if (S.chartFollow) zoomFollowWithWheel(e);
+          else panOverviewWithWheel(e);
+          return;
+        }
+        if (S.chartFollow) {
+          if (!timelineBounds()) return;
+          e.preventDefault();
+          zoomFollowWindowByFactor(wheelZoomFactor(e));
+          return;
+        }
+        if (S.chartRightLock) setChartRightLock(false);
+        const t = tlEventTime(e);
+        if (t === null) return;
+        e.preventDefault();
+        zoomTimelineAt(t, wheelZoomFactor(e));
+      }, { passive: false });
+      D.tlRail.addEventListener('keydown', onTlKeyDown);
+    }
+    D.tlWindow?.addEventListener('pointerdown', (e) => e.stopPropagation());
+    D.tlWindow?.addEventListener('pointerdown', onTlPointerDown);
+    D.tlCacheSave?.addEventListener('click', (e) => { e.stopPropagation(); saveCacheSession(); });
+
     $('#btnQuickConnect')?.addEventListener('click', () => doConnect('openocd'));
     $('#btnQuickSim')?.addEventListener('click', () => doConnect('sim'));
     $('#btnOverlayAdvanced')?.addEventListener('click', () => {
@@ -5724,6 +6663,7 @@
     $('#btnSidebar')?.addEventListener('click', () => D.sidebar?.classList.toggle('open'));
     $('#btnClear').addEventListener('click', clearAll);
     $('#btnChart')?.addEventListener('click', () => toggleSection('chart'));
+    D.btnChartFull?.addEventListener('click', () => setChartFull(!S.chartFull));
     $('#btnShot').addEventListener('click', snapshot);
     $('#btnLog').addEventListener('click', () => { S.ui.log = true; D.logPanel.classList.remove('hidden'); refreshLog(); });
     $('#btnLogClose').addEventListener('click', () => { S.ui.log = false; D.logPanel.classList.add('hidden'); });
@@ -5758,8 +6698,16 @@
     syncTablePanel();
 
     // toolbar
-    D.winSel.addEventListener('change', () => { S.windowSec = Number(D.winSel.value); D.winSel2.value = D.winSel.value; saveLocal(); S.dirty = true; });
-    D.winSel2.addEventListener('change', () => { S.windowSec = Number(D.winSel2.value); D.winSel.value = D.winSel2.value; saveLocal(); S.dirty = true; });
+    D.winSel.addEventListener('change', () => {
+      setWindowSec(Number(D.winSel.value), { save: false });
+      applyWindowSecToOverview();
+      saveLocal();
+    });
+    D.winSel2.addEventListener('change', () => {
+      setWindowSec(Number(D.winSel2.value), { save: false });
+      applyWindowSecToOverview();
+      saveLocal();
+    });
     $('#autoZero').addEventListener('change', (e) => { S.autoZero = e.target.checked; saveLocal(); S.dirty = true; });
     $('#fillOn').addEventListener('change', (e) => { S.fillOn = e.target.checked; saveLocal(); S.dirty = true; });
     $('#gridOn').addEventListener('change', (e) => { S.gridOn = e.target.checked; saveLocal(); S.dirty = true; });
@@ -6257,6 +7205,8 @@
     S.pauseAt = 0;
     S.paused = false;
     S.hoverT = null;
+    resetChartTimeline();
+    scheduleTimelineSave();
     updatePauseUI();
     renderWriteMods();
     for (const row of S.selRows.values()) {
@@ -6304,6 +7254,7 @@
     buildIndex();
     S.samples = [];
     S.lastT = 0;
+    resetChartTimeline();
     let missing = 0;
     // 按 id 重新解析地址；新 AXF 里不存在的旧行删掉，避免拿旧地址继续采样
     for (const [id, row] of Array.from(S.rows.entries())) {

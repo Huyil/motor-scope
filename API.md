@@ -157,6 +157,37 @@ curl -s -X POST http://127.0.0.1:8765/api/write \
 > 不要写读清零/读后触发类寄存器。浏览器端必须手动勾选“允许写入”，
 > 且该解锁状态不跨刷新/工程切换保存。
 
+## 5.1 服务端分块压缩录制缓存（旁路，只读当前会话）
+
+现有 `/api/history`、SSE、前端 `S.samples`、`/api/record`+CSV 的语义**不变**；
+录制缓存是额外的落盘旁路，采样线程只做非阻塞入队。默认目录 `./.record-cache/`，
+默认总容量 4096 MB（`--record-cache-dir` / `--record-cache-limit-mb` /
+`--record-cache-block-points` / `--no-record-cache` 可配，目录已 gitignore）。
+
+- 会话：`session-<时间>-<随机>/`，`meta.json` 保存信号列、块索引（每通道 min/max）、
+  `saved` / `clearable` / `active`、总容量计数。
+- 块：`blk-000001.bin`，zlib 压缩；压缩前为
+  `magic/version/channels/seq/start_ms/count` 头 + int32 时间偏移 + int32 样本矩阵。
+  写入用临时文件 + `os.replace` 原子替换。块在满 `block_points`（默认 2000）、
+  最长 5 秒、或采样停止/结束时落盘（低速率下最多积压 5 秒）。
+- 退出/断开/换通道：未保存会话标记 `clearable=true`；下次启动优先删除。
+- 容量满：先删 clearable 会话 → 再按创建时间删最旧 saved 会话 → 最后裁当前活动
+  会话最旧块（保留最新块；当前正在写入的块绝不删）。单块即超限时短暂超限并记录
+  `error`。保存只写本地 `saved=true` 标记，不做云上传。
+
+```text
+GET  /api/record-cache                    # 当前会话 info（start/end/count/saved/clearable/size/limit）
+GET  /api/record-cache/overview?max_points=2000
+                                          # 当前会话每桶每通道 min/max（并 flush 当前尾巴）
+GET  /api/record-cache/window?start=&end=&max_points=20000
+                                          # 当前会话时间窗原始样本；超 max_points 时等步长抽稀
+POST /api/record-cache/save               # 标记当前会话 saved=true, clearable=false
+```
+
+`t_ms` 与 `/api/history` 一样是相对服务器启动毫秒。当前只暴露“当前会话”；
+打开旧历史（saved 旧会话列表/按会话读取）尚未实现。窗口样本的列顺序以响应里的
+`signals[]` 为准；前端按 `id` 重映射到自己的通道顺序。
+
 ## 6. Agent 轮询模板
 
 ```text

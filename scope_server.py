@@ -43,6 +43,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 import profiles
+from record_cache import RecordCache
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DEFAULT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -811,10 +812,11 @@ def parse_multipart(body: bytes, content_type: str) -> Dict[str, Tuple[str, byte
 
 
 class Sampler(threading.Thread):
-    def __init__(self, hub: Hub):
+    def __init__(self, hub: Hub, cache=None):
         super().__init__(name="motor-scope-sampler", daemon=True)
         self.hub = hub
         self.recorder = Recorder()
+        self.cache = cache          # 旁路录制缓存；None = 不启用
         self._lock = threading.RLock()
         self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()
@@ -864,6 +866,12 @@ class Sampler(threading.Thread):
                 self.generation += 1
             self.error = ""
             self._cond.notify_all()
+        # 缓存列约定变化时开新会话；不阻塞采样线程
+        if self.cache is not None:
+            try:
+                self.cache.configure([s.to_dict() for s in self.signals])
+            except Exception:
+                pass
         self._wake.set()
 
     def snapshot(self) -> Tuple[Optional[Source], List[Signal], float, int]:
@@ -898,6 +906,8 @@ class Sampler(threading.Thread):
                 self._rate_n += 1
                 self.last_t = t_ms
                 self.recorder.append(t_ms, values)
+                if self.cache is not None:
+                    self.cache.append(t_ms, values)
                 row = [round(t_ms, 1), values]
                 with self._cond:
                     self.history.append(row)
@@ -1144,6 +1154,21 @@ class App:
         self.chip: Optional[Dict[str, Any]] = None
         self.arch = "cw32"
         self.log: Deque[str] = deque(maxlen=300)
+        # 服务端分块压缩录制缓存（旁路；实时链路/Recorder/CSV 不受影响）
+        cache_dir = getattr(args, "record_cache_dir", None)
+        cache_enabled = bool(cache_dir) and not bool(getattr(args, "no_record_cache", False))
+        try:
+            limit_mb = int(getattr(args, "record_cache_limit_mb", 4096) or 4096)
+        except (TypeError, ValueError):
+            limit_mb = 4096
+        try:
+            block_points = int(getattr(args, "record_cache_block_points", 2000) or 2000)
+        except (TypeError, ValueError):
+            block_points = 2000
+        self.record_cache = RecordCache(
+            cache_dir, limit_bytes=max(1, limit_mb) * 1024 * 1024,
+            block_points=block_points, enabled=cache_enabled, logger=self.add_log)
+        self.sampler.cache = self.record_cache
         self._init_profile(args)
         self._auto_thread: Optional[threading.Thread] = None
         self.load_catalog(auto_regen=True)
@@ -1729,6 +1754,11 @@ class App:
         self.chip = None
         self.sampler.set_source(None)
         self.sampler.recorder.stop()
+        if self.record_cache is not None:
+            try:
+                self.record_cache.finish()
+            except Exception as exc:
+                self.add_log("结束录制缓存会话失败: %s" % exc)
         if src is not None:
             try:
                 src.close()
@@ -2150,6 +2180,11 @@ class App:
             self.disconnect()
         except Exception:
             pass
+        if self.record_cache is not None:
+            try:
+                self.record_cache.close()
+            except Exception:
+                pass
 
 
 # --------------------------------------------------------------------------
@@ -2321,6 +2356,28 @@ class Handler(BaseHTTPRequestHandler):
                     "oldest": samples[0][0] if samples else None,
                     "latest": samples[-1][0] if samples else None,
                 })
+            if path == "/api/record-cache":
+                return self._json(self.app.record_cache.info())
+            if path == "/api/record-cache/overview":
+                qs = parse_qs(urlparse(self.path).query)
+                try:
+                    max_points = int((qs.get("max_points") or ["2000"])[0])
+                except (TypeError, ValueError):
+                    max_points = 2000
+                return self._json(self.app.record_cache.overview(max_points))
+            if path == "/api/record-cache/window":
+                qs = parse_qs(urlparse(self.path).query)
+                def _num(name):
+                    try:
+                        return float((qs.get(name) or [""])[0])
+                    except (TypeError, ValueError):
+                        return None
+                try:
+                    max_points = int((qs.get("max_points") or ["20000"])[0])
+                except (TypeError, ValueError):
+                    max_points = 20000
+                return self._json(self.app.record_cache.window(
+                    _num("start"), _num("end"), max_points))
             if path == "/api/log":
                 return self._json({"log": self.app.log_tail(200)})
             if path == "/api/record.csv":
@@ -2414,6 +2471,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.app.write_value(payload))
             if path == "/api/record":
                 return self._json(self.app.record(payload))
+            if path == "/api/record-cache/save":
+                res = self.app.record_cache.save_current()
+                return self._json(res, 200 if res.get("ok") else 400)
             if path == "/api/catalog/reload":
                 try:
                     with self.app.catalog_lock:
@@ -2577,6 +2637,13 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     ap.add_argument("--sim", action="store_true", help="启动后直接进入仿真模式")
     ap.add_argument("--open", action="store_true", help="启动后打开浏览器")
     ap.add_argument("--rate", type=float, default=100.0, help="默认采样率 Hz")
+    ap.add_argument("--record-cache-dir", default=os.path.join(HERE, ".record-cache"),
+                    help="服务端分块压缩录制缓存目录（默认 ./.record-cache）")
+    ap.add_argument("--record-cache-limit-mb", type=int, default=4096,
+                    help="缓存总容量上限 MB（默认 4096；超限循环覆盖）")
+    ap.add_argument("--record-cache-block-points", type=int, default=2000,
+                    help="单个数据块最大点数（默认 2000）")
+    ap.add_argument("--no-record-cache", action="store_true", help="关闭服务端录制缓存")
     ap.add_argument("--verbose", action="store_true", help="打印 OpenOCD / HTTP 日志")
     return ap.parse_args(argv)
 
@@ -2730,6 +2797,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("  LAN  : 关闭（--lan-port 0 或 --host 127.0.0.1）")
     print("  AXF  : %s" % app.axf)
     print("  JSON : %s" % app.signals_path)
+    if app.record_cache.enabled:
+        print("  CACHE: %s（上限 %d MB，块 %d 点）" % (
+            app.record_cache.root, app.record_cache.limit_bytes // (1024 * 1024),
+            app.record_cache.block_points))
+    else:
+        print("  CACHE: 关闭（%s）" % (app.record_cache.error or "--no-record-cache"))
     oc = app._openocd_info()
     print("  OCD  : %s" % (oc.get("exe") or "not found"))
     print("  Ctrl+C 退出")

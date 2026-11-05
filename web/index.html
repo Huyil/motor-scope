@@ -278,6 +278,14 @@
           <span class="section-title">波形</span>
           <div class="legend" id="legend"></div>
           <div class="chart-tools">
+            <button id="btnChartFull" class="chart-full" type="button"
+                    title="全屏波形（仅隐藏顶部卡片）" aria-pressed="false">
+              <svg class="cf-ico" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                <path d="M6 2H2v4M10 2h4v4M14 10v4h-4M2 10v4h4"
+                      fill="none" stroke="currentColor" stroke-width="1.6"
+                      stroke-linecap="round" stroke-linejoin="round"></path>
+              </svg><span class="cf-label">全屏</span>
+            </button>
             <label class="tool"><span>窗口</span>
               <select id="winSel">
                 <option value="5">5 s</option>
@@ -303,6 +311,35 @@
           <div id="emptyHint" class="empty-hint">
             <div>还没有信号</div>
             <small>在左侧把“波”打开，或点击顶部“信号源”</small>
+          </div>
+        </div>
+        <div id="timelineBar" class="timeline-bar" data-mode="follow">
+          <button id="tlMode" class="tl-mode" type="button" aria-pressed="false"
+                  title="当前：跟随实时窗口（点击查看整体历史）">
+            <span class="tl-mode-dot" aria-hidden="true"></span>
+            <span id="tlModeText">跟随</span>
+          </button>
+          <div class="tl-main">
+            <div id="tlRail" class="tl-rail" tabindex="0" role="group"
+                 aria-label="波形时间轴：Ctrl+滚轮缩放，拖动手柄调整窗口，空白处点击居中">
+              <div class="tl-track-grid" aria-hidden="true"></div>
+              <div id="tlWindow" class="tl-window hidden">
+                <span class="tl-handle tl-handle-l" data-h="l" title="拖动调整窗口起点"></span>
+                <span class="tl-handle tl-handle-r" data-h="r" title="拖动调整窗口终点"></span>
+              </div>
+            </div>
+            <div class="tl-meta">
+              <span class="tl-time" id="tlFirst">--</span>
+              <span class="tl-win" id="tlWin">暂无历史</span>
+              <span class="tl-time tl-time-r" id="tlLast">--</span>
+            </div>
+          </div>
+          <div id="tlCache" class="tl-cache hidden" title="服务端分块压缩缓存（仅本地，不上传）">
+            <span id="tlCacheSize">缓存 --</span>
+            <span id="tlCacheLimit" class="tl-cache-limit"></span>
+            <span id="tlCacheState" class="tl-cache-state"> · --</span>
+            <button id="tlCacheSave" class="tl-cache-save hidden" type="button"
+                    title="标记当前缓存会话为已保存（本地标记，不上传）">保存</button>
           </div>
         </div>
       </section>

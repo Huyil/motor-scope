@@ -11,3 +11,6 @@ profiles/*/config.json
 
 # 手册抽取中间产物（子智能体输出，不进 git）
 .work/
+
+# 服务端分块压缩录制缓存（运行期数据，不进 git）
+.record-cache/
