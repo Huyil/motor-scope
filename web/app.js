@@ -3295,7 +3295,8 @@
   }
 
   async function shareViewLink() {
-    if (!S.status || !S.status.lan) {
+    const lanNow = S.status && S.status.lan;
+    if (!lanNow || !Array.isArray(lanNow.ips) || lanNow.ips.length === 0) {
       try {
         const st = await fetchJSON('/api/status');
         if (st && st.lan) S.status = st;
