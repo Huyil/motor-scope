@@ -6,9 +6,18 @@ imports/
 # 想让它跟着 git 走就删掉这一行.
 runtime/
 
-# 机型工程（profiles/）整体不进 git：本地保留，仅作为运行时/用户数据。
-# 如需临时强制加入某个文件：git add -f profiles/<path>
-profiles/
+# 机型工程（profiles/）里的用户数据不进 git，但 profiles/demo/ 例外。
+# 注意：不能直接写 profiles/ —— 父目录一旦被忽略，git 不会进入它，
+# 后面的 !profiles/demo/ 就失效了。所以按「内容」逐条忽略。
+profiles/*/signals.json
+profiles/*/profile.json
+profiles/*/config.json
+profiles/*/annotations.json
+profiles/index.json
+# 上面规则会误伤 profiles/demo/*.signals.json，这里放行演示表
+!profiles/demo/
+!profiles/demo/*.json
+!profiles/demo/README.md
 
 # OpenOCD 相关：主仓只跟踪 submodule 指针，不含二进制内容。
 #   tools/openocd-cfg/       → submodule: github.com/Huyil/motor-scope-openocd-cfg（target cfg 存档）

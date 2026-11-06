@@ -1574,6 +1574,17 @@ class App:
             self.add_log("合并变量注释失败: %s" % exc)
         return 0
 
+    def _demo_catalog_path(self) -> str:
+        """仿真演示符号表路径（profiles/demo/<机型>.signals.json）。
+
+        没有任何真实符号表时用它兜底，让新用户连仿真就能看到曲线。
+        地址是假的，不能用于实机。"""
+        pid = str((self.profile or {}).get("id") or "")
+        if not pid:
+            return ""
+        path = os.path.join(self.profiles_root, "demo", "%s.signals.json" % pid)
+        return path if os.path.isfile(path) else ""
+
     def load_catalog(self, auto_regen: bool = True) -> None:
         with self.catalog_lock:
             data = None
@@ -1593,6 +1604,19 @@ class App:
                 except Exception as exc:
                     self.catalog_error = "自动生成信号表失败: %s" % exc
                     self.add_log(self.catalog_error)
+            if data is None:
+                # 该机型还没有真实符号表（新 clone / 没导入过 AXF）。
+                # 回退到 profiles/demo/ 的仿真演示表，保证连仿真就能看到曲线；
+                # 日志里明确标注，避免被误当成真实固件符号。
+                demo = self._demo_catalog_path()
+                if demo:
+                    try:
+                        with open(demo, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        self.add_log("未找到机型符号表，已使用仿真演示符号表: %s"
+                                     % os.path.basename(demo))
+                    except Exception as exc:
+                        self.add_log("读取演示符号表失败: %s" % exc)
             if data is None:
                 data = {"meta": {}, "variables": [], "peripherals": [],
                         "defaults": [], "stall": {}}
@@ -2083,9 +2107,8 @@ class App:
         exe = payload.get("openocd") or self.openocd_override
         iface = payload.get("iface") or self.iface_override or prof.get("interface") or ""
         target = payload.get("target") or self.target_override or prof.get("target") or ""
-        target = profiles.host_path(str(target))
-        if target and not os.path.isabs(target):
-            target = os.path.abspath(os.path.join(HERE, target))
+        # 目录名无关解析：绝对路径直接用；相对路径按工程根；再不行在 tools/*/target/ 搜同名
+        target = profiles.resolve_target(str(target), HERE)
         if self.arch == "riscv":
             paths = ocd.find_wch_openocd(self.project, exe)
             if paths is None:

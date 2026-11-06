@@ -1,0 +1,256 @@
+{
+ "meta": {
+  "generated_at": "demo",
+  "axf": "",
+  "mcu": "LKS32MC07x",
+  "ram": [
+   536870912,
+   536883200
+  ],
+  "variable_count": 19,
+  "peripheral_count": 0,
+  "profile": "demo",
+  "note": "仿真演示用假符号表：地址不指向真实外设，实机前必须用固件 AXF 重建（接口 /api/catalog/import 或「重建当前机型符号」）。"
+ },
+ "variables": [
+  {
+   "name": "motor.over.current",
+   "addr": 536871168,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "相电流（仿真：随负载波动）",
+   "unit": "A",
+   "axis": "right"
+  },
+  {
+   "name": "motor.over.thresholdLast",
+   "addr": 536871172,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "堵转阈值（仿真：随转速档位变化）",
+   "unit": "A",
+   "axis": "right"
+  },
+  {
+   "name": "adc.RES[0]",
+   "addr": 536871176,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "adc",
+   "desc": "ADC 采样原始值（含高频纹波）",
+   "unit": "counts",
+   "axis": "left"
+  },
+  {
+   "name": "motor.Scfg.vol",
+   "addr": 536871180,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "母线电压估算",
+   "unit": "V",
+   "axis": "right"
+  },
+  {
+   "name": "motor.Scfg.speed",
+   "addr": 536871184,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "转速设定",
+   "unit": "rpm",
+   "axis": "right"
+  },
+  {
+   "name": "motor.speedlevel",
+   "addr": 536871188,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "转速档位 1..35",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "motor.state",
+   "addr": 536871192,
+   "size": 2,
+   "signed": false,
+   "type": "int16_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "状态机状态（3 巡航 / 4 过载）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "motor.over.offsetThreshold",
+   "addr": 536871196,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "过载阈值偏移",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "motor.over.offset",
+   "addr": 536871200,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "过载偏移基线",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "motor.over.totalOverTick",
+   "addr": 536871204,
+   "size": 4,
+   "signed": false,
+   "type": "int32_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "累计过载 tick",
+   "unit": "tick",
+   "axis": "right"
+  },
+  {
+   "name": "motor.power",
+   "addr": 536871208,
+   "size": 2,
+   "signed": false,
+   "type": "int16_t",
+   "bit": null,
+   "group": "motor",
+   "desc": "运行/停机标志",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "adc.conts",
+   "addr": 536871212,
+   "size": 2,
+   "signed": false,
+   "type": "int16_t",
+   "bit": null,
+   "group": "adc",
+   "desc": "ADC 采样计数（滚动）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sys.state",
+   "addr": 536871216,
+   "size": 2,
+   "signed": false,
+   "type": "int16_t",
+   "bit": null,
+   "group": "sys",
+   "desc": "系统状态",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sim.sawtooth",
+   "addr": 536871936,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "sim",
+   "desc": "锯齿波（仿真测试波形）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sim.triangle",
+   "addr": 536871940,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "sim",
+   "desc": "三角波（仿真测试波形）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sim.square",
+   "addr": 536871944,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "sim",
+   "desc": "方波（仿真测试波形）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sim.noise",
+   "addr": 536871948,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "sim",
+   "desc": "噪声（仿真测试波形）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sim.spike",
+   "addr": 536871952,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "sim",
+   "desc": "尖峰（仿真测试波形）",
+   "unit": "",
+   "axis": "right"
+  },
+  {
+   "name": "sim.ripple",
+   "addr": 536871956,
+   "size": 4,
+   "signed": true,
+   "type": "int32_t",
+   "bit": null,
+   "group": "sim",
+   "desc": "纹波（仿真测试波形）",
+   "unit": "",
+   "axis": "right"
+  }
+ ],
+ "peripherals": [],
+ "defaults": [
+  "motor.over.current",
+  "motor.over.thresholdLast",
+  "adc.RES[0]",
+  "motor.Scfg.speed"
+ ],
+ "stall": {
+  "current": "motor.over.current",
+  "threshold": "motor.over.thresholdLast"
+ }
+}

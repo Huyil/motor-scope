@@ -96,7 +96,9 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         "core": "cortex-m0",
         "note": "LKS32MC07x 无感 FOC（Linko）",
         "ram": [0x20000000, 0x20003000],
-        "target": "profiles/targets/lks32mc07x.cfg",
+        # 相对路径按工程根解析；实际使用前由 resolve_target() 在
+        # tools/*/target/ 下自动查找（cfg 仓库目录名可任意）。
+        "target": "tools/openocd-cfg/target/lks32mc07x.cfg",
         "interface": "",
         # LKS 的默认信号分布在 0x20000020..0x200004f8, 合并成一次读
         "scan": {"max_gap": 2048, "max_words": 512},
@@ -135,6 +137,45 @@ def host_path(path: str) -> str:
     if m:
         return "/mnt/%s/%s" % (m.group(1).lower(), m.group(2).replace("\\", "/"))
     return str(path)
+
+
+def resolve_target(target: str, project_root: str = "") -> str:
+    """把机型 profile 里的 `target` 解析成可用的 cfg 路径。
+
+    目标配置可能来自：
+      1. 绝对路径 / 已是可读文件 -> 直接用
+      2. 工程内相对路径（如 tools/openocd-cfg/target/lks32mc07x.cfg）-> 按工程根解析
+      3. 兜底：在 tools/*/target/ 下按文件名搜索 —— cfg 仓库的**目录名不固定**，
+         只要用户把 submodule 放在 tools/ 下（名字随意）就能找到
+
+    找不到时原样返回，由调用方报告亲路径错误。
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return ""
+    root = os.path.abspath(project_root or ROOT)
+    p = host_path(raw)
+    if os.path.isabs(p):
+        return p if os.path.isfile(p) else p
+    cand = os.path.abspath(os.path.join(root, p))
+    if os.path.isfile(cand):
+        return cand
+    # 3) 目录名无关：tools/*/target/<basename>
+    name = os.path.basename(raw.replace("\\", "/"))
+    if name:
+        tools_dir = os.path.join(root, "tools")
+        try:
+            for entry in sorted(os.listdir(tools_dir)):
+                sub = os.path.join(tools_dir, entry)
+                if not os.path.isdir(sub):
+                    continue
+                for rel in ("target", "", "scripts/target"):
+                    probe = os.path.join(sub, rel, name) if rel else os.path.join(sub, name)
+                    if os.path.isfile(probe):
+                        return probe
+        except OSError:
+            pass
+    return cand
 
 
 def _now() -> str:
