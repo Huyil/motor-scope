@@ -397,18 +397,62 @@ class OpenOcdSource(Source):
         # 区域合并参数: 机型 profile.scan 可覆盖 (地址跨度大时减少往返次数)
         self.max_gap = 64
         self.max_words = 64
+        # 调试器代价模型 (ms): 每多一块读区 / 每多读一个字的边际开销.
+        # None = 首次采样前自动标定一次 (不同探针差一个量级, 不能写死).
+        self.region_cost: Optional[float] = None
+        self.word_cost: Optional[float] = None
+        self.calibrated = False
+
+    def _calibrate(self, signals: Sequence[Signal]) -> None:
+        """测一次当前探针的固定往返开销和每字开销 (只读, 不 halt Cortex-M)."""
+        self.calibrated = True
+        addr = int(signals[0].span()[0]) & ~0x3
+        if self.riscv:
+            # halt 读: 停核/恢复的代价在 _read 之外, 这里只给块内边际值一个保守估计
+            self.region_cost, self.word_cost = 0.4, 0.25
+            return
+
+        def timeit(words: int) -> float:
+            best = float("inf")
+            for _ in range(3):
+                t0 = time.perf_counter()
+                self.client.read_regions([(addr, words)])
+                best = min(best, (time.perf_counter() - t0) * 1000.0)
+            return best
+
+        try:
+            one = timeit(1)
+            many = timeit(64)
+            if many > one:
+                self.word_cost = max(0.002, (many - one) / 63.0)
+            else:
+                self.word_cost = 0.03
+            self.region_cost = max(0.1, one - self.word_cost)
+        except Exception as exc:
+            self.region_cost, self.word_cost = 2.0, 0.03
+            try:
+                self.proc._append_log("代价标定失败, 用保守默认值: %s" % exc)
+            except Exception:
+                pass
 
     def _prepare(self, signals: Sequence[Signal]) -> None:
         key = tuple((s.addr, s.span()[1]) for s in signals)
         if key == self._region_key:
             return
+        if not self.calibrated:
+            self._calibrate(signals)
         self.regions = ocd.plan_regions([s.span() for s in signals],
                                         max_words=self.max_words,
-                                        max_gap=self.max_gap)
+                                        max_gap=self.max_gap,
+                                        region_cost=self.region_cost,
+                                        word_cost=self.word_cost)
+        words = sum(r.words for r in self.regions)
+        cost = ocd.plan_cost(self.regions, self.region_cost, self.word_cost)
         try:
-            self.proc._append_log("采样区域: %d 块 / %d 字 (gap<=%d, max=%d)" % (
-                len(self.regions), sum(r.words for r in self.regions),
-                self.max_gap, self.max_words))
+            self.proc._append_log("采样区域: %d 块 / %d 字 (gap<=%d, 标定 %.2f ms/块 + %.3f ms/字%s)" % (
+                len(self.regions), words, self.max_gap,
+                self.region_cost or 0.0, self.word_cost or 0.0,
+                ", 预计 %.1f ms/轮 ≈ %.0f Hz" % (cost, 1000.0 / cost) if cost else ""))
         except Exception:
             pass
         self._starts = []
@@ -417,6 +461,18 @@ class OpenOcdSource(Source):
             self._starts.append(total)
             total += r.words
         self._region_key = key
+
+    def plan_stats(self) -> Dict[str, Any]:
+        words = sum(r.words for r in self.regions)
+        cost = ocd.plan_cost(self.regions, self.region_cost, self.word_cost)
+        return {
+            "regions": len(self.regions),
+            "words": words,
+            "region_cost_ms": self.region_cost,
+            "word_cost_ms": self.word_cost,
+            "estimate_ms": cost,
+            "estimate_hz": (1000.0 / cost) if cost else None,
+        }
 
     def read(self, signals: Sequence[Signal]) -> List[int]:
         if not signals:
@@ -499,6 +555,7 @@ class OpenOcdSource(Source):
             "iface": p.paths.iface,
             "target": p.paths.target,
             "cpuid": self.cpuid,
+            "plan": self.plan_stats(),
         }
 
 
@@ -515,9 +572,19 @@ class AttachedSource(Source):
         self._inner.regions = []
         self._inner._region_key = None
         self._inner._starts = []
+        self._inner.riscv = False
+        self._inner.try_nohalt = False
+        self._inner.max_gap = 64
+        self._inner.max_words = 64
+        self._inner.region_cost = None
+        self._inner.word_cost = None
+        self._inner.calibrated = False
 
     def read(self, signals: Sequence[Signal]) -> List[int]:
         return OpenOcdSource.read(self._inner, signals)
+
+    def plan_stats(self) -> Dict[str, Any]:
+        return OpenOcdSource.plan_stats(self._inner)
 
     def read_word(self, addr: int) -> int:
         return self.client.read_words(int(addr) & ~0x3, 1)[0]
@@ -530,7 +597,35 @@ class AttachedSource(Source):
 
     def info(self) -> Dict[str, Any]:
         return {"kind": "attach", "connected": self.client.connected,
-                "host": self.host, "port": self.port, "cpuid": self.cpuid}
+                "host": self.host, "port": self.port, "cpuid": self.cpuid,
+                "plan": self.plan_stats()}
+
+
+def sim_test_wave(name: str, t: float, rand: random.Random) -> float:
+    """仿真源的显式测试波形（不依赖信号目录，可按 name 注入）.
+
+    ``sim.sawtooth`` / ``sim.triangle`` / ``sim.square`` / ``sim.noise`` /
+    ``sim.spikes`` / ``sim.ripple``；也接受 ``sim.xxx.1`` 之类后缀。
+    """
+    n = str(name or "").lower()
+    ph = lambda p: (t / p) % 1.0
+    if n.startswith("sim.sawtooth"):
+        return 1000.0 + 500.0 * (2.0 * ph(1.6) - 1.0)
+    if n.startswith("sim.triangle"):
+        p = ph(1.6)
+        return 1000.0 + 500.0 * (1.0 - 4.0 * abs(p - 0.5))
+    if n.startswith("sim.square"):
+        return 1500.0 if ph(1.2) < 0.5 else 500.0
+    if n.startswith("sim.noise"):
+        return 1000.0 + 120.0 * rand.gauss(0.0, 1.0) + 80.0 * math.sin(t * 0.35)
+    if n.startswith("sim.spikes"):
+        spike = 900.0 if (t % 1.7) < 0.05 else 0.0
+        return 1000.0 + spike + 25.0 * rand.gauss(0.0, 1.0)
+    if n.startswith("sim.ripple"):
+        return (1000.0 + 220.0 * math.sin(t * 2.0 * math.pi * 3.1)
+                + 45.0 * math.sin(t * 2.0 * math.pi * 31.0)
+                + 25.0 * rand.gauss(0.0, 1.0))
+    return 1000.0 + 300.0 * math.sin(t * 2.0 * math.pi / 2.5)
 
 
 class SimSource(Source):
@@ -615,6 +710,9 @@ class SimSource(Source):
                 v = int(t * 40) % 10
             elif name == "sys.state":
                 v = 1
+            elif name.startswith("sim."):
+                # 测试波形：锯齿/三角/方波/噪声/尖峰/纹波（API 注入 signal 即可用）
+                v = sim_test_wave(name, t, self.rand)
             else:
                 # 未建模的信号给一个缓慢的正弦, 便于区分
                 h = sum(ord(c) for c in name) or 1
@@ -828,6 +926,8 @@ class Sampler(threading.Thread):
         self.epoch = time.monotonic()
         self.samples = 0
         self.rate_actual = 0.0
+        self.busy_ms = 0.0      # 一轮采样(读内存+入队+推送)的平滑耗时
+        self.duty = 0.0         # 占用率 = busy_ms / 目标周期; >1 表示读不过来
         self.last_t = 0.0
         self.error = ""
         self.generation = 0
@@ -926,13 +1026,42 @@ class Sampler(threading.Thread):
                 continue
             elapsed = time.monotonic() - t0
             period = 1.0 / rate if rate > 0 else 0.0
+            # 占用率 = 一轮“读内存 + 入队/推送”耗时占目标周期的比例.
+            # >100% 说明读一轮已经超过设定周期: 实际速率由探针决定, 不是设定值.
+            with self._lock:
+                self.busy_ms = (elapsed * 1000.0 if not self.busy_ms
+                                else self.busy_ms * 0.8 + elapsed * 1000.0 * 0.2)
+                self.duty = (self.busy_ms / (period * 1000.0)) if period > 0 else 0.0
             next_t = max(next_t + period, t0 + 0.002) if next_t else t0 + period
-            sleep = next_t - time.monotonic()
-            if sleep > 0:
-                self._wake.wait(min(sleep, 1.0))
+            if next_t <= time.monotonic():
+                # 读一轮已经超过周期: 从当下重新排, 不追赶 (读不动就降速, 不堆积)
+                next_t = time.monotonic()
+            elif self._pace(next_t):
+                next_t = time.monotonic()
+
+    def _pace(self, deadline: float) -> bool:
+        """睡到 deadline; 返回是否在 deadline 之前被配置变更唤醒.
+
+        Windows 上 Event.wait(timeout) 走系统定时器: 进程没调
+        timeBeginPeriod(1) 时最小 15.6ms, 调了也有 ~1ms 的过冲. 所以
+        先按“deadline 前 1.5ms”等, 最后这点用自旋补齐; 否则 250/300 Hz
+        这种目标会被定时器粒度直接吃掉 (0.5ms 的 sleep 变成 1.5ms).
+        自旋最多 ~1.5ms/轮, 100Hz 时约 5% 一个核.
+        """
+        while True:
+            if self._wake.is_set():
+                self._wake.clear()
+                return True
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                return False
+            if remain > 0.0025:
+                self._wake.wait(min(remain - 0.0015, 1.0))
                 self._wake.clear()
             else:
-                next_t = time.monotonic()
+                while time.monotonic() < deadline:
+                    pass
+                return False
 
     def history_snapshot(self, seconds: float = 60.0) -> List[List[Any]]:
         with self._lock:
@@ -1043,6 +1172,8 @@ class Sampler(threading.Thread):
             return {
                 "rate": self.rate,
                 "rate_actual": round(self.rate_actual, 1),
+                "busy_ms": round(self.busy_ms, 2),
+                "duty": round(self.duty, 3),
                 "samples": self.samples,
                 "last_t": round(self.last_t, 1),
                 "error": self.error,
@@ -1993,6 +2124,11 @@ class App:
                 src.max_gap = max(0, int(scan["max_gap"]))
             if scan.get("max_words"):
                 src.max_words = max(1, int(scan["max_words"]))
+            # 代价模型也可在 profile.scan 写死 (两项都给才跳过自动标定)
+            if scan.get("region_cost") is not None and scan.get("word_cost") is not None:
+                src.region_cost = max(0.01, float(scan["region_cost"]))
+                src.word_cost = max(0.0001, float(scan["word_cost"]))
+                src.calibrated = True
         except Exception:
             pass
         if src.riscv:
@@ -2875,6 +3011,30 @@ def setup_windows_portproxy(lan_port: int, local_port: int) -> Tuple[bool, str]:
     return False, (msg[:300] or "netsh 返回 %d" % p.returncode)
 
 
+_WIN_TIMER_RES = False
+
+
+def set_windows_timer_resolution(on: bool = True) -> bool:
+    """把 Windows 定时器精度提到 1ms.
+
+    采样线程靠 Event.wait 定时, 而 Windows 上它的粒度默认是 15.6ms:
+    任何小于 15.6ms 的等待都会变成 15.6ms. 不调这个, 100 Hz 目标实际只能
+    到 ~60 Hz, 250/300 Hz 更不可能; 调完之后 1ms 级等待是 ~1.5-2ms.
+    """
+    global _WIN_TIMER_RES
+    if os.name != "nt" or _WIN_TIMER_RES == on:
+        return _WIN_TIMER_RES
+    try:
+        import ctypes
+        winmm = ctypes.WinDLL("winmm")
+        fn = winmm.timeBeginPeriod if on else winmm.timeEndPeriod
+        if fn(1) == 0:
+            _WIN_TIMER_RES = on
+    except Exception:
+        pass
+    return _WIN_TIMER_RES
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         # Windows 真控制台让 Python 走 Unicode API (PEP 528), 不要强改;
@@ -2886,6 +3046,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception:
         pass
     args = parse_args(argv)
+    set_windows_timer_resolution(True)
     app = App(args)
 
     server = None
@@ -2966,6 +3127,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     def _atexit():
         try:
             app.shutdown()
+        except Exception:
+            pass
+        try:
+            set_windows_timer_resolution(False)
         except Exception:
             pass
     atexit.register(_atexit)

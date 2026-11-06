@@ -117,7 +117,7 @@
           <span class="ctl-head"><span class="ctl-kicker">采样率</span><span class="ctl-go">›</span></span>
           <strong class="ctl-val" id="cardRateVal">100 <i>Hz</i></strong>
           <small class="ctl-sub" id="cardRateSub">实际 --</small>
-          <span class="ctl-bar"><i id="cardRateBar"></i><em id="cardRateBarText">余量 --</em></span>
+          <span class="ctl-bar"><i id="cardRateBar"></i><em id="cardRateBarText">占用 --</em></span>
         </div>
       </section>
 
@@ -244,6 +244,8 @@
             <option value="100" selected>100 Hz</option>
             <option value="150">150 Hz</option>
             <option value="200">200 Hz</option>
+            <option value="250">250 Hz</option>
+            <option value="300">300 Hz</option>
           </select>
         </div>
         <div class="field"><label>窗口</label>
@@ -257,13 +259,7 @@
         </div>
       </div>
       <div class="fp-sep"></div>
-      <div class="field"><label>余量 = 阈值 − 电流</label>
-        <div class="row2">
-          <select id="marginCur" title="电流信号"></select>
-          <select id="marginThr" title="阈值信号"></select>
-        </div>
-      </div>
-      <p class="hint">顶部采样率卡片底部进度条显示余量（阈值 − 电流）。RISC-V 读取需要短暂 halt：可选 1 / 2 / 5 / 10 / 20 / 50 Hz；50 Hz 约一半时间在 halt，越低干扰越小。</p>
+      <p class="hint">顶部采样率卡片底部进度条显示<b>占用率</b>：一轮读内存的耗时占目标周期的比例。100% 表示刚好读得过来，超过就自动降速（实际值看卡片上的“实际 x Hz / ms 每轮”）。采样越少、地址越集中越快；RISC-V 读取需要短暂 halt：可选 1 / 2 / 5 / 10 / 20 / 50 Hz，越低干扰越小。</p>
         </div>
       </section>
 
@@ -297,6 +293,7 @@
             </label>
             <label class="tool check"><input type="checkbox" id="autoZero"> 从 0</label>
             <label class="tool check"><input type="checkbox" id="fillOn" checked> 填充</label>
+            <div id="renderModes" class="render-modes" role="group" aria-label="波形渲染方式" title="波形渲染方式；均线在样本数≤像素数时自动关闭"></div>
             <label class="tool check"><input type="checkbox" id="gridOn" checked> 网格</label>
             <label class="tool check" title="0 / 中线参考线"><input type="checkbox" id="zeroLine" checked> 0 线</label>
             <label class="tool check" title="余晖 / 荧光渲染（简化后处理）"><input type="checkbox" id="glowOn"> 余晖</label>
@@ -418,6 +415,9 @@
 
 <div id="toasts" class="toasts"></div>
 
+<script src="/render-core.js"></script>
+<script src="/render-glm.js"></script>
+<script src="/render-ds.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

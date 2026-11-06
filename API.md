@@ -36,6 +36,24 @@
 - `t_ms` 是相对服务器启动的毫秒，不是 wall clock；可用 `/api/status` 的 `uptime` 反推；
 - `generation` 是配置代数：改通道/换信号源会 +1，旧游标作废。
 
+### 1.1 仿真测试波形（仅 `--sim`）
+
+为了测试非正弦渲染（锯齿/三角/方波/噪声/尖峰/纹波），`--sim` 下可以直接 POST
+`/api/config` 加入 name 以 `sim.` 开头的信号（地址任取不重复即可）：
+
+| name | 波形 |
+| --- | --- |
+| `sim.sawtooth` | 1.6s 锯齿 |
+| `sim.triangle` | 1.6s 三角 |
+| `sim.square` | 1.2s 方波（建议 step=true） |
+| `sim.noise` | 高斯噪声 + 慢漂移 |
+| `sim.spikes` | 基线 + 1.7s 周期尖峰 |
+| `sim.ripple` | 3.1Hz + 31Hz 纹波 + 噪声 |
+
+例如在现有 config 后追加
+`{"id":"sim.sawtooth","name":"sim.sawtooth","addr":536879104,"size":4,"table":true,"plot":true}`，
+再 POST 回去；SimSource 按 name 生成。用于验证均线/振幅带在非正弦波形上的渲染。
+
 ## 2. 读之前（默认，立即返回）
 
 ```http
@@ -196,7 +214,7 @@ POST /api/record-cache/save               # 标记当前会话 saved=true, clear
 
 - `POST /api/signal-flags` 影响 UI 的“表/波/写”开关和波形颜色；打开页面收到 SSE `flags`
   （或 3s 轮询 `GET /api/signal-flags`）后应用并重新 POST `/api/config`。
-  **没有表/波/写任何一项的行不会进入采样**，因此 `/api/config` 与 `/api/history` 的列会减少。
+  **只有表/波/支撑会进入实时采样；仅 `write:true`、表/波都关的行不会进入采样**，因此 `/api/config` 与 `/api/history` 的列会减少。
 - `color` 接受 `#RGB` / `#RRGGBB`（可省略 `#`）；会立即同步到 `/api/config` 的
   `config.signals[].color`（已采样行），并广播给页面，用于图例/波形颜色。
 - `write:true` 等价于把该信号加入写入模块；`write:false` 移除。写入仍需页面手动解锁。
@@ -255,3 +273,6 @@ def api(path):
 - 无鉴权、无 TLS；不要绑 `0.0.0.0` 暴露到网络。
 - 时间戳相对服务器启动；需要 wall clock 自己加。
 - 采样率受 SWD/Tcl 限制；实际值看 `status.sampler.rate_actual`。
+  `status.sampler.busy_ms` 是一轮读内存的平滑耗时，`status.sampler.duty` 是它占目标周期的比例
+  （>1 表示读不过来，实际速率由探针决定）；`status.source.plan` 给出当前分块数、字数、
+  标定出的 `region_cost_ms` / `word_cost_ms` 与估算 Hz。

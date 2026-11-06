@@ -506,18 +506,30 @@ class Region:
 
 
 def plan_regions(spans: Iterable[Tuple[int, int]], max_words: int = 64,
-                 max_gap: int = 64) -> List[Region]:
+                 max_gap: int = 64, region_cost: Optional[float] = None,
+                 word_cost: Optional[float] = None) -> List[Region]:
     """把 (addr, size) 合并成尽量少的 word 读区间.
 
-    合并规则: 下一个地址距当前区间末尾 <= max_gap 字节, 且总长不超过 max_words 字.
+    合并规则: 下一个地址距当前区间末尾 <= gap_limit 字节, 且总长不超过 max_words 字.
+
+    只按 max_gap 合并会犯一个错: 两个 3 字节的信号隔着 2 KB 时, 合并省下一次
+    调试器往返(固定开销), 却要多读 500 个字. 给 region_cost / word_cost
+    (ms, 同一单位) 后按代价求盈亏平衡点:
+        跨 gap 合并 = 多读 gap/4 字 -> 多花 gap/4*word_cost
+        不合并     = 多一次往返      -> 多花 region_cost
+    于是 gap_limit = min(max_gap, 4*region_cost/word_cost).
     """
+    gap_limit = max(0, int(max_gap))
+    if region_cost and word_cost and word_cost > 0:
+        by_cost = int(round(float(region_cost) / float(word_cost))) * 4
+        gap_limit = min(gap_limit, max(0, by_cost))
     items = sorted((int(a), max(1, int(s))) for a, s in spans)
     regions: List[Region] = []
     cur_addr = cur_end = 0
     for addr, size in items:
         start = addr & ~0x3
         end = (addr + size + 3) & ~0x3
-        if regions and start - cur_end <= max_gap and (end - cur_addr) <= max_words * 4:
+        if regions and start - cur_end <= gap_limit and (end - cur_addr) <= max_words * 4:
             cur_end = max(cur_end, end)
             regions[-1].end = cur_end
             regions[-1].words = (cur_end - cur_addr) // 4
@@ -525,6 +537,15 @@ def plan_regions(spans: Iterable[Tuple[int, int]], max_words: int = 64,
             cur_addr, cur_end = start, end
             regions.append(Region(cur_addr, (cur_end - cur_addr) // 4, cur_end))
     return regions
+
+
+def plan_cost(regions: Sequence[Region], region_cost: Optional[float],
+              word_cost: Optional[float]) -> Optional[float]:
+    """按代价模型估算一轮读取的耗时 (ms); 没有模型时返回 None."""
+    if region_cost is None or word_cost is None:
+        return None
+    return len(regions) * float(region_cost) + \
+        sum(r.words for r in regions) * float(word_cost)
 
 
 def decode_word(word: int, addr: int, region: Region, size: int) -> int:

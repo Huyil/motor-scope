@@ -104,6 +104,8 @@
     signalFlagsTimer: 0,
     autoZero: false,
     fillOn: true,
+    smoothOn: true,
+    renderMode: 'mean',
     gridOn: true,
     zeroLine: true,
     glow: false,
@@ -111,7 +113,6 @@
     chip: null,
     lastMode: 'openocd',
     arch: 'cw32',
-    margin: { cur: '', thr: '' },
     recordSel: new Set(),
     mcu: {
       models: [], active: '', detected: '', candidates: [], exact: false,
@@ -155,6 +156,7 @@
     pinTipW: 0,
     pinTipH: 0,
     view: null,
+    paneRanges: new Map(),
     size: { w: 0, h: 0 },
     ui: {
       tab: 'vars',
@@ -307,6 +309,7 @@
     D.tlFirst = $('#tlFirst');
     D.tlLast = $('#tlLast');
     D.tlWin = $('#tlWin');
+    D.renderModes = $('#renderModes');
     D.tlCache = $('#tlCache');
     D.tlCacheSize = $('#tlCacheSize');
     D.tlCacheLimit = $('#tlCacheLimit');
@@ -344,8 +347,6 @@
     D.btnRecVars = $('#btnRecVars');
     D.recVars = $('#recVars');
     D.btnRecExport = $('#btnRecExport');
-    D.marginCur = $('#marginCur');
-    D.marginThr = $('#marginThr');
     D.cardSourceVal = $('#cardSourceVal');
     D.cardSourceSub = $('#cardSourceSub');
     D.cardRateVal = $('#cardRateVal');
@@ -607,44 +608,6 @@
     return new Date(epoch * 1000).toLocaleTimeString('zh-CN', { hour12: false });
   }
 
-  function ensureMarginDefaults() {
-    const rows = Array.from(S.rows.values()).filter((r) => !r.support && r.addr);
-    if (!rows.length) { S.margin.cur = ''; S.margin.thr = ''; return; }
-    if (!rows.some((r) => r.id === S.margin.cur)) {
-      S.margin.cur = (rows.find((r) => /current/i.test(r.name)) || rows[0]).id;
-    }
-    if (!rows.some((r) => r.id === S.margin.thr)) {
-      S.margin.thr = (rows.find((r) => /threshold/i.test(r.name)) || rows[1] || rows[0]).id;
-    }
-  }
-
-  function marginInfo() {
-    const last = latestSample();
-    if (!last) return null;
-    const cur = S.rows.get(S.margin.cur), thr = S.rows.get(S.margin.thr);
-    if (!cur || !thr) return null;
-    const c = rowValue(cur, last[1]);
-    const t = rowValue(thr, last[1]);
-    if (c === null || t === null || !isFinite(c) || !isFinite(t)) return null;
-    return { cur: c, thr: t, margin: t - c };
-  }
-
-  function renderMarginSelects() {
-    ensureMarginDefaults();
-    const rows = Array.from(S.rows.values()).filter((r) => !r.support && r.addr);
-    for (const [el, key] of [[D.marginCur, 'cur'], [D.marginThr, 'thr']]) {
-      if (!el) continue;
-      el.innerHTML = '';
-      for (const r of rows) {
-        const o = document.createElement('option');
-        o.value = r.id;
-        o.textContent = shortName(r.name);
-        el.appendChild(o);
-      }
-      el.value = S.margin[key] || '';
-    }
-  }
-
   function renderRecordVars(signals) {
     if (!D.recVars) return;
     const list = (signals || []).filter((s) => s && s.id);
@@ -756,16 +719,27 @@
 
     const target = Number(S.rate) || 0;
     const actual = Number(S.sampler?.rate_actual) || 0;
+    const busy = Number(S.sampler?.busy_ms) || 0;
+    const duty = Number(S.sampler?.duty) || 0;
     if (D.cardRateVal) D.cardRateVal.innerHTML = target + ' <i>Hz</i>';
-    if (D.cardRateSub) D.cardRateSub.textContent = connected ? '实际 ' + actual.toFixed(1) + ' Hz' : '实际 --';
-    const mi = marginInfo();
-    const pct = mi && mi.thr > 0 ? Math.max(0, Math.min(100, mi.margin / mi.thr * 100)) : 0;
+    if (D.cardRateSub) {
+      D.cardRateSub.textContent = connected
+        ? '实际 ' + actual.toFixed(1) + ' Hz · ' + busy.toFixed(1) + ' ms/轮'
+        : '实际 --';
+    }
+    // 占用率 = 一轮读+推送耗时 / 目标周期; 拉满说明探针已经读不过来
+    const pct = Math.max(0, Math.min(100, duty * 100));
     if (D.cardRateBar) {
       D.cardRateBar.style.width = pct.toFixed(1) + '%';
-      D.cardRateBar.classList.toggle('neg', !!mi && mi.margin < 0);
+      D.cardRateBar.classList.toggle('neg', duty >= 0.95);
     }
     if (D.cardRateBarText) {
-      D.cardRateBarText.textContent = mi ? '余量 ' + fmtTableNum(mi.margin) : '余量 --';
+      D.cardRateBarText.textContent = connected
+        ? '占用 ' + (duty * 100).toFixed(0) + '%'
+        : '占用 --';
+      D.cardRateBarText.title = connected
+        ? '每轮采样耗时 / 目标周期 (1/' + target + 's)。100% 表示刚好读得过来，超过就自动降速'
+        : '连接后显示采样占用率';
     }
     renderRecordPanel();
   }
@@ -787,7 +761,7 @@
 
   // ---------------------------------------------------------------- rows / channels
   // 设计：S.rows 是用户拥有的行（含隐藏支撑通道、表/波/写全关的行）；
-  // S.signals 只放真正要下发给 /api/config 的通道：至少勾选表/波/写之一，
+  // S.signals 只放真正要下发给 /api/config 的通道：至少勾选表/波/支撑之一，
   // 或作为 AVG 支撑/写入目标；samples 的列与它一一对应。
   const MAX_SAMPLED = 24;
 
@@ -901,7 +875,7 @@
     return ids.size;
   }
 
-  // “已选择”保留本地拥有的行；真正进入采样的是表/波/写至少一个打开的行（见 syncChannels）
+  // “已选择”保留本地拥有的行；真正进入实时采样的是表/波/支撑打开的行（见 syncChannels）
   function selectedRows() {
     const out = [];
     const seen = new Set();
@@ -925,12 +899,18 @@
     for (const [key, el] of [['chart', D.chartCard], ['table', D.tableCard], ['write', D.writeCard]]) {
       if (el) el.classList.toggle('section-hidden', secs[key] === false);
     }
+    const panels = document.getElementById('panels');
+    if (panels) {
+      panels.classList.toggle('write-hidden', secs.write === false);
+      panels.classList.toggle('table-hidden', secs.table === false);
+    }
     if (D.btnChart) {
       const on = secs.chart !== false;
       D.btnChart.classList.toggle('active', on);
       D.btnChart.setAttribute('aria-pressed', on ? 'true' : 'false');
       D.btnChart.title = on ? '隐藏波形分区' : '显示波形分区';
     }
+    syncChartFullUI();
   }
 
   function toggleSection(sec) {
@@ -1204,17 +1184,15 @@
     const need = new Set();
     const avgSrc = new Set();
     for (const v of S.virtuals) for (const id of v.sourceIds) avgSrc.add(id);
-    // 只有勾选了“表/波/写”的行才进入采样；数组 AVG 的支撑通道例外。
+    // 只有“表/波/支撑”需要实时读取；“写”只负责写，不参与连续采样。
+    // 数组 AVG 的支撑通道和 support 角色例外。
     for (const r of S.rows.values()) {
-      const inWrite = !!writeModForRow(r.id);
-      if (r.table || r.plot || r.writeOnly || inWrite || r.support ||
-          avgSrc.has(r.id) || r.configRole === 'support' || r.configRole === 'write') {
+      if (r.table || r.plot || r.support ||
+          avgSrc.has(r.id) || r.configRole === 'support') {
         need.add(r.id);
       }
     }
     for (const v of S.virtuals) for (const id of v.sourceIds) need.add(id);
-    // 写入模块即使不在表/波形里，也要采样，才能显示当前值和回读
-    for (const m of S.write.mods) if (m.rowId && S.rows.has(m.rowId)) need.add(m.rowId);
     const next = [];
     for (const r of S.rows.values()) if (need.has(r.id)) next.push(r);
     S.signals = next;
@@ -2174,7 +2152,6 @@
     renderLegend();
     renderValueTable();
     renderWriteMods();
-    renderMarginSelects();
     updateEmptyHint();
     saveLocal();
     sendViewState();
@@ -2338,6 +2315,8 @@
     updateOverlay();
     startCachePolling();
     startSignalFlagsPolling();
+    window.MSRenderModes?.onChange?.(syncRenderModeUI);
+    syncRenderModeUI();
     connectSSE();
     setTimeout(() => maybeApplyShare(), 4000); // SSE 未及时 hello 时的分享兜底
     setTimeout(() => saveLocal(), 1500);   // 启动后把当前机型的配置自动保存一份
@@ -2427,15 +2406,15 @@
         S.rate = Number(c.rate) || S.rate;
         S.autoZero = !!c.autoZero;
         S.fillOn = c.fillOn !== false;
+        S.smoothOn = c.smoothOn !== false;
+        S.renderMode = typeof c.renderMode === 'string'
+          ? c.renderMode : (c.smoothOn === false ? 'classic' : 'mean');
+        S.smoothOn = S.renderMode !== 'classic';
         S.gridOn = c.gridOn !== false;
         S.zeroLine = c.zeroLine !== false;
         S.glow = !!c.glow;
         if (['openocd', 'attach', 'sim'].includes(c.lastMode)) S.lastMode = c.lastMode;
         if (c.arch === 'riscv' || c.arch === 'cw32') S.arch = c.arch;
-        if (c.margin && typeof c.margin === 'object') {
-          S.margin.cur = String(c.margin.cur || '');
-          S.margin.thr = String(c.margin.thr || '');
-        }
         if (Array.isArray(c.recordSel)) S.recordSel = new Set(c.recordSel.map(String));
         S.ui.view = 'list';
         S.ui.tableOpen = c.tableOpen !== false;
@@ -2527,7 +2506,6 @@
     updateViewSeg();
     syncTablePanel();
     syncSections();
-    renderMarginSelects();
     if (S.rows.size) sendConfig(true);
   }
 
@@ -2565,6 +2543,7 @@
     // 0.1 s 分辨率，避免滚轮/拖拽产生 12.345678 这种值
     v = Math.round(v * 10) / 10;
     S.windowSec = v;
+    S.paneRanges.clear();
     syncWindowSecSelects();
     if (opts.save !== false) scheduleTimelineSave();
     S.dirty = true;
@@ -2579,6 +2558,45 @@
     const go = $('#gridOn'); if (go) go.checked = S.gridOn;
     const zl = $('#zeroLine'); if (zl) zl.checked = S.zeroLine;
     const gl = $('#glowOn'); if (gl) gl.checked = S.glow;
+    syncRenderModeUI();
+  }
+
+  function syncRenderModeUI() {
+    const box = D.renderModes || $('#renderModes');
+    if (!box) return;
+    const api = window.MSRenderModes;
+    const modes = api ? api.list() : [];
+    if (!modes.length) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    if (!modes.some((m) => m.id === S.renderMode)) {
+      S.renderMode = modes.some((m) => m.id === 'mean') ? 'mean' : modes[0].id;
+      S.smoothOn = S.renderMode !== 'classic';
+    }
+    box.innerHTML = '';
+    for (const mode of modes) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'rm-btn' + (mode.id === S.renderMode ? ' active' : '');
+      b.dataset.renderMode = mode.id;
+      b.textContent = mode.label || mode.id;
+      b.title = '波形渲染：' + (mode.label || mode.id);
+      b.setAttribute('aria-pressed', mode.id === S.renderMode ? 'true' : 'false');
+      b.addEventListener('click', () => setRenderMode(mode.id));
+      box.appendChild(b);
+    }
+  }
+
+  function setRenderMode(id) {
+    const api = window.MSRenderModes;
+    if (!api || !api.get(id)) return;
+    S.renderMode = String(id);
+    S.smoothOn = S.renderMode !== 'classic';
+    syncRenderModeUI();
+    saveLocal();
+    S.dirty = true;
   }
 
   function saveLocal() {
@@ -2604,6 +2622,8 @@
         chartFull: !!S.chartFull,
         autoZero: S.autoZero,
         fillOn: S.fillOn,
+        smoothOn: S.smoothOn !== false,
+        renderMode: S.renderMode,
         gridOn: S.gridOn,
         zeroLine: S.zeroLine,
         glow: S.glow,
@@ -2613,7 +2633,6 @@
         mcu: S.mcu.active,
         lastMode: S.lastMode,
         arch: S.arch,
-        margin: { cur: S.margin.cur, thr: S.margin.thr },
         recordSel: Array.from(S.recordSel || []),
         wave: {
           seq: S.wave.seq,
@@ -2785,8 +2804,6 @@
       S.virtuals = [];
       S.samples = [];
       S.lastT = 0;
-      S.margin.cur = '';
-      S.margin.thr = '';
       resetMachineWorkspace();
       buildIndex();
       const mcuId = resolveMcuId(S.mcu.expected);
@@ -3111,7 +3128,6 @@
     ensureWriteMods();
     syncChannels();
     renderWriteMods();
-    renderMarginSelects();
     if (rate) S.rate = Number(rate) || S.rate;
     syncToggles();
   }
@@ -3183,7 +3199,6 @@
     renderLegend();
     renderValueTable();
     renderWriteMods();
-    renderMarginSelects();
     syncToggles();
     updateEmptyHint();
     if (channelChanged) { S.samples = []; S.lastT = 0; resetChartTimeline(); }
@@ -3200,7 +3215,7 @@
   function monitorConfigPayload() {
     return {
       rate: S.rate,
-      // 共享采样集：只有勾选表/波/写（或支撑/写入目标）的行才会进入这里
+      // 共享采样集：只有勾选表/波/支撑（或 AVG 支撑）的行才会进入这里
       signals: S.signals.map((s) => ({
         id: s.id, name: s.name, addr: s.addr, size: s.size, signed: s.signed,
         bit: s.bit, scale: s.scale, offset: s.offset, unit: s.unit,
@@ -3512,7 +3527,7 @@
       rate: S.rate,
       windowSec: S.windowSec,
       chart: {
-        autoZero: !!S.autoZero, fillOn: S.fillOn !== false,
+        autoZero: !!S.autoZero, fillOn: S.fillOn !== false, smoothOn: S.smoothOn !== false, renderMode: S.renderMode,
         gridOn: S.gridOn !== false, zeroLine: S.zeroLine !== false, glow: !!S.glow,
       },
       signals: monitorConfigPayload().signals,
@@ -3538,6 +3553,9 @@
     if (c && typeof c === 'object') {
       S.autoZero = !!c.autoZero;
       S.fillOn = c.fillOn !== false;
+      S.smoothOn = c.smoothOn !== false;
+      if (typeof c.renderMode === 'string') S.renderMode = c.renderMode;
+      S.smoothOn = S.renderMode !== 'classic';
       S.gridOn = c.gridOn !== false;
       S.zeroLine = c.zeroLine !== false;
       S.glow = !!c.glow;
@@ -4197,7 +4215,7 @@
     add.addEventListener('click', addWaveGroup);
     const hint = document.createElement('span');
     hint.className = 'wave-hint';
-    hint.textContent = '本端 ' + (S.clientLabel || '?') + ' · 共享 ' + ((S.presence && S.presence.length) || 1) + ' 端 · 表/波/写决定采样 · 拖动行 = 共享轴';
+    hint.textContent = '本端 ' + (S.clientLabel || '?') + ' · 共享 ' + ((S.presence && S.presence.length) || 1) + ' 端 · 表/波/支撑决定采样；写不参与 · 拖动行 = 共享轴';
     const share = document.createElement('button');
     share.type = 'button';
     share.className = 'mini';
@@ -5354,6 +5372,7 @@
     const ctx = cv.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     S.size = { w, h };
+    S.paneRanges.clear();
     S.dirty = true;
   }
 
@@ -5508,23 +5527,46 @@
     return m + 'm' + (r ? ' ' + r + 's' : '');
   }
 
-  function syncChartFullUI() {
-    document.body.classList.toggle('hero-hidden', !!S.chartFull);
-    if (!D.btnChartFull) return;
-    D.btnChartFull.classList.toggle('active', !!S.chartFull);
-    D.btnChartFull.setAttribute('aria-pressed', S.chartFull ? 'true' : 'false');
-    D.btnChartFull.title = S.chartFull
-      ? '退出全屏（恢复顶部卡片）'
-      : '全屏波形（仅隐藏顶部卡片）';
-    const label = D.btnChartFull.querySelector('.cf-label');
-    if (label) label.textContent = S.chartFull ? '退出' : '全屏';
+  function fullscreenState() {
+    const hero = !!S.chartFull;
+    const writeHidden = !!(S.ui.sections && S.ui.sections.write === false);
+    if (!hero && !writeHidden) return 0;
+    if (hero && !writeHidden) return 1;
+    if (hero && writeHidden) return 2;
+    return 3;
   }
 
-  function setChartFull(on) {
-    S.chartFull = !!on;
+  function syncChartFullUI() {
+    const state = fullscreenState();
+    document.body.classList.toggle('hero-hidden', !!S.chartFull);
+    if (!D.btnChartFull) return;
+    D.btnChartFull.classList.toggle('active', state !== 0);
+    D.btnChartFull.setAttribute('aria-pressed', state !== 0 ? 'true' : 'false');
+    const titles = [
+      '全屏波形（隐藏顶部卡片）；再按收起写分区',
+      '顶部已收起；再按同时收起写分区',
+      '顶部+写分区已收起；再按恢复顶部、保留写收起',
+      '写分区已收起；再按全部恢复',
+    ];
+    const labels = ['全屏', '顶部收起', '顶+写', '写收起'];
+    D.btnChartFull.title = titles[state];
+    const label = D.btnChartFull.querySelector('.cf-label');
+    if (label) label.textContent = labels[state];
+  }
+
+  function setFullscreenState(state) {
+    const s = ((Number(state) || 0) % 4 + 4) % 4;
+    S.chartFull = s === 1 || s === 2;
+    if (!S.ui.sections) S.ui.sections = { chart: true, table: true, write: true };
+    S.ui.sections.write = !(s === 2 || s === 3);
+    syncSections();
     syncChartFullUI();
     saveLocal();
     requestAnimationFrame(() => { try { resizeChart(); } catch {} });
+  }
+
+  function cycleChartFull() {
+    setFullscreenState((fullscreenState() + 1) % 4);
   }
 
   function syncChartModeUI() {
@@ -5551,6 +5593,7 @@
       return;
     }
     S.chartFollow = follow;
+    S.paneRanges.clear();
     setChartRightLock(false);
     if (follow) {
       S.chartRange = null;
@@ -5826,6 +5869,7 @@
     if (drag.mode === 'l') s = clamp(t, bounds.first, e - minSpan);
     else e = clamp(t, s + minSpan, bounds.last);
     if (e <= s) return;
+    S.paneRanges.clear();
     const tol = Math.max(2, bounds.span * 0.0005);
     if (Math.abs(t - drag.startT) > 0.5) drag.moved = true;
     if (drag.mode === 'r') drag.rightAtEnd = e >= bounds.last - tol;
@@ -5874,6 +5918,7 @@
     let cs = clamp(t - len / 2, bounds.first, Math.max(bounds.first, bounds.last - len));
     S.chartAutoFull = false;
     S.chartRange = { start: cs, end: cs + len };
+    S.paneRanges.clear();
     syncWindowSecFromRange();
     scheduleCacheWindow(80);
     scheduleTimelineSave();
@@ -5947,6 +5992,7 @@
     if (s < bounds.first) { s = bounds.first; e = s + newLen; }
     if (e > bounds.last) { e = bounds.last; s = e - newLen; }
     S.chartRange = { start: s, end: e };
+    S.paneRanges.clear();
     S.dirty = true;
     scheduleTimelineSave();
     scheduleCacheWindow(120);
@@ -5965,12 +6011,14 @@
       // 锁定右端时改窗口长度：右端不动，往左扩/缩
       const end = bounds.last;
       S.chartRange = { start: Math.max(bounds.first, end - len), end };
+      S.paneRanges.clear();
       scheduleCacheWindow(80);
       return;
     }
     const c = (cur.start + cur.end) / 2;
     const s = clamp(c - len / 2, bounds.first, Math.max(bounds.first, bounds.last - len));
     S.chartRange = { start: s, end: s + len };
+    S.paneRanges.clear();
     scheduleCacheWindow(80);
   }
 
@@ -6066,6 +6114,7 @@
     const s = clamp(cur.start + step, bounds.first, Math.max(bounds.first, bounds.last - len));
     S.chartRange = { start: s, end: s + len };
     S.chartAutoFull = false;
+    S.paneRanges.clear();
     const tol = Math.max(2, bounds.span * 0.0005);
     // 滚轮横移接近/撞到右端：磁吸到右端并锁定（不切 follow）；左移则解锁
     if (step > 0 && len < bounds.span - tol) {
@@ -6124,6 +6173,7 @@
     S.chartAutoFull = false;
     S.chartRightLock = false;
     S.cacheLockAt = 0;
+    S.paneRanges.clear();
     D.timelineBar?.classList.remove('right-lock');
     S.tlDrag = null;
     S.tlUiKey = '';
@@ -6259,15 +6309,51 @@
       return { min: mn, max: mx };
     };
 
+    // Y 轴自动量程做“快速扩张、缓慢收缩”的迟滞，避免窗口滚动时量程随
+    // 每一帧的原始 min/max 抖动，导致均线看起来上下乱跳而不是平移。
+    const seenPaneRanges = new Set();
+    function stablePaneRange(key, target) {
+      let st = S.paneRanges.get(key);
+      if (!st) {
+        st = { min: target.min, max: target.max };
+      } else {
+        const span = Math.max(1e-9, st.max - st.min);
+        const now = performance.now();
+        const margin = span * 0.01;
+        const need = target.min < st.min - margin || target.max > st.max + margin;
+        if (need) {
+          st.min = Math.min(st.min, target.min);
+          st.max = Math.max(st.max, target.max);
+          st.holdUntil = now + 1500;
+        } else if (!st.holdUntil || now > st.holdUntil) {
+          // 目标在范围内时不要每帧追着原始毛刺缩放；等 1.5s 再缓慢收缩。
+          st.min += (target.min - st.min) * 0.04;
+          st.max += (target.max - st.max) * 0.04;
+          if (Math.abs(target.min - st.min) < span * 0.004 &&
+              Math.abs(target.max - st.max) < span * 0.004) {
+            st.holdUntil = now + 1000;
+          }
+        }
+        if (!(st.max > st.min)) { st.min = target.min; st.max = target.max; }
+      }
+      S.paneRanges.set(key, st);
+      return { min: st.min, max: st.max };
+    }
     for (let pi = 0; pi < panes.length; pi++) {
       const pane = panes[pi];
       pane.top = y0 + pi * (each + gap);
       pane.h = each;
       const paneUnits = new Set(pane.rows.map((r) => String(r.unit || '').trim()).filter(Boolean));
       pane.unit = paneUnits.size === 1 ? [...paneUnits][0] : '';
-      pane.range = axisRange(pane.rows, pane) || { min: 0, max: 1 };
+      const targetRange = axisRange(pane.rows, pane) || { min: 0, max: 1 };
+      const rangeKey = pane.group.id + '|' + pane.rows.map((r) => r.id).join(',');
+      seenPaneRanges.add(rangeKey);
+      pane.range = stablePaneRange(rangeKey, targetRange);
       pane.Y = (v) => pane.top + pane.h - ((v - pane.range.min) / Math.max(1e-9, pane.range.max - pane.range.min)) * pane.h;
       pane.primary = pane.rows[0] || null;
+    }
+    for (const rangeKey of S.paneRanges.keys()) {
+      if (!seenPaneRanges.has(rangeKey)) S.paneRanges.delete(rangeKey);
     }
 
     // pane backgrounds
@@ -6393,12 +6479,126 @@
       return pts;
     }
 
+    // 均线：对每个可见样本做固定时间窗（600ms）的因果滑动平均，
+    // 再按像素桶取样。滤波值只依赖历史样本，窗口滚动时不会被像素桶边界
+    // 重新分组，所以均线是平移而不是持续抖动。
+    const smoothCache = new Map();
+    function smoothMean(row, pane) {
+      if (!S.smoothOn || row.step || visibleSamples < 4) return null;
+      // 显示窗口内样本数不超过像素列数时，均线没有抽稀/抗混叠意义，自动关闭；
+      // 否则短窗口会把真实尖峰/阶跃严重压扁。
+      if (visibleSamples <= Math.max(8, Math.round(pw))) return null;
+      const key = row.id + '|' + pane.top;
+      if (smoothCache.has(key)) return smoothCache.get(key);
+      // 先看相邻样本的屏幕像素差：平滑的锯齿/三角/阶跃不需要均线，
+      // 只有真正的高频抖动/纹波才启用；这样不会把慢波形压扁。
+      let prevY = null, stepSum = 0, stepN = 0;
+      for (let i = i0; i < i1; i++) {
+        const v = plotValue(row, series[i][1], pane);
+        if (v === null || !isFinite(v)) continue;
+        const y = pane.Y(v);
+        if (prevY !== null) {
+          stepSum += Math.abs(y - prevY);
+          stepN++;
+        }
+        prevY = y;
+      }
+      if (!stepN || stepSum / stepN < 2.0) return null;
+      // “秒平均”风格：至少 1s 窗；长窗口/窄屏时再按 10px 扩展。
+      const bucketMs = Math.max(1, (end - start) / Math.max(1, Math.round(pw)));
+      const smoothMs = clamp(Math.max(1000, bucketMs * 10), 1000, 5000);
+      const lookStart = start - smoothMs * 3;
+      const j0 = sampleRange(lookStart, lookStart, series)[0];
+      const filt = new Array(visibleSamples);
+      const qT = [], qV = [];
+      let head = 0, qsum = 0;
+      for (let i = j0; i < i1; i++) {
+        const t = series[i][0];
+        while (head < qT.length && qT[head] < t - smoothMs) {
+          qsum -= qV[head];
+          head++;
+        }
+        const v = plotValue(row, series[i][1], pane);
+        if (v !== null && isFinite(v)) {
+          qT.push(t);
+          qV.push(v);
+          qsum += v;
+        }
+        if (i >= i0) filt[i - i0] = qT.length > head ? qsum / (qT.length - head) : null;
+      }
+      const buckets = Math.max(1, Math.min(Math.round(pw), visibleSamples));
+      const per = visibleSamples / buckets;
+      const out = [];
+      for (let b = 0; b < buckets; b++) {
+        const a = i0 + Math.floor(b * per);
+        const z = Math.min(i1, i0 + Math.floor((b + 1) * per));
+        let sum = 0, count = 0, sumT = 0;
+        for (let i = a; i < z; i++) {
+          const f = filt[i - i0];
+          if (f === null || !isFinite(f)) continue;
+          sum += f;
+          sumT += series[i][0];
+          count++;
+        }
+        if (!count) continue;
+        out.push([XOf(sumT / count), pane.Y(sum / count)]);
+      }
+      const result = out.length > 1 ? out : null;
+      smoothCache.set(key, result);
+      return result;
+    }
+
+    // 窄屏/长窗口时用“填充的振幅带”代替逐像素 min/max 折线：
+    // 折线在列数变少时会出现明显的竖向闪烁，填充带看起来更接近振荡阴影。
+    function rawEnvelope(row, pane) {
+      if (!decimate || visibleSamples <= 2) return null;
+      // 用绝对时间分桶（不是窗口相对分桶）：窗口滚动时，同一时间桶的
+      // min/max 不会因为列边界移动而重新分组，包络边缘才能稳定平移。
+      const binMs = Math.max(1e-6, (end - start) / Math.max(1, Math.round(pw)));
+      const bins = new Map();
+      for (let i = i0; i < i1; i++) {
+        const v = plotValue(row, series[i][1], pane);
+        if (v === null || !isFinite(v)) continue;
+        const key = Math.floor(series[i][0] / binMs);
+        let rec = bins.get(key);
+        if (!rec) {
+          rec = { minV: v, maxV: v, sumT: 0, count: 0 };
+          bins.set(key, rec);
+        }
+        if (v < rec.minV) rec.minV = v;
+        if (v > rec.maxV) rec.maxV = v;
+        rec.sumT += series[i][0];
+        rec.count++;
+      }
+      const keys = Array.from(bins.keys()).sort((a, b) => a - b);
+      const top = [], bottom = [];
+      for (const key of keys) {
+        const rec = bins.get(key);
+        if (!rec || !rec.count) continue;
+        const x = clamp(XOf(rec.sumT / rec.count), x0, x0 + pw);
+        top.push([x, pane.Y(rec.maxV)]);
+        bottom.push([x, pane.Y(rec.minV)]);
+      }
+      if (top.length <= 1) return null;
+      // 对上下包络做 5 桶平滑，进一步压掉列级毛刺；这是视觉阴影，
+      // 不追求逐样本精度。
+      const smoothY = (arr) => arr.map((p, i) => {
+        let sy = 0, n = 0;
+        for (let j = Math.max(0, i - 2); j <= Math.min(arr.length - 1, i + 2); j++) {
+          sy += arr[j][1]; n++;
+        }
+        return [p[0], n ? sy / n : p[1]];
+      });
+      return { top: smoothY(top), bottom: smoothY(bottom) };
+    }
+
     // fills (primary per pane)
     if (S.fillOn) {
       for (const pane of panes) {
         const row = pane.primary;
         if (!row || i1 - i0 <= 1) continue;
-        const pts = tracePoints(row, pane);
+        const mean = smoothMean(row, pane);
+        const pts = mean || tracePoints(row, pane);
         if (pts.length <= 1) continue;
         ctx.beginPath();
         ctx.moveTo(pts[0][0], pts[0][1]);
@@ -6420,48 +6620,48 @@
         const isPrimary = pane.primary && row.id === pane.primary.id;
         const alpha = alphaFor(row);
         const pts = tracePoints(row, pane);
-        if (!pts.length) continue;
-        ctx.beginPath();
-        let started = false, prevY = 0;
-        for (const p of pts) {
-          const x = p[0], y = p[1];
-          if (!started) {
-            ctx.moveTo(x, y); started = true;
-          } else if (row.step) {
-            ctx.lineTo(x, prevY);
-            ctx.lineTo(x, y);
-          } else {
-            ctx.lineTo(x, y);
+        const mean = smoothMean(row, pane);
+        if (!pts.length && !mean) continue;
+        const env = decimate ? rawEnvelope(row, pane) : null;
+        const data = {
+          mode: S.renderMode,
+          color: row.color,
+          alpha,
+          isPrimary,
+          focus: !!focus,
+          glow: !!S.glow,
+          width: widthFor(row),
+          step: !!row.step,
+          raw: pts,
+          mean,
+          env,
+          decimate,
+          x0, pw,
+          paneTop: pane.top,
+          paneHeight: pane.h,
+          row, pane,
+        };
+        if (window.MSRenderModes) {
+          window.MSRenderModes.draw(ctx, data);
+        } else {
+          // 保险：render-core.js 未加载时退回原始折线
+          ctx.beginPath();
+          let started = false, prevY = 0;
+          for (const p of pts) {
+            const x = p[0], y = p[1];
+            if (!started) { ctx.moveTo(x, y); started = true; }
+            else if (row.step) { ctx.lineTo(x, prevY); ctx.lineTo(x, y); }
+            else ctx.lineTo(x, y);
+            prevY = y;
           }
-          prevY = y;
+          if (started) {
+            ctx.lineWidth = widthFor(row);
+            ctx.strokeStyle = alpha >= 1 ? row.color : hexAlpha(row.color, alpha);
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.stroke();
+          }
         }
-        if (!started) continue;
-        if (S.glow) {
-          ctx.save();
-          ctx.globalCompositeOperation = 'lighter';
-          ctx.strokeStyle = hexAlpha(row.color, 0.055 * alpha);
-          ctx.lineWidth = widthFor(row) * 5.5;
-          ctx.setLineDash([]);
-          ctx.stroke();
-          ctx.strokeStyle = hexAlpha(row.color, 0.10 * alpha);
-          ctx.lineWidth = widthFor(row) * 2.4;
-          ctx.stroke();
-          ctx.restore();
-        }
-        ctx.lineWidth = widthFor(row);
-        ctx.strokeStyle = alpha >= 1 ? row.color : hexAlpha(row.color, alpha);
-        ctx.lineJoin = 'round';
-        ctx.lineCap = 'round';
-        ctx.setLineDash([]);
-        if (isPrimary && !focus) {
-          ctx.save();
-          ctx.shadowColor = hexAlpha(row.color, .55);
-          ctx.shadowBlur = 8;
-          ctx.stroke();
-          ctx.restore();
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
       }
     }
 
@@ -6802,7 +7002,7 @@
     $('#btnSidebar')?.addEventListener('click', () => D.sidebar?.classList.toggle('open'));
     $('#btnClear').addEventListener('click', clearAll);
     $('#btnChart')?.addEventListener('click', () => toggleSection('chart'));
-    D.btnChartFull?.addEventListener('click', () => setChartFull(!S.chartFull));
+    D.btnChartFull?.addEventListener('click', cycleChartFull);
     $('#btnShot').addEventListener('click', snapshot);
     $('#btnLog').addEventListener('click', () => { S.ui.log = true; D.logPanel.classList.remove('hidden'); refreshLog(); });
     $('#btnLogClose').addEventListener('click', () => { S.ui.log = false; D.logPanel.classList.add('hidden'); });
@@ -6958,14 +7158,6 @@
       D.recVars?.classList.toggle('hidden');
     });
     D.btnRecExport?.addEventListener('click', exportRecording);
-    for (const [el, key] of [[D.marginCur, 'cur'], [D.marginThr, 'thr']]) {
-      el?.addEventListener('change', () => {
-        S.margin[key] = el.value;
-        saveLocal();
-        S.dirty = true;
-        renderCards();
-      });
-    }
     $('#btnReloadCatalog').addEventListener('click', reloadCatalog);
     $('#btnImportVars').addEventListener('click', importAxf);
     $('#btnImportRegs').addEventListener('click', importRegisters);
@@ -7252,7 +7444,7 @@
 
   function syncRateOptions() {
     if (!D.rateSel) return;
-    const max = S.arch === 'riscv' ? 50 : 200;
+    const max = S.arch === 'riscv' ? 50 : 300;
     for (const o of D.rateSel.options) {
       o.disabled = Number(o.value) > max;
     }

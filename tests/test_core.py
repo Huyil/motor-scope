@@ -28,6 +28,33 @@ class PlanRegionsTest(unittest.TestCase):
         regions = ocd.plan_regions([(0x20000004, 4), (0x20000352, 2)])
         self.assertEqual(len(regions), 2)
 
+    def test_cost_model_splits_across_wide_gap(self):
+        # 只按 max_gap=2048 合并会读 433 个字 (1.7KB); 按代价模型必须拆成两块
+        spans = [(0x20000030, 1), (0x200006F0, 1)]
+        regions = ocd.plan_regions(spans, max_gap=2048,
+                                   region_cost=2.0, word_cost=0.03)
+        self.assertEqual(len(regions), 2)
+        self.assertEqual(sum(r.words for r in regions), 2)
+
+    def test_cost_model_keeps_nearby_merge(self):
+        # 64 字节的间隔多读 16 字 (~0.5ms) 比再来一块 (~2ms) 便宜, 应该合并
+        spans = [(0x20000000, 2), (0x20000040, 2)]
+        regions = ocd.plan_regions(spans, max_gap=2048,
+                                   region_cost=2.0, word_cost=0.03)
+        self.assertEqual(len(regions), 1)
+
+    def test_max_gap_still_caps_cost_model(self):
+        # max_gap 是硬上限: 代价模型再宽松也不能越过
+        spans = [(0x20000000, 2), (0x20000040, 2)]
+        regions = ocd.plan_regions(spans, max_gap=16,
+                                   region_cost=100.0, word_cost=0.001)
+        self.assertEqual(len(regions), 2)
+
+    def test_plan_cost(self):
+        regions = [ocd.Region(0x20000000, 2, 0x20000008)]
+        self.assertAlmostEqual(ocd.plan_cost(regions, 2.0, 0.03), 2.06)
+        self.assertIsNone(ocd.plan_cost(regions, None, 0.03))
+
     def test_decode_word(self):
         region = ocd.Region(0x2000033C, 13, 0x20000370)
         words = [0] * 13
