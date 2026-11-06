@@ -676,8 +676,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ch32_ids = [m for m in CH32_MODELS if want(m["id"])]
     if ch32_ids:
         svd = host_path(CH32_SVD)
-        if not svd or not os.path.isfile(svd):
+        if not svd:
             print("[CH32] 跳过：未提供 SVD（用 --svd-ch32 或 MOTORSCOPE_SVD_CH32 指定）")
+            ch32_ids = []
+        elif not os.path.isfile(svd):
+            print("[CH32] 跳过：SVD 文件不存在 -> %s" % svd)
             ch32_ids = []
     if ch32_ids:
         print("[CH32] %s" % os.path.basename(svd))
@@ -709,8 +712,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     lks_ids = [m for m in LKS_MODELS if want(m["id"])]
     if lks_ids:
         svd = host_path(LKS_SVD)
-        if not svd or not os.path.isfile(svd):
+        if not svd:
             print("[LKS] 跳过：未提供 SVD（用 --svd-lks 或 MOTORSCOPE_SVD_LKS 指定）")
+            lks_ids = []
+        elif not os.path.isfile(svd):
+            print("[LKS] 跳过：SVD 文件不存在 -> %s" % svd)
             lks_ids = []
     if lks_ids:
         print("[LKS] %s" % os.path.basename(svd))
