@@ -34,3 +34,6 @@ tools/openocd-wch/
 
 # 服务端分块压缩录制缓存（运行期数据，不进 git）
 .record-cache/
+
+# 发行版打包产物（由 tools/package_release.py 生成）
+dist/
