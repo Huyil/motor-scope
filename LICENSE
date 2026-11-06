@@ -19,23 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## 第三方组件与许可范围说明
-
-本许可证适用于本仓库自有的源代码与文档（`*.py` / `*.js` / `*.html` /
-`*.css` / `docs/` / 构建脚本等）。
-
-以下内容**不属于**本 MIT 授权范围，各自遵循其原始许可：
-
-| 组件 | 位置 | 许可 |
-| --- | --- | --- |
-| OpenOCD 配置存档 | `tools/openocd-cfg/`（git submodule） | 见该仓库；其中 `cw32l01x-*.cfg` 文件头声明 GPL-2.0-or-later，`lks32mc07x.cfg` 为本项目原创 |
-| WCH 定制版 OpenOCD 源码 | `tools/riscv-openocd-wch/`（git submodule） | GPL-2.0-or-later |
-| RISC-V 预编译二进制 | `tools/openocd-wch-fast/`（不入 git，由 `tools/fetch_openocd.py` 下载） | GPL-2.0-or-later（对应源码见 submodule） |
-| 标准 OpenOCD 发行版 | `tools/openocd/`（不入 git，用户自备） | GPL-2.0-or-later |
-| 便携 Python 运行时 | `runtime/`（不入 git） | PSF License |
-
-MotorScope 通过 TCP/TCL 端口以**独立进程**方式调用 OpenOCD，属于 GPL 的
-「单纯聚合（mere aggregation）」，不构成静态链接，GPL 不延伸至本项目自有代码。

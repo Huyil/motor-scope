@@ -8,7 +8,7 @@
 
 **许可证：[MIT](LICENSE)**（自有代码）。OpenOCD 二进制与其配置为独立的
 GPL-2.0-or-later 组件，以 submodule / 独立下载方式提供，不在本仓库内，
-详见 [LICENSE](LICENSE) 的「第三方组件」一节。
+详见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 ![总览](docs/overview.png)
 
