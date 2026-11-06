@@ -52,9 +52,11 @@
       </button>
     </div>
 
-    <div id="connPill" class="conn-pill" title="SWD / SDI 总线占用：调试器正在读取目标内存">
+    <div id="connPill" class="conn-pill clickable" role="button" tabindex="0"
+         title="点击切换调试器 / 接口">
       <span class="dot"></span>
       <span id="connText">未连接</span>
+      <span id="connDev" class="conn-dev" hidden></span>
       <span id="connRate" class="sep">-- Hz</span>
     </div>
   </header>
@@ -95,6 +97,12 @@
 
     <main id="main">
       <section id="hero">
+        <div class="metric ctl-card" id="cardSource" data-go="source" role="button" tabindex="0" title="选择并连接信号源">
+          <span class="ctl-head"><span class="ctl-kicker">信号源</span><span class="ctl-go">›</span></span>
+          <strong class="ctl-val" id="cardSourceVal">未连接</strong>
+          <small class="ctl-sub" id="cardSourceSub">OpenOCD / TCL / 仿真</small>
+        </div>
+
         <div class="metric ctl-card" id="cardProject" data-go="project" role="button" tabindex="0" title="切换 / 管理工程">
           <span class="ctl-head"><span class="ctl-kicker">工程配置</span><span class="ctl-go">›</span></span>
           <strong class="ctl-val" id="cardProjectVal">默认</strong>
@@ -105,12 +113,6 @@
           <span class="ctl-head"><span class="ctl-kicker">录制</span><span class="ctl-go">›</span></span>
           <strong class="ctl-val" id="cardRecordVal">0 点</strong>
           <small class="ctl-sub" id="cardRecordSub">连接后自动录制</small>
-        </div>
-
-        <div class="metric ctl-card" id="cardSource" data-go="source" role="button" tabindex="0" title="选择并连接信号源">
-          <span class="ctl-head"><span class="ctl-kicker">信号源</span><span class="ctl-go">›</span></span>
-          <strong class="ctl-val" id="cardSourceVal">未连接</strong>
-          <small class="ctl-sub" id="cardSourceSub">OpenOCD / TCL / 仿真</small>
         </div>
 
         <div class="metric ctl-card" id="cardRate" data-go="rate" role="button" tabindex="0" title="采样率">
@@ -210,8 +212,8 @@
         <button data-mode="sim">仿真</button>
       </div>
       <div class="field" id="fieldOpenocd">
-        <label>OpenOCD 根目录（留空自动）</label>
-        <input id="inpOcd" type="text" placeholder="D:\Code\DR2159\tools\openocd">
+        <label>OpenOCD 根目录（留空 = 自动用 tools/openocd）</label>
+        <input id="inpOcd" type="text" placeholder="留空则只在工程 tools/ 下查找，或填自定义路径">
       </div>
       <div class="field hidden" id="fieldAttach">
         <label>已有 TCL 端口</label>
@@ -226,6 +228,15 @@
       </div>
       <p class="hint" id="srcHint">启动 openocd.exe（tcl_port 自动选空闲端口），连接后读芯片 ID 自动识别型号。</p>
       <div class="chip-line" id="chipLine">芯片：未识别</div>
+      <div class="fp-sep"></div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:6px">
+          <span>已连接的调试器</span>
+          <button id="btnUsbRefresh" class="mini" type="button" style="margin-left:auto;cursor:pointer" title="重新枚举 USB 设备">刷新</button>
+        </label>
+        <div id="usbDevList" class="usb-dev-list"><span class="usb-dev-empty">正在检测…</span></div>
+        <p class="hint" id="usbDevHint" style="margin-top:6px">同款多设备靠 USB 序列号区分；点击选中后点“连接”切换。</p>
+      </div>
         </div>
       </section>
 

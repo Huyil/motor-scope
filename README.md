@@ -39,6 +39,29 @@
 > 不需要另装 Python；`start_scope.bat` 会优先用它。整个目录拷到别的机器即可运行，
 > 详见 [runtime/README.md](runtime/README.md)。
 
+### 2.0 依赖准备（clone 后做一次）
+
+主仓**不含** OpenOCD 二进制（GPL / 体积原因），只含 submodule 指针与查找逻辑：
+
+```sh
+git clone <本仓库> && cd motor-scope
+git submodule update --init --recursive     # 拉取 cfg 存档 + WCH 源码
+python tools/fetch_openocd.py               # 下载 RISC-V 预编译包 + 检查 ARM 安装
+```
+
+- **RISC-V（CH32）**：`fetch_openocd.py` 从
+  [riscv-openocd-wch 的 Release](https://github.com/Huyil/riscv-openocd-wch/releases)
+  下载预编译包并解压到 `tools/openocd-wch-fast/`（含 `openocd.exe` / `openocd-linux-x64`）。
+  GitHub 直连不稳时：`MOTORSCOPE_RISCV_ZIP=<本地zip> python tools/fetch_openocd.py`
+- **ARM（CW32 / LKS32）**：脚本只检查 `tools/openocd/`。没有就把一份
+  [OpenOCD 0.12.0](https://github.com/openocd-org/openocd) 发行版放进去
+  （需 `bin/openocd.exe` + `share/openocd/scripts/`），或在信号源面板填「OpenOCD 根目录」。
+- **target cfg**：由 submodule [`motor-scope-openocd-cfg`](https://github.com/Huyil/motor-scope-openocd-cfg)
+  提供；`ocd.py` 在二进制包缺 `bin/wch-riscv.cfg` 时会自动取
+  `tools/openocd-cfg/target/ch32-riscv.cfg`。
+
+只想检查当前状态：`python tools/fetch_openocd.py --check`
+
 ### 2.1 有硬件
 
 前提：
@@ -62,9 +85,11 @@ start_scope.bat
    再按需开可选的“80 端口”（`http://192.168.x.x/`，需管理员）；
    手动/命令行也可用 `--host 0.0.0.0` 直接监听普通端口；
 2. **不自动连接**：页面停在“待连接 · 待运行”，点顶栏 **“连接”** 或信号源卡片后才启动 OpenOCD；
-3. 连接时自动找 `tools\openocd`（本工程外层 `D:\Code\DR2159\tools\openocd`，
-   没有就退回 `D:\Code\CW32L012_FLASH_Programming\tools\openocd`），选空闲端口起
-   `openocd.exe`（`tcl_port` + 关 telnet/gdb），再读 CPUID/芯片 ID 握手。
+3. 连接时**只在工程 `tools/openocd/` 下找** OpenOCD（ARM 用 0.12.0-rc2，
+   RISC-V 用 `tools/openocd-wch-fast/`），选空闲端口起 `openocd.exe`
+   （`tcl_port` + 关 telnet/gdb），再读 CPUID/芯片 ID 握手。
+   如需用别的安装，在信号源面板填「OpenOCD 根目录」自定义路径，或用 `--openocd`；
+   代码不再扫描任何写死的绝对路径。
 
 启动参数可以覆写，例如：
 
@@ -454,7 +479,7 @@ python scope_server.py --auto --open          # 自动连 openocd 并开浏览�
 python scope_server.py --sim --open           # 仿真
 python scope_server.py --attach 127.0.0.1:6666 --open
 python scope_server.py --port 8790 --rate 50
-python scope_server.py --openocd D:\Code\DR2159\tools\openocd
+python scope_server.py --openocd D:\your\custom\openocd   # 自定义 OpenOCD 根目录（留空则用 tools/openocd）
 python gen_signals.py                          # 重建 signals.json
 python -m unittest discover -s tests -v    # 区域/位域/写入/历史/机型/芯片识别（41 项）
 ```
@@ -501,7 +526,7 @@ motor-scope/
 | --- | --- |
 | `Error connecting DP: cannot read IDR` | 目标板没电、SWD 排线方向错、或 H7-TOOL 被 Keil/别的 openocd 占用 |
 | `CMSIS-DAP command mismatch` | 上一个 `openocd.exe` 没退，还占着 H7-TOOL；任务管理器结束它。本工具用 Windows Job Object 兜底，正常退出/被强杀都会带走子进程 |
-| 连接超时 / 找不到 OpenOCD | 设置里填 OpenOCD 根目录；需要 `bin/openocd.exe` + `share/openocd/scripts/interface/cmsis-dap-v1.cfg` + `.../target/cw32l01x-flm.cfg` |
+| 连接超时 / 找不到 OpenOCD | 默认只找工程 `tools/openocd/`；需要 `bin/openocd.exe` + `share/openocd/scripts/interface/cmsis-dap-v1.cfg` + `.../target/cw32l01x-flm.cfg`。用别的安装就在信号源面板填「OpenOCD 根目录」或 `--openocd` |
 | 数值全 0 / 明显不对 | 板子里的固件和 `DR2159.axf` 不是同一次 build；重新生成符号并烧录。看设置页底部 AXF 时间 |
 | 实际速率远低于目标 | 信号太多/地址太散；减少信号、降低频率，或把相邻变量一起选 |
 | 浏览器打开是空白/端口跳了 | 看控制台 URL；8765 被占用会自动 +1 |

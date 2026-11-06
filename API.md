@@ -109,6 +109,7 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `GET /api/reginfo?model=<ID>` | 该型号的寄存器描述（entries 数组；没有就返回空） |
 | `GET /api/profiles` | 机型列表：`id/name/mcu/arch/available/variables/peripherals/source_axf` + `active` |
 | `GET /api/log` | 服务 + OpenOCD 尾部日志 |
+| `GET /api/usb-devices` | 枚举当前连接的 USB 设备，返回 `supported`（**每个调试探针实例一条**，含 `vid/pid/serial/name/backend/iface/arch/status`）；`?all=1` 附带 `others`/`total`。Windows 走 WMI（无需 pyusb/驱动），Linux 走 pyusb/sysfs。同款多设备用 `serial` 区分，可直接作为 `POST /api/connect` 的 `serial`。纯枚举不占用设备；不可用时返回 `ok:true, available:false, error`，不会 500 |
 | `GET /api/record.csv` | 后端录制 CSV（需要先 POST `/api/record` 开启） |
 | `GET /api/share/<id>` | 取回分享快照；30 天/最多 200 条，持久化在 `imports/shares.json` |
 | `GET /api/stream` | SSE：`hello`（含 `clients`、`clientId/clientNo`、`presence`、当前共享 config）/ `status` / `s` / `config`（共享配置广播）/ `presence`（各端本地显示集合广播）；浏览器实时用 |
@@ -122,7 +123,7 @@ GET /api/history/next?after=1441480.1&timeout=20&limit=1000
 | `POST /api/config` | `{"signals":[...],"rate":100}`，**单调试器共享采样配置**：应用后广播 `config` 给所有 SSE 客户端；通道变了清历史。多客户端时新客户端采用服务器当前配置，不自动覆盖 |
 | `POST /api/signal-flags` | `{"id":"x","table":true,"plot":false,"write":false,"color":"#22d3ee"}` 或批量 `{"flags":{"id":{...}}}`；`read:true` 只做一次读取，`clear:true` 撤销该 id 的覆盖。浏览器轮询/SSE 应用后重新下发采样配置 |
 | `POST /api/record` | `{"active":true}` 开始后端录制 |
-| `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach"}` 重新连 |
+| `POST /api/connect` | `{"mode":"openocd"|"sim"|"attach", "iface":"cmsis-dap.cfg"?, "serial":"002B..."?, "openocd":"自定义根目录"?}` 重新连；`iface` 覆盖默认 interface cfg，`serial` 通过 `-c "adapter serial <serial>"` 精确指定用哪个同款调试器（多 DAP 切换用，值来自 `GET /api/usb-devices`）；`openocd` 指定自定义 OpenOCD 根目录，留空则只在工程 `tools/openocd/` 查找 |
 | `POST /api/disconnect` | 断开并释放 OpenOCD/H7-TOOL |
 | `POST /api/reset` | **会复位目标**：ARM 写 `AIRCR.SYSRESETREQ`，RISC-V 用 OpenOCD `reset run`；电机可能重新启动 |
 | `POST /api/catalog/reload` | 从当前机型的源 AXF/SVD 重建 signals.json |

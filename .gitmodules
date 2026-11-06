@@ -1,0 +1,8 @@
+[submodule "tools/openocd-cfg"]
+	path = tools/openocd-cfg
+	url = https://github.com/Huyil/motor-scope-openocd-cfg
+	branch = main
+[submodule "tools/riscv-openocd-wch"]
+	path = tools/riscv-openocd-wch
+	url = https://github.com/Huyil/riscv-openocd-wch
+	branch = wch-linke-sdi

@@ -84,7 +84,10 @@ code { font-family: var(--mono); color: #9fd8e8; background: rgba(34,211,238,.08
 .conn-pill.warn { border-color: rgba(251,77,103,.4); }
 .conn-pill.warn .dot { background: var(--red); box-shadow: 0 0 10px rgba(251,77,103,.6); }
 .conn-pill .sep { color: var(--muted2); border-left: 1px solid var(--line2); padding-left: 5px; font-size: 9.5px; }
-@media (max-width: 1100px) { .conn-pill .sep { display: none; } .conn-pill { padding: 0 6px; } }
+.conn-pill.clickable { cursor: pointer; }
+.conn-pill.clickable:hover { border-color: rgba(34,211,238,.5); background: rgba(22,38,64,.9); }
+.conn-pill #connDev { color: #bdeef7; font-family: var(--mono); font-size: 9.5px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-left: 1px solid var(--line2); padding-left: 5px; }
+@media (max-width: 1100px) { .conn-pill .sep, .conn-pill #connDev { display: none; } .conn-pill { padding: 0 6px; } }
 
 .project-pick { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted2); min-width: 0; }
 .project-pick select { height: 26px; max-width: 150px; border: 1px solid var(--line2); border-radius: 6px; background: rgba(8,14,26,.85); color: var(--text); font-family: var(--mono); font-size: 10.5px; padding: 0 4px; }
@@ -1229,4 +1232,27 @@ input[type="checkbox"]:checked::before { transform: rotate(-45deg) scale(1); }
 .rec-var { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11px; cursor: pointer; }
 .rec-var span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctl-bar i.neg { background: linear-gradient(90deg, rgba(251,77,103,.65), rgba(251,77,103,.95)); }
+
+/* 信号源面板：已连接调试器（USB 枚举结果） */
+.usb-dev-list { display: flex; flex-direction: column; gap: 6px; max-height: 168px; overflow: auto; }
+.usb-dev-empty { font-size: 11px; color: var(--muted2); font-family: var(--mono); }
+.usb-dev {
+  display: flex; flex-direction: column; gap: 2px; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: 8px; cursor: pointer;
+  background: linear-gradient(180deg, rgba(16,28,48,.6), rgba(9,16,28,.5));
+  transition: border-color .12s ease, background .12s ease;
+}
+.usb-dev:hover { border-color: rgba(34,211,238,.5); background: rgba(20,34,56,.8); }
+.usb-dev.active { border-color: rgba(34,211,238,.6); background: linear-gradient(180deg, rgba(34,211,238,.12), rgba(9,20,32,.6)); }
+.usb-dev-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.usb-dev-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--green); box-shadow: 0 0 8px rgba(52,211,153,.8); }
+.usb-dev-dot.off { background: #64748b; box-shadow: 0 0 0 3px rgba(100,116,139,.12); }
+.usb-dev-name { font-size: 11.5px; color: #d7e6f6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usb-dev-tag { margin-left: auto; flex: 0 0 auto; font-family: var(--mono); font-size: 9.5px;
+  color: var(--cyan); border: 1px solid rgba(34,211,238,.3); border-radius: 5px; padding: 1px 5px; }
+.usb-dev-tag.on { color: #d9fbff; background: rgba(34,211,238,.16); border-color: rgba(34,211,238,.6); }
+.usb-dev-meta { font-family: var(--mono); font-size: 9.5px; color: var(--muted2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usb-dev-err { font-size: 11px; color: #ffb3c0; line-height: 1.5; }
 @media (max-width: 900px) { #panelProject { width: calc(100vw - 16px); } }

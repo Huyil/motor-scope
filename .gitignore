@@ -6,8 +6,19 @@ imports/
 # 想让它跟着 git 走就删掉这一行.
 runtime/
 
-# 机型工程的前端配置快照是运行时/user 状态, 不进 git
-profiles/*/config.json
+# 机型工程（profiles/）整体不进 git：本地保留，仅作为运行时/用户数据。
+# 如需临时强制加入某个文件：git add -f profiles/<path>
+profiles/
+
+# OpenOCD 相关：主仓只跟踪 submodule 指针，不含二进制内容。
+#   tools/openocd-cfg/       → submodule: github.com/Huyil/motor-scope-openocd-cfg（target cfg 存档）
+#   tools/riscv-openocd-wch/ → submodule: github.com/Huyil/riscv-openocd-wch（WCH 定制版源码）
+#   tools/openocd/           → ARM OpenOCD 0.12.0-rc2 发行版，用户自备（tools/fetch_openocd.py 下载）
+#   tools/openocd-wch-fast/  → RISC-V 预编译二进制，由 tools/fetch_openocd.py 从 Release 解压
+#   tools/openocd-wch/       → 旧命名，兼容
+tools/openocd/
+tools/openocd-wch-fast/
+tools/openocd-wch/
 
 # 手册抽取中间产物（子智能体输出，不进 git）
 .work/

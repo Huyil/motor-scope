@@ -113,6 +113,9 @@
     chip: null,
     lastMode: 'openocd',
     arch: 'cw32',
+    // 调试器 / USB 接口选择：iface 为 OpenOCD interface cfg 名（'' = 自动）
+    // 当前选中的调试器：serial 为主键（区分同款多设备），'' = OpenOCD 自动选
+    usb: { serial: '', iface: '', label: '自动', name: '', devices: [], available: false },
     recordSel: new Set(),
     mcu: {
       models: [], active: '', detected: '', candidates: [], exact: false,
@@ -276,6 +279,7 @@
     D.overlayHint = $('#overlayHint');
     D.connPill = $('#connPill');
     D.connText = $('#connText');
+    D.connDev = $('#connDev');
     D.connRate = $('#connRate');
     D.sidebar = $('#sidebar');
     D.catalogBody = $('#catalogBody');
@@ -2300,6 +2304,8 @@
     await loadStatus();
     restoreConfig();
     syncArchUI();
+    updateConnPill();          // 恢复的上次选中的调试器先显示到顶栏
+    refreshUsbDevices(false);  // 启动时枚举一次已连接的调试器实例
     renderCatalog();
     renderSelected();
     renderLegend();
@@ -2415,6 +2421,16 @@
         S.glow = !!c.glow;
         if (['openocd', 'attach', 'sim'].includes(c.lastMode)) S.lastMode = c.lastMode;
         if (c.arch === 'riscv' || c.arch === 'cw32') S.arch = c.arch;
+        if (typeof c.usbSerial === 'string') S.usb.serial = c.usbSerial;
+        if (typeof c.usbIface === 'string') S.usb.iface = c.usbIface;
+        if (typeof c.usbName === 'string') S.usb.name = c.usbName;
+        S.usb.label = S.usb.name
+          ? devLabel({ name: S.usb.name, serial: S.usb.serial })
+          : '自动（OpenOCD 自选）';
+        if (typeof c.openocdDir === 'string') {
+          const inp = $('#inpOcd');
+          if (inp) inp.value = c.openocdDir;
+        }
         if (Array.isArray(c.recordSel)) S.recordSel = new Set(c.recordSel.map(String));
         S.ui.view = 'list';
         S.ui.tableOpen = c.tableOpen !== false;
@@ -2633,6 +2649,10 @@
         mcu: S.mcu.active,
         lastMode: S.lastMode,
         arch: S.arch,
+        usbSerial: S.usb.serial || '',
+        usbIface: S.usb.iface || '',
+        usbName: S.usb.name || '',
+        openocdDir: ($('#inpOcd')?.value || '').trim(),
         recordSel: Array.from(S.recordSel || []),
         wave: {
           seq: S.wave.seq,
@@ -3971,11 +3991,7 @@
       disarmWrite('连接断开，写入已锁定');
       saveLocal();
     }
-    const label = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL' : kind === 'sim' ? '仿真' : '待连接';
-    D.connText.textContent = label;
-    D.connRate.textContent = (S.sampler.rate_actual || S.sampler.rate || 0).toFixed(0) + ' Hz';
-    D.connPill.classList.toggle('on', !!connected);
-    D.connPill.classList.toggle('warn', !connected || !!S.sampler.error);
+    updateConnPill();
     D.statSamples.textContent = fmtInt(S.sampler.samples || 0);
     D.statRate.textContent = (S.sampler.rate_actual || 0).toFixed(1) + ' Hz';
     const lat = st.uptime != null && S.sampler.last_t ? Math.max(0, st.uptime * 1000 - S.sampler.last_t) : null;
@@ -4047,6 +4063,10 @@
       }
       const p = ($('#inpOcd')?.value || '').trim();
       if (p) payload.openocd = p;
+      // 选中的具体调试器：serial 精确指定用哪一个（同款多设备），
+      // iface 覆盖默认 interface cfg（'' = 跟随 profile/OpenOCD 默认）
+      if (S.usb.iface) payload.iface = S.usb.iface;
+      if (S.usb.serial) payload.serial = S.usb.serial;
     } else if (mode === 'attach') {
       payload.host = ($('#inpAttachHost')?.value || '127.0.0.1').trim();
       payload.port = Number($('#inpAttachPort')?.value || 6666);
@@ -7072,6 +7092,21 @@
       doConnect(mode);
     });
     $('#btnDisconnect').addEventListener('click', disconnectSource);
+    $('#btnUsbRefresh')?.addEventListener('click', () => refreshUsbDevices(true));
+    $('#inpOcd')?.addEventListener('change', () => saveLocal());
+    // connPill：点击直达「信号源」面板切换调试器
+    const openSourceFromPill = () => {
+      const el = panelFor('source');
+      if (!el) return;
+      if (!el.hidden) { closePanels(); return; }
+      // 复用 togglePanel 的定位逻辑；临时借用 source 卡片锚点
+      if (typeof togglePanel === 'function') togglePanel('source');
+      else { el.hidden = false; S.ui.panel = 'source'; }
+    };
+    D.connPill?.addEventListener('click', openSourceFromPill);
+    D.connPill?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSourceFromPill(); }
+    });
     D.btnConnect?.addEventListener('click', async () => {
       if (sourceConnected(S.source) && !S.sampler?.error) {
         await disconnectSource();
@@ -7113,7 +7148,7 @@
       saveLocal();
     });
 
-    // 顶部 4 张控制卡：工程 / 符号 / 信号源 / 采样率
+    // 顶部 4 张控制卡：信号源 / 工程 / 录制 / 采样率（按 DOM 顺序）
     for (const card of $$('.ctl-card')) {
       const go = () => togglePanel(card.dataset.go);
       card.addEventListener('click', go);
@@ -7420,6 +7455,7 @@
       el.style.transform = 'translateX(-50%)';
     }
     el.style.visibility = '';
+    if (name === 'source') refreshUsbDevices(false);
   }
 
   function updateSourceHint() {
@@ -7442,6 +7478,155 @@
     }
   }
 
+  // ---------------------------------------------------------------- USB 设备枚举 / 多调试器切换
+  // GET /api/usb-devices：列出当前连接的**每一个**调试探针实例（含 USB 序列号）。
+  // 同款多设备靠 adapter serial 区分；点选设备后连接时带 {iface, serial}。
+  // 纯枚举、不占用设备；失败/不可用只在本区提示，不影响连接流程。
+  let usbDevBusy = false;
+  let usbDevLoaded = false;
+
+  function devLabel(d) {
+    if (!d) return '自动（OpenOCD 自选）';
+    return (d.name || (d.vid + ':' + d.pid)) +
+      (d.serial ? ' · ' + String(d.serial).slice(-6) : '');
+  }
+
+  // 统一记录「当前选中的调试器」并同步 connPill / 持久化。
+  // dev 为 null 表示回到「自动」。
+  function setUsbDevice(dev) {
+    if (dev && dev.serial) {
+      S.usb.serial = dev.serial;
+      S.usb.iface = dev.iface || '';
+      S.usb.name = dev.name || (dev.vid + ':' + dev.pid);
+      S.usb.label = devLabel(dev);
+    } else {
+      S.usb.serial = '';
+      S.usb.iface = '';
+      S.usb.name = '';
+      S.usb.label = '自动（OpenOCD 自选）';
+    }
+    saveLocal();
+    updateConnPill();
+  }
+
+  function renderUsbDevices(data) {
+    const box = $('#usbDevList');
+    const hint = $('#usbDevHint');
+    if (!box) return;
+    S.usb.available = !!(data && data.ok && data.available);
+    if (!data || !data.ok || !data.available) {
+      box.innerHTML = '<div class="usb-dev-err">' +
+        esc((data && data.error) || 'USB 枚举不可用') + '</div>';
+      if (hint) hint.textContent = '枚举不可用时仍可点“连接”，OpenOCD 会自选第一个设备。';
+      return;
+    }
+    const list = Array.isArray(data.supported) ? data.supported : [];
+    S.usb.devices = list;
+    if (hint) {
+      hint.textContent = '枚举方式：' + (data.method || '?') + ' · 发现 ' + list.length +
+        ' 个调试器。点击选中（靠序列号区分同款设备），再点“连接”切换。';
+    }
+    // 「自动」项 + 每个物理设备一项
+    const autoSel = !S.usb.serial;
+    let html = '<div class="usb-dev' + (autoSel ? ' active' : '') +
+      '" role="button" tabindex="0" data-serial="" data-auto="1" ' +
+      'title="不指定序列号，由 OpenOCD 自选第一个设备">' +
+      '<div class="usb-dev-top"><span class="usb-dev-dot"></span>' +
+      '<span class="usb-dev-name">自动（OpenOCD 自选）</span>' +
+      (autoSel ? '<span class="usb-dev-tag on">当前</span>' : '') + '</div>' +
+      '<div class="usb-dev-meta">不指定 adapter serial</div></div>';
+    html += list.map((d) => {
+      const name = d.name || d.product || (d.vid + ':' + d.pid);
+      const selected = d.serial && d.serial === S.usb.serial;
+      const metaBits = [];
+      if (d.vid && d.pid) metaBits.push(d.vid.toUpperCase() + ':' + d.pid.toUpperCase());
+      if (d.serial) metaBits.push('S/N ' + d.serial);
+      if (d.transport) metaBits.push(d.transport);
+      const arch = d.arch === 'riscv' ? 'RISC-V' : d.arch === 'cw32' ? 'ARM' : '';
+      if (arch) metaBits.push(arch);
+      if (d.status) metaBits.push(d.status);
+      return '<div class="usb-dev' + (selected ? ' active' : '') + '" role="button" tabindex="0" ' +
+          'data-serial="' + esc(d.serial || '') + '" data-iface="' + esc(d.iface || '') + '" ' +
+          'data-name="' + esc(name) + '" title="点击选中该调试器，点连接后切换">' +
+        '<div class="usb-dev-top">' +
+          '<span class="usb-dev-dot' + (d.status && d.status !== 'OK' ? ' off' : '') + '"></span>' +
+          '<span class="usb-dev-name">' + esc(name) + '</span>' +
+          (selected ? '<span class="usb-dev-tag on">当前</span>'
+                    : (d.backend ? '<span class="usb-dev-tag">' + esc(d.backend) + '</span>' : '')) +
+        '</div>' +
+        '<div class="usb-dev-meta">' + esc(metaBits.join(' · ')) + '</div>' +
+      '</div>';
+    }).join('');
+    box.innerHTML = html;
+    box.querySelectorAll('.usb-dev').forEach((el) => {
+      const pick = () => {
+        if (el.dataset.auto) {
+          setUsbDevice(null);
+          toast('已切回自动选择调试器，点“连接”生效', 'ok');
+        } else {
+          const dev = S.usb.devices.find((x) => x.serial === el.dataset.serial) || {
+            serial: el.dataset.serial, iface: el.dataset.iface, name: el.dataset.name,
+          };
+          setUsbDevice(dev);
+          toast('已选中 ' + devLabel(dev) + '，点“连接”切换', 'ok');
+        }
+        renderUsbDevices({ ok: true, available: true, supported: S.usb.devices,
+                           method: data.method });
+        // 已连接时自动按新设备重连，省一次手动点
+        const mode = D.srcSegMode || S.lastMode || 'openocd';
+        if (sourceConnected(S.source) && mode === 'openocd') doConnect('openocd');
+      };
+      el.addEventListener('click', pick);
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+      });
+    });
+  }
+
+  async function refreshUsbDevices(force) {
+    const box = $('#usbDevList');
+    if (!box || usbDevBusy) return;
+    if (usbDevLoaded && !force) return;
+    usbDevBusy = true;
+    const btn = $('#btnUsbRefresh');
+    if (btn) btn.disabled = true;
+    box.innerHTML = '<span class="usb-dev-empty">正在检测…</span>';
+    try {
+      const data = await fetchJSON('/api/usb-devices', { timeout: 12000 });
+      usbDevLoaded = true;
+      renderUsbDevices(data);
+    } catch (e) {
+      renderUsbDevices({ ok: false, error: '枚举失败: ' + (e.message || e) });
+    } finally {
+      usbDevBusy = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  // connPill 文本：连接状态 + 当前调试器 + 采样率；并动态维护 title。
+  function updateConnPill() {
+    const kind = (S.source && S.source.kind) || 'none';
+    const connected = sourceConnected(S.source) && !S.sampler.error;
+    const label = kind === 'openocd' ? 'OpenOCD' : kind === 'attach' ? 'TCL'
+      : kind === 'sim' ? '仿真' : '待连接';
+    if (D.connText) D.connText.textContent = label;
+    if (D.connRate) D.connRate.textContent =
+      (S.sampler.rate_actual || S.sampler.rate || 0).toFixed(0) + ' Hz';
+    if (D.connDev) {
+      const txt = S.usb.name ? devLabel({ name: S.usb.name, serial: S.usb.serial }) : '';
+      D.connDev.textContent = txt;
+      D.connDev.hidden = !txt;
+    }
+    if (D.connPill) {
+      D.connPill.classList.toggle('on', !!connected);
+      D.connPill.classList.toggle('warn', !connected || !!S.sampler.error);
+      const cur = S.usb.name || '自动（OpenOCD 自选）';
+      D.connPill.title = connected
+        ? 'SWD / SDI 总线占用：调试器正在读取目标内存\n当前调试器：' + cur + ' · 点击切换'
+        : '未连接 / 调试器：' + cur + ' · 点击切换调试器';
+    }
+  }
+
   function syncRateOptions() {
     if (!D.rateSel) return;
     const max = S.arch === 'riscv' ? 50 : 300;
@@ -7461,11 +7646,11 @@
     const label = $('#fieldOpenocd label');
     const inp = $('#inpOcd');
     if (S.arch === 'riscv') {
-      if (label) label.textContent = 'WCH OpenOCD 根目录（留空自动）';
-      if (inp) inp.placeholder = 'C:\\MounRiver\\MounRiver_Studio3\\...\\WCH\\OpenOCD\\OpenOCD';
+      if (label) label.textContent = 'WCH OpenOCD 根目录（留空 = 自动用 tools/openocd-wch-fast）';
+      if (inp) inp.placeholder = '留空则只在工程 tools/ 下查找，或填 MounRiver / 独立仓库路径';
     } else {
-      if (label) label.textContent = 'OpenOCD 根目录（留空自动）';
-      if (inp) inp.placeholder = 'D:\\Code\\DR2159\\tools\\openocd';
+      if (label) label.textContent = 'OpenOCD 根目录（留空 = 自动用 tools/openocd）';
+      if (inp) inp.placeholder = '留空则只在工程 tools/ 下查找，或填自定义路径';
     }
     syncRateOptions();
     updateSourceHint();
@@ -7478,7 +7663,7 @@
     document.addEventListener('pointerdown', (e) => {
       if (!S.ui.panel) return;
       if (e.target.closest('.float-panel') || e.target.closest('.ctl-card')) return;
-      if (e.target.closest('#chipBanner')) return;
+      if (e.target.closest('#chipBanner') || e.target.closest('#connPill')) return;
       closePanels();
     });
     window.addEventListener('resize', () => closePanels());

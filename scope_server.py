@@ -44,6 +44,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import api_docs
 import profiles
+import usb_devices
 from record_cache import RecordCache
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -554,6 +555,7 @@ class OpenOcdSource(Source):
             "exe": p.paths.exe,
             "iface": p.paths.iface,
             "target": p.paths.target,
+            "serial": p.serial,
             "cpuid": self.cpuid,
             "plan": self.plan_stats(),
         }
@@ -2087,8 +2089,9 @@ class App:
         if self.arch == "riscv":
             paths = ocd.find_wch_openocd(self.project, exe)
             if paths is None:
-                msg = ("找不到 WCH RISC-V OpenOCD：需要 bin/openocd.exe + bin/wch-riscv.cfg "
-                       "（默认在 MounRiver Studio 目录，可在连接面板里指定根目录）")
+                msg = ("找不到 WCH RISC-V OpenOCD：请把独立仓库 openocd-wch-fast 放到工程 "
+                       "tools/ 下（需 bin/openocd.exe + bin/wch-riscv.cfg），"
+                       "或在信号源面板填「OpenOCD 根目录」自定义路径")
                 self.last_connect_error = msg
                 raise RuntimeError(msg)
             if iface:
@@ -2096,11 +2099,21 @@ class App:
         else:
             paths = ocd.find_openocd(self.project, exe)
             if paths is None:
-                msg = "找不到可用的 OpenOCD (需要 bin/openocd.exe + interface/cmsis-dap-v1.cfg + target/cw32l01x-flm.cfg)"
+                msg = ("找不到可用的 OpenOCD：请把发行版放到工程 tools/openocd/ 下"
+                       "（需 bin/openocd.exe + share/openocd/scripts/interface/cmsis-dap-v1.cfg "
+                       "+ share/openocd/scripts/target/cw32l01x-flm.cfg），"
+                       "或在信号源面板填「OpenOCD 根目录」自定义路径")
                 self.last_connect_error = msg
                 raise RuntimeError(msg)
         if iface:
-            paths = ocd.OcdPaths(paths.exe, paths.scripts, iface, target or paths.target)
+            # 前端给的多是裸 cfg 名（cmsis-dap.cfg）；-f 需要可解析的路径。
+            # 相对于 OpenOCD 的 scripts/interface 目录解析，避免 -f 找不到文件。
+            if os.path.isabs(iface):
+                iface_path = iface
+            else:
+                cand = os.path.join(paths.scripts, "interface", iface)
+                iface_path = cand if os.path.isfile(cand) else iface
+            paths = ocd.OcdPaths(paths.exe, paths.scripts, iface_path, target or paths.target)
         if target:
             paths = ocd.OcdPaths(paths.exe, paths.scripts, paths.iface, target)
         if not os.path.isfile(paths.exe):
@@ -2108,7 +2121,11 @@ class App:
             self.last_connect_error = msg
             raise RuntimeError(msg)
         port = int(payload.get("tcl_port") or 0)
-        proc = ocd.OcdProcess(paths, port=port, verbose=self.args.verbose)
+        # 用户在前端选了具体调试器 -> serial 精确指定用哪一个（同款多设备）。
+        # RISC-V 走 WCH OpenOCD(wlinke+SDI)，不认 adapter serial，忽略。
+        serial = str(payload.get("serial") or "").strip() if self.arch != "riscv" else ""
+        proc = ocd.OcdProcess(paths, port=port, verbose=self.args.verbose,
+                              serial=serial)
         try:
             client = proc.start(timeout=float(payload.get("timeout") or 15.0),
                                 require_cpuid=(self.arch != "riscv"))
@@ -2570,6 +2587,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/status":
                 return self._json(self.app.status_payload())
+            if path == "/api/usb-devices":
+                # 枚举当前连接的 USB 设备，标注 MotorScope 支持的调试探针。
+                # 纯枚举，不打开/占用任何设备；?all=1 附带返回未识别的设备。
+                qs = parse_qs(urlparse(self.path).query)
+                include_all = (qs.get("all") or [""])[0].lower() in ("1", "true", "yes")
+                try:
+                    return self._json(usb_devices.enumerate_devices(include_all=include_all))
+                except Exception as exc:  # 枚举失败也不能让整个接口 500 掉 UI
+                    return self._json({"ok": False, "available": False,
+                                       "count": 0, "supported": [],
+                                       "error": str(exc)})
             if path == "/api/catalog":
                 return self._json(self.app.catalog)
             if path == "/api/profiles":

@@ -189,31 +189,53 @@ def _exists(path: str) -> bool:
     return bool(path) and os.path.isfile(path)
 
 
-def find_openocd(project_dir: str, override: Optional[str] = None) -> Optional[OcdPaths]:
-    """按优先级找一套可用的 OpenOCD (exe + 接口/目标 cfg + scripts)."""
+def _candidate_roots(project_dir: str, override: Optional[str],
+                     subdirs: Sequence[str]) -> List[str]:
+    """候选 OpenOCD 根目录，按优先级：
+
+      1. 用户在信号源面板填的「OpenOCD 根目录」/ --openocd（override）
+      2. 工程内 tools/<subdir>/
+      3. 工程上级目录的 tools/<subdir>/（源码放在子目录时用）
+      4. 本文件同级的 tools/<subdir>/（ocd.py 与工程根目录同级时）
+
+    只在这些位置找，不再扫描任何写死的绝对路径；找不到就明确报错，
+    由用户自行指定位置或把发行版放到 tools/ 下。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    project_dir = os.path.abspath(project_dir or here)
+    bases = [project_dir, os.path.dirname(project_dir), here]
     roots: List[str] = []
     if override:
-        roots.append(override)
-    here = os.path.dirname(os.path.abspath(__file__))
-    roots += [
-        os.path.join(project_dir, "tools", "openocd"),
-        os.path.join(os.path.dirname(os.path.abspath(project_dir)), "tools", "openocd"),
-        os.path.join(here, "..", "openocd"),
-        r"D:\Code\CW32L012_FLASH_Programming\tools\openocd",
-        r"D:\Code\DR2159\tools\openocd",
-    ]
-    # Windows 大小写/斜杠不敏感; 去重
+        roots.append(str(override))
+    for base in bases:
+        for sub in subdirs:
+            roots.append(os.path.join(base, "tools", sub))
+    out: List[str] = []
     seen = set()
     for root in roots:
         root = os.path.abspath(os.path.expanduser(root))
         if root in seen:
             continue
         seen.add(root)
-        exe = os.path.join(root, "bin", "openocd.exe" if os.name == "nt" else "openocd")
-        if not _exists(exe) and os.name == "nt":
-            exe2 = os.path.join(root, "bin", "openocd")
-            if _exists(exe2):
-                exe = exe2
+        out.append(root)
+    return out
+
+
+def _openocd_exe(root: str) -> str:
+    """bin/ 下的可执行文件：两种命名都认，不依赖 os.name。
+    这样同一份 tools/openocd/ 在 Windows 与 Linux/WSL 下都能被找到
+    （Windows 版是 openocd.exe，Linux 版是 openocd）。"""
+    for name in ("openocd.exe", "openocd"):
+        exe = os.path.join(root, "bin", name)
+        if _exists(exe):
+            return exe
+    return os.path.join(root, "bin", "openocd.exe" if os.name == "nt" else "openocd")
+
+
+def find_openocd(project_dir: str, override: Optional[str] = None) -> Optional[OcdPaths]:
+    """找 ARM/Cortex-M 用的标准 OpenOCD 0.12（exe + interface/target cfg + scripts）。"""
+    for root in _candidate_roots(project_dir, override, ("openocd",)):
+        exe = _openocd_exe(root)
         scripts = os.path.join(root, "share", "openocd", "scripts")
         iface = os.path.join(scripts, "interface", "cmsis-dap-v1.cfg")
         if not _exists(iface):
@@ -224,36 +246,41 @@ def find_openocd(project_dir: str, override: Optional[str] = None) -> Optional[O
     return None
 
 
-def find_wch_openocd(project_dir: str, override: Optional[str] = None) -> Optional[OcdPaths]:
-    """找 WCH/MounRiver 的 RISC-V OpenOCD (wlinke + wch_riscv)."""
-    roots: List[str] = []
-    if override:
-        roots.append(override)
+def _wch_cfg(project_dir: str, root: str) -> str:
+    """RISC-V 的 wch-riscv 配置，按优先级：
+      1. 二进制发行包自带 bin/wch-riscv.cfg（或 scripts/ 下）
+      2. cfg submodule: tools/openocd-cfg/target/ch32-riscv.cfg
+      3. 源码 submodule: tools/riscv-openocd-wch/tcl/target/ 下同名文件
+    这样用户 clone 主仓后即使二进制包里没带 cfg，也能从 submodule 取到。"""
+    for p in (os.path.join(root, "bin", "wch-riscv.cfg"),
+              os.path.join(root, "scripts", "wch-riscv.cfg"),
+              os.path.join(root, "bin", "ch32-riscv.cfg")):
+        if _exists(p):
+            return p
     here = os.path.dirname(os.path.abspath(__file__))
-    roots += [
-        # 工程内自带的快读版 OpenOCD（tools/openocd-wch-fast）
-        os.path.join(project_dir, "tools", "openocd-wch-fast"),
-        os.path.join(os.path.dirname(os.path.abspath(project_dir)), "tools", "openocd-wch-fast"),
-        os.path.join(here, "..", "openocd-wch-fast"),
-        os.path.join(project_dir, "tools", "openocd-wch"),
-        os.path.join(os.path.dirname(os.path.abspath(project_dir)), "tools", "openocd-wch"),
-        os.path.join(here, "..", "openocd-wch"),
-        r"C:\MounRiver\MounRiver_Studio3\resources\app\resources\win32\components\WCH\OpenOCD\OpenOCD",
-    ]
-    seen = set()
-    for root in roots:
-        root = os.path.abspath(os.path.expanduser(root))
-        if root in seen:
+    project_dir = os.path.abspath(project_dir or here)
+    for base in (project_dir, os.path.dirname(project_dir), here):
+        for rel in ("tools/openocd-cfg/target/ch32-riscv.cfg",
+                    "tools/riscv-openocd-wch/tcl/target/ch32-riscv.cfg",
+                    "tools/riscv-openocd-wch/tcl/target/wch-riscv.cfg"):
+            p = os.path.join(base, rel)
+            if _exists(p):
+                return p
+    return ""
+
+
+def find_wch_openocd(project_dir: str, override: Optional[str] = None) -> Optional[OcdPaths]:
+    """找 WCH/MounRiver 的 RISC-V OpenOCD (wlinke + wch_riscv)。
+    二进制发行包放到 tools/openocd-wch-fast/ 下即可被找到；cfg 可来自
+    tools/openocd-cfg submodule（clone 即用）。"""
+    subdirs = ("openocd-wch-fast", "openocd-wch")
+    for root in _candidate_roots(project_dir, override, subdirs):
+        exe = _openocd_exe(root)
+        if not _exists(exe):
             continue
-        seen.add(root)
-        exe = os.path.join(root, "bin", "openocd.exe" if os.name == "nt" else "openocd")
-        if not _exists(exe) and os.name == "nt":
-            exe2 = os.path.join(root, "bin", "openocd")
-            if _exists(exe2):
-                exe = exe2
         scripts = os.path.join(root, "share", "openocd", "scripts")
-        cfg = os.path.join(root, "bin", "wch-riscv.cfg")
-        if _exists(exe) and _exists(cfg):
+        cfg = _wch_cfg(project_dir, root)
+        if cfg:
             return OcdPaths(exe=exe, scripts=scripts, iface=cfg, target="")
     return None
 
@@ -270,10 +297,14 @@ def free_port() -> int:
 class OcdProcess:
     """启动/持有/关闭一个 openocd 进程, 并保持 TCL 连接."""
 
-    def __init__(self, paths: OcdPaths, port: int = 0, verbose: bool = False):
+    def __init__(self, paths: OcdPaths, port: int = 0, verbose: bool = False,
+                 serial: str = ""):
         self.paths = paths
         self.port = int(port or free_port())
         self.verbose = verbose
+        # 指定用哪一个同款调试器（CMSIS-DAP 的 adapter serial）。
+        # 空串 = 不指定，由 OpenOCD 自动选第一个。
+        self.serial = str(serial or "").strip()
         self.proc: Optional[subprocess.Popen] = None
         self.client: Optional[TclClient] = None
         self.log: Deque[str] = deque(maxlen=400)
@@ -305,6 +336,10 @@ class OcdProcess:
         cmd = [self.paths.exe, "-s", self.paths.scripts, "-f", self.paths.iface]
         if self.paths.target:
             cmd += ["-f", self.paths.target]
+        # 多个同款 CMSIS-DAP 靠序列号区分：必须在 interface cfg 之后设置，
+        # 否则 OpenOCD 已经打开默认设备了。见 share/openocd/scripts/interface/cmsis-dap.cfg
+        if self.serial:
+            cmd += ["-c", "adapter serial %s" % self.serial]
         cmd += [
             "-c", "tcl_port %d" % self.port,
             "-c", "telnet_port disabled",
