@@ -6,6 +6,10 @@
 > 默认只读：不 halt、不 reset、不烧录；写入是显式解锁后的可选动作，
 > 仅限 RAM / SFR，写后立即回读。
 
+**许可证：[MIT](LICENSE)**（自有代码）。OpenOCD 二进制与其配置为独立的
+GPL-2.0-or-later 组件，以 submodule / 独立下载方式提供，不在本仓库内，
+详见 [LICENSE](LICENSE) 的「第三方组件」一节。
+
 ![总览](docs/overview.png)
 
 实机连接（电机未启动时 `current=0`；`thresholdLast=50`、`vol=1050`）：
