@@ -139,11 +139,11 @@ CH32 两个型号是同一 die、同一份寄存器表，两个文件只有顶�
 
 | 型号 | 头文件 | AXF（DWARF） | 交叉核对 |
 |---|---|---|---|
-| CW32L010 | `/mnt/d/Code/bldc/BLDC-CW_Project/Libraries/inc/cw32l010.h` | `/mnt/d/Code/bldc/BLDC-CW_Project/MDK/Objects/bldc.axf` | `CW32L010_DFP/1.0.2/SVD/CW32L010.svd` |
-| CW32L011 | `/mnt/d/Code/motor-scope/imports/20261028_081923_777500_cw32l011.h` | `/mnt/d/Code/motor-scope/imports/20261028_081923_777500_DR2159.axf` | `CW32L011_DFP/1.0.0/SVD/CW32L011.svd` |
-| CW32L012 | `/mnt/d/Code/ble/BLECar/Libraries/inc/cw32l012.h` | `/mnt/d/Code/CW32L012_FLASH_Programming/CW32L012_FLASH_Programming/build/Project/flash_Programming.axf` | `CW32L012_DFP/1.0.2/SVD/CW32L012.svd` |
-| CH32V203C8T6 / K8T6 | — | — | `/mnt/c/MounRiver/MounRiver_Studio3/resources/app/resources/win32/components/WCH/SDK/default/RISC-V/CH32V203/NoneOS/CH32V203xx.svd` |
-| LKS32MC07x | — | — | `C:\Keil_v5\ARM\Packs\Linko\LKS07x\1.2.0\SVD\LKS32MC07x.svd` |
+| CW32L010 | `<你的工程>/Libraries/inc/cw32l010.h` | `<你的工程>/MDK/Objects/bldc.axf` | `CW32L010_DFP/1.0.2/SVD/CW32L010.svd` |
+| CW32L011 | `<导入目录>/cw32l011.h` | `<导入目录>/DR2159.axf` | `CW32L011_DFP/1.0.0/SVD/CW32L011.svd` |
+| CW32L012 | `<你的工程>/Libraries/inc/cw32l012.h` | `<你的工程>/build/Project/flash_Programming.axf` | `CW32L012_DFP/1.0.2/SVD/CW32L012.svd` |
+| CH32V203C8T6 / K8T6 | — | — | `<WCH SDK>/RISC-V/CH32V203/NoneOS/CH32V203xx.svd`（随 MounRiver Studio 的 WCH SDK 提供） |
+| LKS32MC07x | — | — | `<MDK_Pack>/Linko/LKS07x/<版本>/SVD/LKS32MC07x.svd`（Linko LKS07x 芯片包） |
 
 CW32 侧的解析**没有另写一套**：脚本 `import gen_signals`，直接复用仓库里已经跑通的
 `_parse_header()`、`_collect_typedefs()`、`_collect_peripherals()`（结构体/位域展开），
@@ -199,7 +199,7 @@ CW32L01x 的工厂信息区（只读）在 `0x001007xx`：
 | `0x001007E0` | 型号 ASCII 字符串（16 字节，`\0` 结尾） |
 
 依据：本任务给定的 CW32L011 识别参数，以及
-`/mnt/d/Code/DR2159/doc/工具链-编译烧录调试.md` §2.4 对 CW32L012 系统信息区的同址说明。
+`<DR2159 工程>/doc/工具链-编译烧录调试.md` §2.4 对 CW32L012 系统信息区的同址说明。
 CW32L010 使用同一家族布局；CW32L012 的 `note` 已注明“未逐型号上机验证”。
 `probe_chip()` 对 CW32 的流程是：先读 `0xE000ED00` 确认 `CPUID=0x410CC601`（M0+），
 再读 `0x001007E0` 的 16 字节 ASCII，因此 `identify.type_*` 与后端实现一致。
@@ -299,7 +299,7 @@ runtime\python\python.exe tools\build_mcu_tables.py
 WSL 下等价写法：
 
 ```bash
-cd /mnt/d/Code/motor-scope
+cd <工程目录>
 cmd.exe /c 'cd /d D:\Code\motor-scope && runtime\python\python.exe tools\build_mcu_tables.py'
 ```
 

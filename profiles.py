@@ -27,8 +27,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "profiles")
 SCHEMA = 1
 
-# 默认机型。source 里的路径按当前开发机填写，换取其它机器时改这里或改
-# profiles/<ID>/profile.json（运行时以文件为准，不会覆盖已有配置）。
+# 默认机型模板。**只含机型元数据**（MCU/架构/RAM/默认信号/连接参数），
+# source 里的路径一律留空——那是使用者自己工程的位置，不应硬编码在发行版里。
+# 用户首次使用时通过 UI「导入 AXF」或填写路径来绑定自己的固件；
+# 已有 profiles/<ID>/profile.json 时以文件为准，本模板不会覆盖。
 DEFAULT_PROFILES: List[Dict[str, Any]] = [
     {
         "id": "DR2159",
@@ -41,13 +43,15 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         "target": "",
         "interface": "",
         "source": {
-            "axf": r"D:\Code\DR2159\DR2159_Project\MDK\Objects\DR2159.axf",
-            "header": r"D:\Code\DR2159\DR2159_Project\Libraries\inc\cw32l011.h",
-            "map": r"D:\Code\DR2159\DR2159_Project\MDK\Objects\DR2159.map",
+            "axf": "",
+            "header": "",
+            "map": "",
             "svd": "",
         },
-        "defaults": [],
-        "stall": {},
+        "defaults": ["motor.over.current", "motor.over.thresholdLast",
+                     "adc.RES[0]", "motor.Scfg.vol"],
+        "stall": {"current": "motor.over.current",
+                  "threshold": "motor.over.thresholdLast"},
     },
     {
         "id": "DR1152",
@@ -60,9 +64,9 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         "target": "",
         "interface": "",
         "source": {
-            "axf": r"D:\Code\DR1152\DR1152_Project\MDK\Objects\DR1152.axf",
-            "header": r"D:\Code\DR1152\DR1152_Project\Libraries\inc\cw32l012.h",
-            "map": r"D:\Code\DR1152\DR1152_Project\MDK\Objects\DR1152.map",
+            "axf": "",
+            "header": "",
+            "map": "",
             "svd": "",
         },
         "defaults": ["g_dbgBatMv", "g_dbgBatLv", "uv.power", "s_duty", "uv.remainSec"],
@@ -79,11 +83,10 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         "target": "",
         "interface": "",
         "source": {
-            "axf": r"D:\Code\DR1152\DR1152_Project_CH32\build\DR1152_Project_CH32.elf",
+            "axf": "",
             "header": "",
-            "map": r"D:\Code\DR1152\DR1152_Project_CH32\build\DR1152_Project_CH32.map",
-            "svd": (r"C:\MounRiver\MounRiver_Studio3\resources\app\resources\win32"
-                    r"\components\WCH\SDK\default\RISC-V\CH32V203\NoneOS\CH32V203xx.svd"),
+            "map": "",
+            "svd": "",
         },
         "defaults": ["bat.mv", "bat.level", "uv.power", "s_duty", "uv.remainSec"],
         "stall": {},
@@ -103,10 +106,10 @@ DEFAULT_PROFILES: List[Dict[str, Any]] = [
         # LKS 的默认信号分布在 0x20000020..0x200004f8, 合并成一次读
         "scan": {"max_gap": 2048, "max_words": 512},
         "source": {
-            "axf": r"D:\Code\LKS32\lks07x_Project.axf",
+            "axf": "",
             "header": "",
             "map": "",
-            "svd": r"C:\Keil_v5\ARM\Packs\Linko\LKS07x\1.2.0\SVD\LKS32MC07x.svd",
+            "svd": "",
         },
         "defaults": [
             "limitpowerhandle.ibus_fir",

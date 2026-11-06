@@ -7647,7 +7647,7 @@
     const inp = $('#inpOcd');
     if (S.arch === 'riscv') {
       if (label) label.textContent = 'WCH OpenOCD 根目录（留空 = 自动用 tools/openocd-wch-fast）';
-      if (inp) inp.placeholder = '留空则只在工程 tools/ 下查找，或填 MounRiver / 独立仓库路径';
+      if (inp) inp.placeholder = '留空则只在工程 tools/ 下查找，或填你自己的 OpenOCD 根目录';
     } else {
       if (label) label.textContent = 'OpenOCD 根目录（留空 = 自动用 tools/openocd）';
       if (inp) inp.placeholder = '留空则只在工程 tools/ 下查找，或填自定义路径';

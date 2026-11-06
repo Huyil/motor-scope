@@ -18,10 +18,28 @@ import { fileURLToPath } from 'node:url'
 export const name = 'dsh-motorscope'
 export const inject = ['webServer']
 
+/**
+ * 工程根目录。优先级：
+ *   1. 环境变量 MOTORSCOPE_PROJECT（Windows 路径）/ MOTORSCOPE_PROJECT_WSL
+ *   2. 从本插件位置向上推导（插件通常位于 <project>/dsh-plugin）
+ *   3. 兜底 process.cwd()
+ * 不在源码里硬编码作者本机路径，换目录/换机器不用改代码。
+ */
+function detectProject() {
+  const envWin = process.env.MOTORSCOPE_PROJECT
+  const envWsl = process.env.MOTORSCOPE_PROJECT_WSL
+  if (envWin || envWsl) return { win: envWin || envWsl, wsl: envWsl || envWin }
+  // <project>/dsh-plugin/src/index.js -> 上溯两级
+  const here = dirname(fileURLToPath(import.meta.url))
+  const project = dirname(dirname(here))
+  return { win: project, wsl: project }
+}
+
+const _proj = detectProject()
 /** Windows-side project (where start_scope.bat and scope_server.py live). */
-const WIN_PROJECT = 'D:\\Code\\motor-scope'
+const WIN_PROJECT = _proj.win
 /** The same directory as WSL sees it (used for the launcher and python probe). */
-const WSL_PROJECT = '/mnt/d/Code/motor-scope'
+const WSL_PROJECT = _proj.wsl
 const WIN_PYTHON = WIN_PROJECT + '\\runtime\\python\\python.exe'
 const WSL_PYTHON = WSL_PROJECT + '/runtime/python/python.exe'
 const WIN_LAUNCHER = WIN_PROJECT + '\\runtime\\dsh-launch.cmd'

@@ -80,7 +80,7 @@ runtime\python\python.exe flash_tool.py --file build\DR1152_Project_CH32.hex --t
 
 ## 5. H7-TOOL 的参考
 
-`C:\Keil_v5\h7toolPC_release\EMMC\H7-TOOL\Programmer\Device\WCH\CH32V203\CH32V20x.lua`：
+`<H7-TOOL 上位机目录>/EMMC/H7-TOOL/Programmer/Device/WCH/CH32V203/CH32V20x.lua`：
 
 - Flash 基址 `0x08000000`、页 256、扇区 4096、UID `0x1FFFF7E8`
 - `CH32_PROGBUF = 0`：该型号用内存模式，而不是 progbuf 模式

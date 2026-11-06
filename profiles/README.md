@@ -49,10 +49,10 @@ profiles/
 
 | ID | MCU | 架构 | 符号来源 | 外设来源 | 变量/外设 |
 |---|---|---|---|---:|---:|
-| `DR2159` | CW32L011 | ARM M0+ | `D:\Code\DR2159\...\DR2159.axf` | `cw32l011.h` | 453 / 27 |
-| `DR1152` | CW32L012 | ARM M0+ | `D:\Code\DR1152\...\DR1152.axf` | `cw32l012.h` | 503 / 50 |
+| `DR2159` | CW32L011 | ARM M0+ | `<你的工程>\...\DR2159.axf` | `cw32l011.h` | 453 / 27 |
+| `DR1152` | CW32L012 | ARM M0+ | `<你的工程>\...\DR1152.axf` | `cw32l012.h` | 503 / 50 |
 | `DR1152_CH` | CH32V203C8T6 | RISC-V | `...\DR1152_Project_CH32.elf` | `CH32V203xx.svd` | 350 / 51 |
-| `LKS32-FOC` | LKS32MC07x | ARM M0 | `D:\Code\LKS32\lks07x_Project.axf` | `LKS32MC07x.svd` | 1006 / 30 |
+| `LKS32-FOC` | LKS32MC07x | ARM M0 | `<你的工程>\...\lks07x_Project.axf` | `LKS32MC07x.svd` | 1006 / 30 |
 
 > 数量是 2026-11-04 的构建结果；固件重编后点“重建当前机型符号”更新。
 

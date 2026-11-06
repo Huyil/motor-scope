@@ -10,8 +10,8 @@ CH32 侧: 直接解析 WCH 的 CMSIS-SVD (含 derivedFrom / dim / cluster)。
 
 依赖:
     pyelftools (只读 CW32 AXF 时需要)。WSL 的 python3 没有该包, 请用工程自带
-    Windows 运行时:
-        cd /d D:\\Code\\motor-scope
+    Windows 运行时（在工程根目录执行）:
+        cd /d <工程目录>
         runtime\\python\\python.exe tools\\build_mcu_tables.py
 
 用法:
@@ -35,10 +35,27 @@ ROOT = os.path.dirname(HERE)
 DEFAULT_OUT = os.path.join(ROOT, "web", "mcu")
 
 # --------------------------------------------------------------------------
-# 数据源 (Windows 路径; 在 WSL/Linux 下自动映射成 /mnt/<drive>/...)
+# 数据源：**全部由用户提供**，脚本内不预设任何厂商/本机路径。
+#
+#   --svd-ch32 <file>   CH32 的 CMSIS-SVD
+#   --svd-lks  <file>   LKS 的 CMSIS-SVD
+#   --cw32-src <dir>    CW32 工程根目录（内含 Libraries/inc 与 MDK/Objects）
+#
+# 也可用环境变量（便于 CI）：MOTORSCOPE_SVD_CH32 / MOTORSCOPE_SVD_LKS /
+# MOTORSCOPE_CW32_SRC。两者都没有时，对应型号跳过（已有 web/mcu/*.json 不受影响）。
 # --------------------------------------------------------------------------
-CH32_SVD = (r"C:\MounRiver\MounRiver_Studio3\resources\app\resources\win32"
-            r"\components\WCH\SDK\default\RISC-V\CH32V203\NoneOS\CH32V203xx.svd")
+def _env(*names: str) -> str:
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return ""
+
+
+# 运行时由 main() 按命令行/环境变量填充
+CH32_SVD = _env("MOTORSCOPE_SVD_CH32")
+LKS_SVD = _env("MOTORSCOPE_SVD_LKS")
+_CW32_SRC = _env("MOTORSCOPE_CW32_SRC")
 
 CW32_MODELS: List[Dict[str, Any]] = [
     {
@@ -49,8 +66,8 @@ CW32_MODELS: List[Dict[str, Any]] = [
         "flash_kb": 64,
         "ram_kb": 4,
         "package": None,
-        "header": r"D:\Code\bldc\BLDC-CW_Project\Libraries\inc\cw32l010.h",
-        "axf": [r"D:\Code\bldc\BLDC-CW_Project\MDK\Objects\bldc.axf"],
+        "header": os.path.join(_CW32_SRC, "Libraries", "inc", "cw32l010.h") if _CW32_SRC else "",
+        "axf": [os.path.join(_CW32_SRC, "MDK", "Objects", "bldc.axf")] if _CW32_SRC else [],
         "identify": {
             "kind": "cw32-signature",
             "type_addr": "0x001007E0",
@@ -74,8 +91,8 @@ CW32_MODELS: List[Dict[str, Any]] = [
         "flash_kb": 64,
         "ram_kb": 6,
         "package": None,
-        "header": r"D:\Code\motor-scope\imports\20261028_081923_777500_cw32l011.h",
-        "axf": [r"D:\Code\motor-scope\imports\20261028_081923_777500_DR2159.axf"],
+        "header": os.path.join(_CW32_SRC, "Libraries", "inc", "cw32l011.h") if _CW32_SRC else "",
+        "axf": [os.path.join(_CW32_SRC, "MDK", "Objects", "DR2159.axf")] if _CW32_SRC else [],
         "identify": {
             "kind": "cw32-signature",
             "type_addr": "0x001007E0",
@@ -98,12 +115,12 @@ CW32_MODELS: List[Dict[str, Any]] = [
         "flash_kb": 64,
         "ram_kb": 8,
         "package": None,
-        "header": r"D:\Code\ble\BLECar\Libraries\inc\cw32l012.h",
+        "header": os.path.join(_CW32_SRC, "Libraries", "inc", "cw32l012.h") if _CW32_SRC else "",
         # MDK/output/Project.axf 只有 0 个外设 typedef, 因此优先用 build/ 里的固件
-        "axf": [
-            r"D:\Code\CW32L012_FLASH_Programming\CW32L012_FLASH_Programming\build\Project\flash_Programming.axf",
-            r"D:\Code\CW32L012_FLASH_Programming\CW32L012_FLASH_Programming\MDK\output\Project.axf",
-        ],
+        "axf": ([
+            os.path.join(_CW32_SRC, "build", "Project", "flash_Programming.axf"),
+            os.path.join(_CW32_SRC, "MDK", "output", "Project.axf"),
+        ] if _CW32_SRC else []),
         "identify": {
             "kind": "cw32-signature",
             "type_addr": "0x001007E0",
@@ -140,7 +157,6 @@ CH32_IDENTIFY = {
 }
 
 # LKS32MC07x: 只有厂商 SVD (无 C 头文件), 直接按 SVD 展开
-LKS_SVD = r"C:\Keil_v5\ARM\Packs\Linko\LKS07x\1.2.0\SVD\LKS32MC07x.svd"
 
 LKS_MODELS: List[Dict[str, Any]] = [
     {"id": "LKS32MC07x", "package": None, "pins": None},
@@ -601,7 +617,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Build web/mcu MCU register tables")
     ap.add_argument("--out", default=DEFAULT_OUT, help="输出目录 (默认 web/mcu)")
     ap.add_argument("--only", default="", help="只生成指定型号, 逗号分隔")
+    ap.add_argument("--svd-ch32", default="", help="CH32 的 CMSIS-SVD 文件路径（用户提供）")
+    ap.add_argument("--svd-lks", default="", help="LKS 的 CMSIS-SVD 文件路径（用户提供）")
+    ap.add_argument("--cw32-src", default="", help="CW32 工程根目录（含 Libraries/inc 与 MDK/Objects）")
     args = ap.parse_args(argv)
+
+    # 命令行优先于环境变量
+    global CH32_SVD, LKS_SVD, _CW32_SRC
+    if args.svd_ch32:
+        CH32_SVD = args.svd_ch32
+    if args.svd_lks:
+        LKS_SVD = args.svd_lks
+    if args.cw32_src:
+        _CW32_SRC = args.cw32_src
 
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
@@ -617,10 +645,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     def want(mid: str) -> bool:
         return not only or mid in only
 
-    for spec in CW32_MODELS:
+    cw32_specs = [m for m in CW32_MODELS if want(m["id"])]
+    if cw32_specs and not _CW32_SRC:
+        print("[CW32] 跳过：未提供工程目录（用 --cw32-src 或 MOTORSCOPE_CW32_SRC 指定）")
+        cw32_specs = []
+    for spec in cw32_specs:
         mid = spec["id"]
-        if not want(mid):
-            continue
         print("[CW32] %s" % mid)
         data = build_cw32(spec)
         np_, nr, nb = validate(mid, data)
@@ -646,8 +676,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ch32_ids = [m for m in CH32_MODELS if want(m["id"])]
     if ch32_ids:
         svd = host_path(CH32_SVD)
-        if not os.path.isfile(svd):
-            raise FileNotFoundError("找不到 SVD: %s" % svd)
+        if not svd or not os.path.isfile(svd):
+            print("[CH32] 跳过：未提供 SVD（用 --svd-ch32 或 MOTORSCOPE_SVD_CH32 指定）")
+            ch32_ids = []
+    if ch32_ids:
         print("[CH32] %s" % os.path.basename(svd))
         periphs = build_ch32(svd)
         for m in ch32_ids:
@@ -677,8 +709,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     lks_ids = [m for m in LKS_MODELS if want(m["id"])]
     if lks_ids:
         svd = host_path(LKS_SVD)
-        if not os.path.isfile(svd):
-            raise FileNotFoundError("找不到 LKS SVD: %s" % svd)
+        if not svd or not os.path.isfile(svd):
+            print("[LKS] 跳过：未提供 SVD（用 --svd-lks 或 MOTORSCOPE_SVD_LKS 指定）")
+            lks_ids = []
+    if lks_ids:
         print("[LKS] %s" % os.path.basename(svd))
         periphs = build_ch32(svd)
         for m in lks_ids:

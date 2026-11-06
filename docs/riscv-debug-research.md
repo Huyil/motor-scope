@@ -152,7 +152,7 @@ riscv dmi_read 0x38
 
 ### 4.3 实际走通的路径（供复核）
 
-1. **浏览器里的搜索结果页快照**：`C:\Users\Administrator\Downloads\搜索 - 硬汉嵌入式论坛 - Powered by Discuz!.mhtml`（2026-10-30 15:12 由 Edge 保存，带登录态）。解析出 **77 条结果链接**，其中 RISC-V 相关约 30 条，构成了 §2 清单的主干。它等价于"人在浏览器里点开搜索结果页"，只是脚本抓不到同一页面。
+1. **浏览器里的搜索结果页快照**：`<下载目录>/搜索 - 硬汉嵌入式论坛 - Powered by Discuz!.mhtml`（2026-10-30 15:12 由 Edge 保存，带登录态）。解析出 **77 条结果链接**，其中 RISC-V 相关约 30 条，构成了 §2 清单的主干。它等价于"人在浏览器里点开搜索结果页"，只是脚本抓不到同一页面。
 2. **板块列表页**：`forum.php?mod=forumdisplay&fid=61&filter=typeid&typeid=313`（脱机烧录，11 页）等，用于补全快照未覆盖的条目。
 3. **打印视图**：`forum.php?mod=viewthread&action=printable&tid=N` —— 只含正文，无侧栏，是本次逐帖阅读的主要方式。
 

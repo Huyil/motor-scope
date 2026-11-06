@@ -26,7 +26,7 @@ DSH 里的 MotorScope 面板：左侧栏新增一个 `sidebar.panellist` 行（�
 |---|---|
 | 插件源码 | `/home/dr/dsh-plugins/dsh-motorscope` |
 | 构建产物 | `lib/index.js`（host）+ `lib/client.js`（ModuleLoader bundle） |
-| 生成的启动器 | `D:\Code\motor-scope\runtime\dsh-launch.cmd` |
+| 生成的启动器 | `<工程目录>\runtime\dsh-launch.cmd` |
 | 最近一次参数 | `~/.dsh/motorscope-panel.json` |
 | host API | `/motorscope/api/{state,start,stop,restart}` |
 

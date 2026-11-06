@@ -18,19 +18,19 @@ desc 持久化在 profiles/LKS32-FOC/annotations.json（生成物之外），
       python3 tools/annotate_vars.py --check    # 只统计，不写
 """
 import json
+import os
 import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-SCOPE_ROOT = Path("/mnt/d/Code/motor-scope")
+# 工程根：优先环境变量，否则从本文件位置推导（tools/ 的上一级）
+SCOPE_ROOT = Path(os.environ.get("MOTORSCOPE_ROOT") or Path(__file__).resolve().parent.parent)
 SIGNALS = SCOPE_ROOT / "profiles/LKS32-FOC/signals.json"
 ANNOTATIONS = SCOPE_ROOT / "profiles/LKS32-FOC/annotations.json"
-SRC_DIRS = [
-    Path("/mnt/d/Code/LKS32/LKS32MC071_FOC_Sensorless_V2.0/3-Software"),
-    Path("/mnt/d/Code/LKS32/LKS32MC071DOCBT8_FOC_Sensorless_6N_V2.0/071DO_Software"),
-]
-AXF = Path("/mnt/d/Code/LKS32/lks07x_Project.axf")
+# 需要抽取注释的源码目录 / AXF：用环境变量指定，未设置则为空（跳过源码抽取）
+SRC_DIRS = [Path(p) for p in os.environ.get("MOTORSCOPE_SRC_DIRS", "").split(os.pathsep) if p]
+AXF = Path(os.environ["MOTORSCOPE_AXF"]) if os.environ.get("MOTORSCOPE_AXF") else None
 
 # ---------------------------------------------------------------- 注释抽取
 
@@ -159,6 +159,9 @@ def build_comment_db():
 def dwarf_struct_of_leaf():
     """返回 {完整变量名: 叶子成员所在 struct 类型名}（匿名 struct 记 ''，不可用）。"""
     result = {}
+    if AXF is None or not Path(AXF).is_file():
+        # 未指定 / 不存在 AXF 时跳过结构体类型抽取（仍可做源码注释匹配）
+        return result
     try:
         from elftools.elf.elffile import ELFFile
     except ImportError:

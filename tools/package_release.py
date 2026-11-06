@@ -31,10 +31,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 # 必须进包的自有文件/目录
+# 注意：不含根目录 signals.json —— 那是作者本机用某个 ELF 生成的运行时产物，
+# 属于「本机项目数据」，会泄漏用户工程信息，发行包一律不带。
 CORE = [
     "scope_server.py", "ocd.py", "profiles.py", "gen_signals.py",
     "record_cache.py", "api_docs.py", "usb_devices.py", "flash.py",
-    "flash_tool.py", "requirements.txt", "signals.json",
+    "flash_tool.py", "requirements.txt",
     "LICENSE", "THIRD-PARTY-NOTICES.md", "README.md", "API.md",
     "start_scope.bat", "start_scope_sim.bat", "regen_signals.bat",
     "web", "docs", "tools",
@@ -66,6 +68,29 @@ EXCLUDE_NAMES = {
 }
 # profiles/<机型>/ 下的用户私有数据（只保留 demo/ 和 targets/）
 PROFILE_PRIVATE = {"signals.json", "profile.json", "annotations.json", "config.json"}
+
+# 「本机项目数据」特征：作者开发机上的绝对路径 / 厂商工具链安装路径。
+# 发行包若含这些，会泄漏私有工程结构/路径，且对新用户无意义。
+# 注意：raw string 里单反斜杠写一个，双反斜杠写两个
+LOCAL_PATH_PATTERNS = [
+    re.compile(r"[A-Za-z]:\\{1,2}Code\\{1,2}"),           # 盘符 Code 目录
+    re.compile(r"[A-Za-z]:/{1,2}Code/"),                   # D:/Code/
+    re.compile(r"/mnt/[a-z]/Code/"),                       # WSL 挂载路径
+    re.compile(r"[A-Za-z]:\\{1,2}(Keil_v5|MounRiver)"),    # 作者本机工具链
+    re.compile(r"[A-Za-z]:/{1,2}(Keil_v5|MounRiver)"),
+    # 通用盘符绝对路径（排除 \Windows\ 这类系统目录误报）
+    re.compile(r"[A-Za-z]:\\{1,2}(?!Windows\\|Program Files)[A-Za-z0-9_.-]+\\"),
+]
+# 扫描时只看文本类文件
+SCAN_EXT = {".py", ".js", ".json", ".md", ".bat", ".cfg", ".html", ".css", ".txt", ".yml"}
+# 这些文件允许保留路径说明（文档里的「工具装在哪/路径怎么写」教学示例）。
+# 注意：只放行「通用占位写法」，不放行任何作者本机真实安装路径。
+PATH_SCAN_ALLOW = {
+    "README.md", "API.md", "THIRD-PARTY-NOTICES.md",
+    "profiles/README.md", "web/mcu/README.md", "dsh-plugin/README.md",
+    # 扫描器自身必须包含这些模式定义，不算泄漏
+    "tools/package_release.py",
+}
 
 
 def read_version(explicit: str = "") -> str:
@@ -105,6 +130,34 @@ def compliance_check(include_binaries: bool) -> list[str]:
         if not os.path.isdir(os.path.join(ROOT, "tools/riscv-openocd-wch")):
             problems.append("缺少 tools/riscv-openocd-wch（GPL 源码义务）")
     return problems
+
+
+def scan_local_paths(items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """扫描待打包文件里是否残留「作者本机项目路径」。
+
+    命中说明发行包会泄漏私有工程结构（例如开发机上的 Code 目录），
+    且对新用户毫无意义。返回 [(包内路径, 命中的样例)]。
+    """
+    found: list[tuple[str, str]] = []
+    for abs_path, rel in items:
+        if os.path.splitext(rel)[1].lower() not in SCAN_EXT:
+            continue
+        if rel in PATH_SCAN_ALLOW:
+            continue
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for rx in LOCAL_PATH_PATTERNS:
+            m = rx.search(text)
+            if m:
+                # 取所在行做样例
+                line = text[:m.start()].count("\n")
+                snippet = text.splitlines()[line][:100] if text.splitlines() else m.group(0)
+                found.append((rel, snippet.strip()))
+                break
+    return found
 
 
 def _should_skip(rel: str) -> bool:
@@ -185,6 +238,18 @@ def main() -> int:
     if not items:
         print("没有可打包的文件")
         return 1
+
+    # 本机项目路径扫描：发行包不应含作者私有工程路径
+    if not args.skip_check:
+        leaks = scan_local_paths(items)
+        if leaks:
+            print("\n[本机项目路径泄漏] 下列文件含作者本机路径，不应进发行包：")
+            for rel, sample in leaks:
+                print("  ✗ %s\n      %s" % (rel, sample))
+            print("\n请把这些路径改为空值/相对路径，或加进 PATH_SCAN_ALLOW"
+                  "（仅限文档示例），或用 --skip-check 跳过。")
+            return 1
+        print("  本机路径检查通过")
 
     out_dir = os.path.join(ROOT, args.out)
     os.makedirs(out_dir, exist_ok=True)

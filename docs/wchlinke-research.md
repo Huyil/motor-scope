@@ -27,10 +27,10 @@
 
 ### 1.1 主控与固件包（本机实证）
 
-MRS 3 安装目录里就有官方固件包：
+MRS 3 安装目录（`<MRS 安装目录>` = MounRiver Studio 的安装位置，因机器而异）里就有官方固件包：
 
 ```
-C:\MounRiver\MounRiver_Studio3\resources\app\resources\win32\components\WCH\Others\Firmware_Link\default\
+<MRS 安装目录>/resources/app/resources/win32/components/WCH/Others/Firmware_Link/default/
   FIRMWARE_CH32V203.bin      28,100 B
   FIRMWARE_CH32V305.bin      99,388 B   ← LinkE 主控
   WCH-LinkE-APP-IAP.bin     107,580 B   ← LinkE 应用（IAP 升级用）
@@ -171,7 +171,7 @@ struct adapter_driver wlinke_adapter_driver = {
 公开快照只有 2043 行，本机二进制更新（`wlink_speed` 的日志行号是 3108），所以直接反汇编核对：
 
 ```text
-C:\MounRiver\...\WCH\OpenOCD\OpenOCD\bin\openocd.exe   (PE i386, 4.9 MB)
+<MRS 安装目录>/resources/app/resources/win32/components/WCH/OpenOCD/OpenOCD/bin/openocd.exe   (PE i386, 4.9 MB)
 符号表: _wlink_speed 0x43069e, _wlink_speed_div 0x4307c9, _wlink_khz 0x430853
 
 0043069e <_wlink_speed>:
@@ -431,7 +431,7 @@ static int ch32vx_write(...) {
 
 **本机证据**
 
-* `C:\MounRiver\MounRiver_Studio3\resources\app\resources\win32\components\WCH\OpenOCD\OpenOCD\bin\openocd.exe`（v2.12，含 COFF 符号与 `wlinke.c` 行号）
+* `<MRS 安装目录>/resources/app/resources/win32/components/WCH/OpenOCD/OpenOCD/bin/openocd.exe`（v2.12，含 COFF 符号与 `wlinke.c` 行号）
 * `...\WCH\Others\Firmware_Link\default\`（官方固件 v44）
 * `...\WCH\Others\CommunicationLib\default\WCHLinkDll64.dll`（36 个导出**全部**是 `CH375*`：OpenDevice/ReadEndP/WriteEndP/SetTimeout/...，没有任何高层调试 API）
 
