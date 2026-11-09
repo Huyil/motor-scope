@@ -52,7 +52,7 @@ PROJECT_DEFAULT = os.path.abspath(os.path.join(HERE, "..", ".."))
 WEB_DIR = os.path.join(HERE, "web")
 SIGNALS_JSON = os.path.join(HERE, "signals.json")
 PROFILES_DIR = os.path.join(HERE, "profiles")
-VERSION = "0.1.0"
+VERSION = "1.0.0"
 
 _AXIS_RIGHT = re.compile(
     r"(vol|speed|level|state|power|conts|tick|duty|ccr|arr|batlevel|direction|overlevel)",
