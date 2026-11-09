@@ -34,9 +34,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 KNOWN: List[Dict[str, str]] = [
     # H7-TOOL（安富莱）——本项目 ARM 链路默认探针，CMSIS-DAP v1(HID) + v2(WinUSB)
+    # H7-TOOL 的 v2(WinUSB) 接口在 openocd 0.12 + libusb 上报
+    # "could not claim interface"，实测只有 v1(HID) 可用 —— 故用 v1 cfg。
     {"vid": "c251", "pid": "f00a", "name": "H7-TOOL CMSIS-DAP",
-     "vendor": "Anfulai", "backend": "cmsis-dap", "iface": "cmsis-dap.cfg",
-     "transport": "HID/WinUSB", "arch": "cw32"},
+     "vendor": "Anfulai", "backend": "cmsis-dap", "iface": "cmsis-dap-v1.cfg",
+     "transport": "HID", "arch": "cw32"},
     # WCH-Link / WCH-LinkE（沁恒）
     {"vid": "1a86", "pid": "8012", "name": "WCH-Link (CMSIS-DAP)",
      "vendor": "WCH", "backend": "cmsis-dap", "iface": "cmsis-dap.cfg",

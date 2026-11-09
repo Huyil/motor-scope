@@ -2128,6 +2128,21 @@ class App:
                        "或在信号源面板填「OpenOCD 根目录」自定义路径")
                 self.last_connect_error = msg
                 raise RuntimeError(msg)
+        # CMSIS-DAP 的 v2(WinUSB) 后端在 openocd 0.12 + libusb 上实测报
+        # "could not claim interface"（H7-TOOL 尤其明显），而 v1(HID) 正常。
+        # 用户若选/存了 cmsis-dap.cfg，自动降级到同目录的 cmsis-dap-v1.cfg。
+        if iface and os.path.basename(str(iface)) == "cmsis-dap.cfg":
+            base_dir = os.path.dirname(str(iface)) or os.path.join(
+                paths.scripts, "interface") if paths else ""
+            for cand in (os.path.join(base_dir, "cmsis-dap-v1.cfg") if base_dir else "",
+                         os.path.join(paths.scripts, "interface", "cmsis-dap-v1.cfg")
+                         if paths else ""):
+                if cand and os.path.isfile(cand):
+                    self.add_log("CMSIS-DAP v2(WinUSB) 后端不可用，自动改用 v1(HID): %s"
+                                 % os.path.basename(cand))
+                    iface = cand
+                    break
+
         if iface:
             # 前端给的多是裸 cfg 名（cmsis-dap.cfg）；-f 需要可解析的路径。
             # 相对于 OpenOCD 的 scripts/interface 目录解析，避免 -f 找不到文件。
