@@ -23,7 +23,9 @@ class LookupTest(unittest.TestCase):
         hit = usb_devices._lookup("c251", "f00a", "H7-TOOL CMSIS-DAP")
         self.assertIsNotNone(hit)
         self.assertEqual(hit["name"], "H7-TOOL CMSIS-DAP")
-        self.assertEqual(hit["iface"], "cmsis-dap.cfg")
+        # H7-TOOL 的 v2(WinUSB) 后端无法 claim，必须用 v1(HID)
+        self.assertEqual(hit["iface"], "cmsis-dap-v1.cfg")
+        self.assertEqual(hit["transport"], "HID")
         self.assertEqual(hit["arch"], "cw32")
 
     def test_wchlink_dap(self):
