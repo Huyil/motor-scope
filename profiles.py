@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 from typing import Any, Dict, List, Optional
 
@@ -185,6 +186,12 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def table_display_name(path: str) -> str:
+    """上传文件落盘时加了时间戳前缀；显示/写 meta 时去掉它。"""
+    base = os.path.basename(str(path or ""))
+    return re.sub(r"^\d{8}_\d{6}(?:_\d+)?_", "", base) or base
+
+
 def _profile_dir(pid: str, root: str = ROOT) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fa5]+", "_", str(pid or ""))[:64]
     return os.path.join(root, safe)
@@ -205,7 +212,8 @@ def config_path(pid: str, root: str = ROOT) -> str:
 
 def _read_json(path: str, default: Any = None) -> Any:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        # utf-8-sig: 兼容用户导入的带 BOM 的寄存器表 JSON
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     except Exception:
         return default
@@ -274,6 +282,88 @@ def save_index(index: Dict[str, Any], root: str = ROOT) -> None:
         "active": str(index.get("active") or ""),
         "items": [str(x) for x in index.get("items") or []],
     }, indent=2)
+
+
+def slug_id(name: str, fallback: str = "机型") -> str:
+    """把机型名转成可做目录名的 ID（允许中文/字母/数字/._-）。"""
+    text = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fa5]+", "_", str(name or "").strip())
+    text = text.strip("._-")[:64]
+    return text or fallback
+
+
+def unique_id(base: str, root: str = ROOT) -> str:
+    """生成未占用的机型 ID；同名时追加 -2 / -3 …"""
+    base = slug_id(base)
+    index = load_index(root)
+    used = set(index["items"])
+    cand = base
+    n = 2
+    while cand in used or os.path.isdir(_profile_dir(cand, root)):
+        cand = "%s-%d" % (base, n)
+        n += 1
+    return cand
+
+
+def add_to_index(pid: str, root: str = ROOT, active: bool = False) -> None:
+    index = load_index(root)
+    if pid not in index["items"]:
+        index["items"].append(pid)
+    if active:
+        index["active"] = pid
+    save_index(index, root)
+
+
+def create_profile(name: str, root: str = ROOT, base: str = "",
+                   meta: Optional[Dict[str, Any]] = None,
+                   copy_catalog: bool = True) -> Dict[str, Any]:
+    """新建机型；``base`` 非空时复制该机型的元数据（和符号表）。
+
+    复制是「新建机型」的一种入口：先得到一套可用的符号/配置，再替换源
+    AXF/SVD。``meta`` 里的字段覆盖复制来的值；ID 始终按 ``name`` 重新生成。
+    """
+    base_meta = read_profile(base, root) if base else None
+    data: Dict[str, Any] = dict(base_meta or {})
+    data.pop("id", None)
+    if meta:
+        data.update(meta)
+    label = str(name or data.get("name") or "").strip()
+    pid = unique_id(str(data.pop("id", "") or label or "机型"), root)
+    data["id"] = pid
+    data["name"] = label or pid
+    data["created_at"] = _now()
+    data["updated_at"] = data["created_at"]
+    keep_counts = bool(base_meta and copy_catalog
+                       and os.path.isfile(signals_path(base, root)))
+    if not keep_counts:
+        data["counts"] = {}
+    write_profile(data, root)
+    if base_meta and copy_catalog:
+        for fname in ("signals.json", "annotations.json", "config.json"):
+            src = os.path.join(_profile_dir(base, root), fname)
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(_profile_dir(pid, root), fname))
+    add_to_index(pid, root)
+    return read_profile(pid, root) or data
+
+
+def delete_profile(pid: str, root: str = ROOT) -> None:
+    """删除一个机型（目录 + 索引项）。至少保留一个机型。"""
+    pid = str(pid or "").strip()
+    index = load_index(root)
+    if pid not in index["items"]:
+        raise RuntimeError("未知机型: %s" % (pid or "?"))
+    if len(index["items"]) <= 1:
+        raise RuntimeError("至少保留一个机型")
+    path = os.path.abspath(_profile_dir(pid, root))
+    root_abs = os.path.abspath(root)
+    if os.path.dirname(path) != root_abs:
+        raise RuntimeError("拒绝删除非法机型路径: %s" % path)
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    index["items"] = [x for x in index["items"] if x != pid]
+    if not index.get("active") or index["active"] == pid:
+        index["active"] = index["items"][0] if index["items"] else ""
+    save_index(index, root)
 
 
 def read_profile(pid: str, root: str = ROOT) -> Optional[Dict[str, Any]]:
@@ -395,6 +485,7 @@ def build_catalog(meta: Dict[str, Any], root: str = ROOT) -> Dict[str, Any]:
     header = host_path(str(src.get("header") or ""))
     svd = host_path(str(src.get("svd") or ""))
     map_path = host_path(str(src.get("map") or ""))
+    table = host_path(str(src.get("table") or ""))
     if not axf or not os.path.isfile(axf):
         raise RuntimeError("找不到 AXF/ELF: %s（请改 profile.json 的 source.axf）" % (axf or "?"))
     ram = meta.get("ram") or None
@@ -412,7 +503,23 @@ def build_catalog(meta: Dict[str, Any], root: str = ROOT) -> Dict[str, Any]:
         defaults=list(meta.get("defaults") or []),
         stall=dict(meta.get("stall") or {}),
     )
-    data.setdefault("meta", {})["profile"] = str(meta.get("id") or "")
+    meta_out = data.setdefault("meta", {})
+    meta_out["profile"] = str(meta.get("id") or "")
+    if header and os.path.isfile(header):
+        meta_out["register_table"] = table_display_name(header)
+        meta_out["register_source"] = "header"
+    elif svd and os.path.isfile(svd):
+        meta_out["register_table"] = table_display_name(svd)
+        meta_out["register_source"] = "svd"
+    # 独立导入的 JSON 寄存器表优先级最高：即使 AXF 换了，外设表也保持不变。
+    if table and os.path.isfile(table):
+        obj = _read_json(table, None)
+        periphs = obj.get("peripherals") if isinstance(obj, dict) else obj
+        if isinstance(periphs, list):
+            data["peripherals"] = periphs
+            meta_out["register_table"] = table_display_name(table)
+            meta_out["register_source"] = "json"
+            meta_out["peripheral_count"] = len(periphs)
     pid = str(meta.get("id") or "")
     if pid:
         apply_annotations(data, load_annotations(pid, root))

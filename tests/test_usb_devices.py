@@ -120,5 +120,62 @@ class EnumerateTest(unittest.TestCase):
         self.assertEqual(out["supported"][0]["backend"], "cmsis-dap")
 
 
+class HidEnumerateTest(unittest.TestCase):
+    """HID 列表：不依赖真实 HID 硬件，用假 WMI 行打桩。"""
+
+    @staticmethod
+    def hid(vid, pid, serial="", name="", instance="", hid_class="HIDClass"):
+        return {"vid": vid, "pid": pid, "serial": serial, "name": name,
+                "status": "OK", "instance": instance, "hid_class": hid_class,
+                "is_collection": "&COL" in instance.upper(),
+                "composite": "&MI_" in instance.upper()}
+
+    def test_known_h7tool_and_plain_keyboard(self):
+        raw = [
+            self.hid("c251", "f00a", "7&682BCBB&0&0000",
+                     "符合 HID 标准的供应商定义设备",
+                     "HID\\VID_C251&PID_F00A&MI_01\\7&682BCBB&0&0000"),
+            self.hid("258a", "0049", "9&10526D0D&0&0004", "HID Keyboard Device",
+                     "HID\\VID_258A&PID_0049&MI_01&COL05\\9&10526D0D&0&0004",
+                     "Keyboard"),
+        ]
+        with mock.patch.object(usb_devices, "_enumerate_hid_raw",
+                               return_value=(raw, "wmi")):
+            out = usb_devices.enumerate_hid()
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["available"])
+        self.assertEqual(out["method"], "wmi")
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["debugger_count"], 1)
+        h7 = out["devices"][0]
+        self.assertTrue(h7["known"])
+        self.assertEqual(h7["debugger"], "H7-TOOL CMSIS-DAP")
+        self.assertEqual(h7["iface"], "cmsis-dap-v1.cfg")
+        self.assertEqual(h7["transport"], "HID")
+        self.assertIn("key", h7)
+        kb = out["devices"][1]
+        self.assertFalse(kb["known"])
+        self.assertEqual(kb["hid_class"], "Keyboard")
+        self.assertTrue(kb["is_collection"])
+
+    def test_no_devices(self):
+        with mock.patch.object(usb_devices, "_enumerate_hid_raw",
+                               return_value=([], "wmi")):
+            out = usb_devices.enumerate_hid()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["count"], 0)
+        self.assertEqual(out["debugger_count"], 0)
+        self.assertEqual(out["devices"], [])
+
+    def test_unavailable_backend_is_graceful(self):
+        with mock.patch.object(usb_devices, "_enumerate_hid_raw",
+                               return_value=([], "unavailable")):
+            out = usb_devices.enumerate_hid()
+        self.assertFalse(out["available"])
+        self.assertTrue(out["ok"])
+        self.assertIn("error", out)
+        self.assertEqual(out["devices"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

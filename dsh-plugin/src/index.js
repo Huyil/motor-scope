@@ -52,7 +52,7 @@ const WIN_FORWARD_LOG = WIN_PROJECT + '\\runtime\\dsh-lan-forward.log'
 const WIN_FORWARD_OUT = WIN_PROJECT + '\\runtime\\dsh-lan-forward.out'
 const WSL_FORWARD_OUT = WSL_PROJECT + '/runtime/dsh-lan-forward.out'
 const PLUGIN_FORWARDER = join(dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'lan_forward.py')
-const DEFAULT_ARGS = ['--auto', '--port', '8765']
+const DEFAULT_ARGS = ['--port', '8765']
 const API_PREFIX = '/motorscope/api'
 
 /** LAN exposure: Windows portproxy 80 -> the loopback server, plus a scoped firewall rule. */

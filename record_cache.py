@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import secrets
@@ -80,6 +81,7 @@ def _signal_meta(sig: Any) -> Dict[str, Any]:
         "id": sid,
         "name": str(get("name") or sid),
         "unit": str(get("unit") or ""),
+        "float": bool(get("float")),
     }
     for key, default in (("scale", 1.0), ("offset", 0.0)):
         try:
@@ -95,8 +97,9 @@ def _signal_meta(sig: Any) -> Dict[str, Any]:
 
 
 def _sig_key(signals: Sequence[Dict[str, Any]]) -> Tuple[Any, ...]:
-    """信号列指纹：顺序、缩放/偏移或单位变化都必须换会话，避免旧块解释错位。"""
-    return tuple((s.get("id"), s.get("scale"), s.get("offset"), s.get("unit"))
+    """信号列指纹：顺序、缩放/偏移、单位或 float 解释变化都必须换会话。"""
+    return tuple((s.get("id"), s.get("scale"), s.get("offset"), s.get("unit"),
+                  bool(s.get("float")))
                  for s in signals)
 
 
@@ -223,7 +226,16 @@ class RecordCache:
         if not self.enabled or self._closed:
             return
         try:
-            vals = [_clamp_int32(v) for v in values]
+            vals: List[int] = []
+            for v in values:
+                if v is None:
+                    # 浮点 NaN/Inf 在 Signal.decode 里变成 None；缓存用 NaN bits 占位
+                    vals.append(struct.unpack("<i", struct.pack("<f", float("nan")))[0])
+                elif isinstance(v, float):
+                    # 浮点通道按 IEEE754 raw bits 存 int32，window 读取时再解码
+                    vals.append(struct.unpack("<i", struct.pack("<f", v))[0])
+                else:
+                    vals.append(_clamp_int32(v))
             self._queue.put_nowait(("s", float(t_ms), vals))
         except queue.Full:
             self._dropped += 1
@@ -467,6 +479,8 @@ class RecordCache:
         flat: List[int] = []
         mins = [None] * channels
         maxs = [None] * channels
+        sig_meta = sess.get("signals") or []
+        float_flags = [bool(s.get("float")) for s in sig_meta]
         for _t, vals in rows:
             vals = vals[:channels]
             if len(vals) < channels:
@@ -474,10 +488,15 @@ class RecordCache:
             for i, v in enumerate(vals):
                 iv = _clamp_int32(v)
                 flat.append(iv)
-                if mins[i] is None or iv < mins[i]:
-                    mins[i] = iv
-                if maxs[i] is None or iv > maxs[i]:
-                    maxs[i] = iv
+                real: Any = iv
+                if i < len(float_flags) and float_flags[i]:
+                    real = struct.unpack("<f", struct.pack("<i", iv))[0]
+                    if not math.isfinite(real):
+                        continue
+                if mins[i] is None or real < mins[i]:
+                    mins[i] = real
+                if maxs[i] is None or real > maxs[i]:
+                    maxs[i] = real
         payload = BLOCK_HEADER.pack(MAGIC, CACHE_VERSION, channels, seq,
                                     start_ms, count, 0)
         if offsets:
@@ -788,6 +807,19 @@ class RecordCache:
                 if samples and samples[-1] is not last_sample and samples[-1][0] != last_sample[0]:
                     samples.append(last_sample)
                 decimated = True
+            sig_meta = sess.get("signals") or []
+            float_flags = [bool(s.get("float")) for s in sig_meta]
+            if any(float_flags):
+                for row in samples:
+                    vals = row[1]
+                    for i, flag in enumerate(float_flags):
+                        if not flag or i >= len(vals):
+                            continue
+                        try:
+                            fv = struct.unpack("<f", struct.pack("<i", int(vals[i])))[0]
+                        except Exception:
+                            fv = float("nan")
+                        vals[i] = fv if math.isfinite(fv) else None
             return {
                 "ok": True, "enabled": self.enabled, "empty": False,
                 "session": sess.get("id"),

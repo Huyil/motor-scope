@@ -19,6 +19,7 @@
 | RISC-V 预编译二进制 | `tools/openocd-wch-fast/` | 发行包内 / `tools/fetch_openocd.py` 下载 | **GPL-2.0-or-later**（对应源码见上一条） |
 | 标准 OpenOCD 发行版 | `tools/openocd/` | 发行包内 / 用户自备 | **GPL-2.0-or-later** |
 | 便携 Python 运行时 | `runtime/` | 随目录分发（不入 git） | **PSF License** |
+| 内嵌位图字体（8x13） | `screenshot.py` 的 `_FONT_HEX` | 由 DejaVuSansMono 11px 栅格化后嵌入 | **DejaVu Fonts License**（Bitstream Vera 衍生，允许嵌入/再分发；字体名未用于商业销售） |
 
 ## 来源与版本
 

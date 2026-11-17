@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
       '.ms-dot.warn{background:#f5a623}',
       '.ms-status{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--dsw-alias-label-secondary,#9aa0aa);white-space:nowrap}',
       '.ms-port{font-family:var(--ds-font-family-code,ui-monospace,monospace);color:#7c8798}',
-      '.ms-lan-url{font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:10px;color:#7ee2a8;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.ms-lan-url{font-family:var(--ds-font-family-code,ui-monospace,monospace);font-size:10px;color:#7ee2a8;max-width:220px;min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.ms-spacer{flex:1;min-width:8px}',
       '.ms-btn{height:24px;padding:0 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));background:transparent;color:inherit;font:inherit;font-size:11px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;gap:4px}',
       '.ms-btn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))}',
@@ -193,7 +193,9 @@ window.__ModuleLoader__.load({
             if (next && next.ok !== false) emit(Object.assign({ loading: false }, next))
             if (payload && payload.ok === false) setError(payload.error || '操作失败')
             else if (next && next.warning) setError(next.warning)
-            if (action !== 'stop') setReloadKey(function (key) { return key + 1 })
+            // 打开/启动时 iframe 会随 frameUrl 首次挂载，不需要再强制重载；
+            // 只有“重启”才需要换 key 重新加载页面。
+            if (action === 'restart') setReloadKey(function (key) { return key + 1 })
           })
           .catch(function (cause) {
             setError(String((cause && cause.message) || cause))
@@ -206,15 +208,22 @@ window.__ModuleLoader__.load({
       }, [])
 
       React.useEffect(function () {
+        // LAN 查询返回前先不挂 iframe：否则会先用无 ?lan 的 URL 加载一次，
+        // LAN 状态回来后 src 变化，页面被强制刷新第二次。
+        if (lan.loading) return
         if (state.running && state.url) {
           var lanBase = lan.share ? (lan.port80 && lan.url80 ? lan.url80 : lan.url) : ''
           setFrameUrl(withLan(state.url, lanBase))
         }
-      }, [state.running, state.url, lan.share, lan.port80, lan.url, lan.url80])
+      }, [state.running, state.url, lan.loading, lan.share, lan.port80, lan.url, lan.url80])
 
       React.useEffect(function () {
         var alive = true
-        fetch(API + '/lan', { cache: 'no-store' })
+        var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null
+        var timer = ctrl ? setTimeout(function () {
+          try { ctrl.abort() } catch (cause) { /* ignore */ }
+        }, 3000) : null
+        fetch(API + '/lan', { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
           .then(function (response) { return response.json() })
           .then(function (payload) {
             if (alive && payload && payload.lan) setLan(Object.assign({ loading: false }, payload.lan))
@@ -222,7 +231,12 @@ window.__ModuleLoader__.load({
           .catch(function () {
             if (alive) setLan({ loading: false, share: false, port80: false, enabled: false, url: '', url80: '' })
           })
-        return function () { alive = false }
+          .then(function () { if (timer) clearTimeout(timer) })
+        return function () {
+          alive = false
+          if (timer) clearTimeout(timer)
+          if (ctrl) { try { ctrl.abort() } catch (cause) { /* ignore */ } }
+        }
       }, [])
 
       var lanAction = React.useCallback(function (path, reloadFrame) {
@@ -332,6 +346,10 @@ window.__ModuleLoader__.load({
               statusText,
               running && state.port ? h('span', { className: 'ms-port' }, ':' + state.port) : null,
             ),
+            // 放在状态右侧：地址长度变化只推挤中间 spacer，不推挤右侧按钮
+            ms.lan && ms.lan.share && (ms.lan.url80 || ms.lan.url)
+              ? h('span', { className: 'ms-lan-url', title: '局域网共享地址' }, (ms.lan.url80 || ms.lan.url))
+              : null,
             h('span', { className: 'ms-spacer' }),
             h('button', {
               className: 'ms-btn primary',
@@ -367,9 +385,6 @@ window.__ModuleLoader__.load({
                 ? '先打开局域网共享'
                 : (ms.lan.port80 ? '取消可选 80 端口绑定' : '可选：绑定 80 端口（需要管理员权限）'),
             }, ms.lan && ms.lan.port80 ? '80：开' : '80 端口'),
-            ms.lan && ms.lan.share && (ms.lan.url80 || ms.lan.url)
-              ? h('span', { className: 'ms-lan-url', title: '局域网共享地址' }, (ms.lan.url80 || ms.lan.url))
-              : null,
             h('span', { className: 'ms-bar-sep' }),
             h('button', {
               className: 'ms-btn danger',

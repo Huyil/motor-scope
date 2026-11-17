@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
@@ -221,6 +222,9 @@ def _walk_members(struct_die, cu, base: int, prefix: str, depth: int,
                         "signed": bool(esg),
                         "type": el,
                         "bit": None,
+                        # IEEE754 float32；只标记 4 字节，避免 8 字节 double
+                        # 被当成 4 字节解码（当前读取链路按 32 位字取数）。
+                        "float": bool(ek == "float" and int(es or 4) == 4),
                     })
         else:
             bit = _bit_field(member, int(size or 4))
@@ -231,6 +235,7 @@ def _walk_members(struct_die, cu, base: int, prefix: str, depth: int,
                 "signed": bool(signed),
                 "type": label,
                 "bit": bit,
+                "float": bool(kind == "float" and int(size or 4) == 4),
             })
 
 
@@ -324,10 +329,12 @@ def _collect_variables(dwarf, ram_min: int = RAM_MIN,
                         local.append({"name": "%s[%d]" % (nm, i),
                                       "addr": addr + i * (es or 1),
                                       "size": int(es or 1), "signed": bool(esg),
-                                      "type": el, "bit": None})
+                                      "type": el, "bit": None,
+                                      "float": bool(ek == "float" and int(es or 4) == 4)})
             else:
                 local.append({"name": nm, "addr": addr, "size": int(size or 4),
-                              "signed": bool(signed), "type": label, "bit": None})
+                              "signed": bool(signed), "type": label, "bit": None,
+                              "float": bool(kind == "float" and int(size or 4) == 4)})
             for row in local:
                 key = (row["name"], row["addr"])
                 if key in seen:
@@ -441,6 +448,89 @@ def _infer_mcu(machine: str, header: str) -> str:
     return "CW32L011"
 
 
+def infer_mcu(machine: str, header: str = "") -> str:
+    """公开的型号推断入口（新建机型时可按头文件名兜底）。"""
+    return _infer_mcu(machine, header)
+
+
+def svd_info(path: str) -> Dict[str, Any]:
+    """读 CMSIS-SVD 的顶层信息（vendor/name/description/cpu）.
+
+    新建机型时用来给机型/芯片起名：SVD 的 <name> 通常就是芯片型号
+    （例如 N32G003），比从文件名猜更可靠。
+    """
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return {}
+
+    def text(tag: str) -> str:
+        return str(root.findtext(tag) or "").strip()
+
+    cpu = ""
+    node = root.find("cpu")
+    if node is not None:
+        cpu = str(node.findtext("name") or "").strip()
+    return {
+        "name": text("name"),
+        "vendor": text("vendor"),
+        "vendor_id": text("vendorID"),
+        "description": text("description"),
+        "cpu": cpu,
+        "version": text("version"),
+    }
+
+
+# SHF_ALLOC：只统计真正占用 RAM 的已分配段，避免把调试段/空地址算进范围。
+_SHF_ALLOC = 0x2
+_RAM_LO = 0x20000000
+_RAM_HI = 0x30000000
+
+
+def _section_ram_range(elf: Any) -> Optional[List[int]]:
+    """从 ELF 的 .data/.bss 等段推断 RAM 地址范围。
+
+    新建机型时若只按默认 8KB 过滤，RAM 更大的芯片会丢变量；这里只取
+    实际分配的 RAM 段（最小/最大地址），再按 4 字节对齐。
+    """
+    lo: Optional[int] = None
+    hi = 0
+    for sec in elf.iter_sections():
+        try:
+            flags = int(sec["sh_flags"])
+            sh_type = str(sec["sh_type"])
+            addr = int(sec["sh_addr"])
+            size = int(sec["sh_size"])
+        except Exception:
+            continue
+        if not (flags & _SHF_ALLOC) or size <= 0:
+            continue
+        if sh_type not in ("SHT_PROGBITS", "SHT_NOBITS"):
+            continue
+        if not (_RAM_LO <= addr < _RAM_HI):
+            continue
+        lo = addr if lo is None else min(lo, addr)
+        hi = max(hi, addr + size)
+    if lo is None or hi <= lo:
+        return None
+    return [lo & ~0x3, (hi + 3) & ~0x3]
+
+
+def inspect_elf(path: str) -> Dict[str, Any]:
+    """读取 AXF/ELF 的架构与 RAM 范围（新建机型时自动填 profile.json）。"""
+    with open(path, "rb") as f:
+        elf = ELFFile(f)
+        machine = str(elf.header.get("e_machine", ""))
+        ram = _section_ram_range(elf)
+    riscv = "RISCV" in machine.upper()
+    return {
+        "machine": machine,
+        "arch": "riscv" if riscv else "cw32",
+        "core": "riscv32" if riscv else "",
+        "ram": ram,
+    }
+
+
 def _svd_peripherals(path: str) -> List[Dict[str, Any]]:
     """用 tools/build_mcu_tables.py 的 SVD 解析器展开外设（derivedFrom/dim/cluster）。"""
     import importlib.util
@@ -506,6 +596,12 @@ def build(axf: str, header: str, map_path: Optional[str] = None, *,
     stall_threshold = (stall or {}).get("threshold") \
         or find("motor.over.thresholdLast") or find("motor.over.threshold") or ""
 
+    header_used = bool(header and os.path.isfile(header))
+    svd_used = bool(not header_used and svd and os.path.isfile(svd))
+    register_source = "header" if header_used else ("svd" if svd_used else "")
+    register_table = os.path.basename(header if header_used else (svd or "")) \
+        if register_source else ""
+
     meta = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "axf": os.path.basename(axf),
@@ -518,6 +614,8 @@ def build(axf: str, header: str, map_path: Optional[str] = None, *,
         "ram": [ram_min, ram_max],
         "variable_count": len(variables),
         "peripheral_count": len(peripherals),
+        "register_source": register_source,
+        "register_table": register_table,
     }
     return {
         "meta": meta,

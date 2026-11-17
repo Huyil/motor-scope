@@ -50,12 +50,14 @@ KNOWN: List[Dict[str, str]] = [
      "vendor": "WCH", "backend": "", "iface": "",
      "transport": "WDM", "arch": "riscv"},
     # 通用 CMSIS-DAP / DAPLink
+    # 注意：不同 DAPLink 固件只有 v1(HID) 或只有 v2(WinUSB) 能应答；这里给
+    # cmsis-dap.cfg（v2/auto），连不上时后端会自动换 cmsis-dap-v1.cfg 重试。
     {"vid": "0d28", "pid": "0204", "name": "DAPLink (CMSIS-DAP)",
      "vendor": "ARM", "backend": "cmsis-dap", "iface": "cmsis-dap.cfg",
-     "transport": "HID", "arch": "cw32"},
+     "transport": "HID/WinUSB", "arch": "cw32"},
     {"vid": "0d28", "pid": "0205", "name": "DAPLink (CMSIS-DAP)",
      "vendor": "ARM", "backend": "cmsis-dap", "iface": "cmsis-dap.cfg",
-     "transport": "HID", "arch": "cw32"},
+     "transport": "HID/WinUSB", "arch": "cw32"},
     {"vid": "1fc9", "pid": "0090", "name": "LPC-Link II (CMSIS-DAP)",
      "vendor": "NXP", "backend": "cmsis-dap", "iface": "cmsis-dap.cfg",
      "transport": "HID", "arch": "cw32"},
@@ -129,6 +131,35 @@ $out | ConvertTo-Json -Depth 4 -Compress
 '''
 
 
+# HID 设备枚举：只看 PNPDeviceID 以 HID\ 开头的实体（HIDClass / 键鼠 / 厂商自定义）。
+# 用 String.Split([char]92) 切 PNPDeviceID，避免在 WSL -> powershell.exe 互操作时
+# 正则里的反斜杠被二次转义；VID/PID 段不需要反斜杠。
+_PS_HID_SCRIPT = r'''
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$out = @()
+Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPDeviceID -like 'HID*' } | ForEach-Object {
+  $id = [string]$_.PNPDeviceID
+  $parts = $id.Split([char]92)
+  if ($parts.Count -ge 3) {
+    $m = [regex]::Match($parts[1], 'VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4})')
+    if ($m.Success) {
+      $out += [ordered]@{
+        instance = $id
+        vid = $m.Groups[1].Value.ToLower()
+        pid = $m.Groups[2].Value.ToLower()
+        serial = $parts[2]
+        name = [string]$_.Name
+        status = [string]$_.Status
+        hid_class = [string]$_.PNPClass
+      }
+    }
+  }
+}
+$out | ConvertTo-Json -Depth 4 -Compress
+'''
+
+
 def _hex(v: Optional[int], width: int = 4) -> str:
     try:
         return ("%0*x" % (width, int(v))) if v is not None else ""
@@ -161,10 +192,15 @@ def _run_powershell(script: str, timeout: float = 15.0) -> Optional[List[Dict[st
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if proc.returncode != 0:
         return None
+    text = proc.stdout.strip()
+    if not text:
+        # 命令成功但没有对象（例如机器上没有任何 HID/USB 设备）：是空列表，
+        # 不是枚举失败；否则会被误报为 available:false。
+        return []
     try:
-        data = json.loads(proc.stdout.strip())
+        data = json.loads(text)
     except (ValueError, TypeError):
         return None
     if isinstance(data, dict):
@@ -279,6 +315,90 @@ def _via_sysfs() -> Optional[List[Dict[str, Any]]]:
     return out
 
 
+def _via_wmi_hid() -> Optional[List[Dict[str, Any]]]:
+    """Windows WMI 枚举 HID 实体（HIDClass / 键鼠 / 厂商自定义 HID）。"""
+    rows = _run_powershell(_PS_HID_SCRIPT)
+    if rows is None:
+        return None
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            instance = str(row.get("instance") or "")
+            vid = str(row.get("vid") or "").lower()
+            pid = str(row.get("pid") or "").lower()
+            if not vid or not pid:
+                continue
+            # PNPDeviceID = HID\VID_xxxx&PID_xxxx[&MI_xx][&COLxx]\serial
+            parts = instance.split("\\")
+            head = parts[1].upper() if len(parts) > 1 else instance.upper()
+            out.append({
+                "vid": vid, "pid": pid,
+                "serial": str(row.get("serial") or ""),
+                "name": str(row.get("name") or ""),
+                "status": str(row.get("status") or ""),
+                "instance": instance,
+                "hid_class": str(row.get("hid_class") or ""),
+                "is_collection": "&COL" in head,
+                "composite": "&MI_" in head,
+            })
+        except Exception:
+            continue
+    return out
+
+
+def _via_sysfs_hid() -> Optional[List[Dict[str, Any]]]:
+    """Linux /sys/bus/hid/devices 枚举 HID（WSL2 无 USB 直通时通常为空）。"""
+    root = "/sys/bus/hid/devices"
+    if not os.path.isdir(root):
+        return None
+    out: List[Dict[str, Any]] = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return None
+    for name in names:
+        base = os.path.join(root, name)
+        uevent = _sysfs_str(os.path.join(base, "uevent"))
+        kv: Dict[str, str] = {}
+        for line in uevent.splitlines():
+            if "=" in line:
+                key, val = line.split("=", 1)
+                kv[key.strip()] = val.strip()
+        # HID_ID=0003:0000C251:0000F00A -> bus:vid:pid（后 4 位是 16-bit id）
+        parts = kv.get("HID_ID", "").split(":")
+        if len(parts) < 3:
+            continue
+        vid = parts[1][-4:].lower()
+        pid = parts[2][-4:].lower()
+        if not vid or not pid:
+            continue
+        out.append({
+            "vid": vid, "pid": pid,
+            "serial": kv.get("HID_UNIQ", ""),
+            "name": kv.get("HID_NAME", ""),
+            "status": "",
+            "instance": name,
+            "hid_class": "",
+            "bus": parts[0],
+            "phys": kv.get("HID_PHYS", ""),
+            "is_collection": False,
+            "composite": False,
+        })
+    return out
+
+
+def _enumerate_hid_raw() -> Tuple[List[Dict[str, Any]], str]:
+    """返回 (HID 原始列表, 枚举方式)。Windows/WSL 优先 PowerShell/WMI。"""
+    if _powershell_available():
+        devs = _via_wmi_hid()
+        if devs is not None:
+            return devs, "wmi"
+    devs = _via_sysfs_hid()
+    if devs is not None:
+        return devs, "sysfs"
+    return [], "unavailable"
+
+
 def _powershell_available() -> bool:
     """Windows 原生、或 WSL 里能调到 powershell.exe（用于 WMI 枚举真实设备）。"""
     if sys.platform in ("win32", "cygwin"):
@@ -351,4 +471,52 @@ def enumerate_devices(include_all: bool = False) -> Dict[str, Any]:
     return result
 
 
-__all__ = ["enumerate_devices", "KNOWN"]
+def enumerate_hid() -> Dict[str, Any]:
+    """枚举当前连接的 HID 设备（每个 HID 实体一条，含 H7-TOOL 等调试器 HID 接口）。
+
+    返回：{ok, available, method, platform, count, debugger_count, devices: [...],
+           error?}
+    devices 每项含 vid/pid/serial/name/status/instance/hid_class/is_collection/
+    composite；命中已知调试器时额外带 known=true / debugger / backend / iface /
+    arch / transport，便于直接判断哪个 HID 能用 OpenOCD 连接。
+    """
+    raw, method = _enumerate_hid_raw()
+    available = method != "unavailable"
+    result: Dict[str, Any] = {
+        "ok": True, "available": available, "method": method,
+        "platform": sys.platform, "count": 0, "debugger_count": 0,
+        "devices": [],
+    }
+    if not available:
+        result["error"] = (
+            "无法枚举 HID 设备：Windows 需 PowerShell/WMI（本环境不可用）；"
+            "Linux 需 /sys/bus/hid/devices（WSL2 默认不透传 USB，"
+            "请用 usbipd 挂载或在 Windows 侧运行服务）"
+        )
+        return result
+
+    devices: List[Dict[str, Any]] = []
+    for idx, d in enumerate(raw):
+        vid = str(d.get("vid") or "").lower()
+        pid = str(d.get("pid") or "").lower()
+        name = str(d.get("name") or d.get("desc") or "")
+        info = _lookup(vid, pid, name)
+        item = dict(d)
+        item["vid"], item["pid"] = vid, pid
+        item["key"] = "hid:%s:%s:%s@%s" % (vid, pid, d.get("serial", ""), idx)
+        item["known"] = bool(info)
+        if info:
+            item["debugger"] = info.get("name")
+            item["backend"] = info.get("backend")
+            item["iface"] = info.get("iface")
+            item["arch"] = info.get("arch")
+            item["transport"] = info.get("transport")
+        devices.append(item)
+
+    result["devices"] = devices
+    result["count"] = len(devices)
+    result["debugger_count"] = sum(1 for d in devices if d.get("known"))
+    return result
+
+
+__all__ = ["enumerate_devices", "enumerate_hid", "KNOWN"]

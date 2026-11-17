@@ -26,6 +26,18 @@ DELIM = b"\x1a"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
+def _socket_gone(exc: OSError) -> bool:
+    """关闭/断开时对已关闭 socket 的操作：Windows 10038、Linux EBADF 等。"""
+    code = getattr(exc, "winerror", None)
+    if code is None:
+        code = getattr(exc, "errno", None)
+    if code in (9, 32, 10038, 10053, 10054, 10057, 104, 107):
+        return True
+    text = str(exc).lower()
+    return ("10038" in text or "not a socket" in text
+            or "非套接字" in text or "bad file descriptor" in text)
+
+
 class OcdError(RuntimeError):
     pass
 
@@ -70,10 +82,16 @@ class TclClient:
             remain = deadline - time.monotonic()
             if remain <= 0:
                 raise OcdError("OpenOCD TCL 响应超时 (%.1fs)" % self.timeout)
-            if self._sock is None:
-                raise OcdError("OpenOCD TCL 未连接")
-            self._sock.settimeout(max(0.05, remain))
-            chunk = self._sock.recv(65536)
+            sock = self._sock
+            if sock is None:
+                raise OcdError("OpenOCD TCL 已断开")
+            try:
+                sock.settimeout(max(0.05, remain))
+                chunk = sock.recv(65536)
+            except OSError as exc:
+                if self._sock is None or _socket_gone(exc):
+                    raise OcdError("OpenOCD TCL 已断开")
+                raise
             if not chunk:
                 raise OcdError("OpenOCD TCL 连接被关闭")
             self._buf += chunk
@@ -82,14 +100,17 @@ class TclClient:
 
     def command(self, text: str, timeout: Optional[float] = None) -> str:
         with self._lock:
-            if self._sock is None:
-                raise OcdError("OpenOCD TCL 未连接")
+            sock = self._sock
+            if sock is None:
+                raise OcdError("OpenOCD TCL 已断开")
             deadline = time.monotonic() + (timeout or self.timeout)
             try:
-                self._sock.sendall(text.encode("utf-8") + DELIM)
+                sock.sendall(text.encode("utf-8") + DELIM)
+                data = self._recv_until(DELIM, deadline)
             except OSError as exc:
-                raise OcdError("发送 TCL 命令失败: %s" % exc)
-            data = self._recv_until(DELIM, deadline)
+                if self._sock is None or _socket_gone(exc):
+                    raise OcdError("OpenOCD TCL 已断开")
+                raise OcdError("TCL 通信失败: %s" % exc)
             return data.decode("utf-8", "replace")
 
     def install_halt_reader(self) -> None:
@@ -329,6 +350,20 @@ class OcdProcess:
         with self._lock:
             return list(self.log)[-n:]
 
+    # 适配器层面的致命错误（不是目标/接线问题）。命中后可立即换后端重试。
+    _ADAPTER_FATAL = (
+        "unable to find a matching cmsis-dap",
+        "cmd_info failed",
+        "could not claim interface",
+    )
+
+    def _adapter_fatal_line(self) -> str:
+        for line in reversed(self.log_tail(40)):
+            low = line.lower()
+            if any(k in low for k in self._ADAPTER_FATAL):
+                return line.strip()
+        return ""
+
     # ---- 生命周期 -------------------------------------------------
     def start(self, timeout: float = 15.0, require_cpuid: bool = True) -> TclClient:
         if self.proc is not None:
@@ -372,6 +407,11 @@ class OcdProcess:
             if self.proc.poll() is not None:
                 raise OcdError("OpenOCD 已退出 (code=%s)\n%s"
                                % (self.proc.returncode, "\n".join(self.log_tail(30))))
+            # CMD_INFO/claim 失败时 OpenOCD 可能仍挂在 server loop 里不退出，
+            # 干等 15s 超时没意义；识别到就立刻抛，交给上层换后端/序列号。
+            fatal = self._adapter_fatal_line()
+            if fatal:
+                raise OcdError("CMSIS-DAP 适配器初始化失败: %s" % fatal)
             try:
                 client = TclClient("127.0.0.1", self.port, timeout=2.0)
                 client.connect()

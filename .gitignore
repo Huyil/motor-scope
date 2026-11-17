@@ -12,6 +12,8 @@ runtime/
 profiles/*/signals.json
 profiles/*/profile.json
 profiles/*/config.json
+# 服务端采样集（与浏览器 config 分开：换浏览器/无浏览器重启都能继续采）
+profiles/*/sampler.json
 profiles/*/annotations.json
 profiles/index.json
 # 上面规则会误伤 profiles/demo/*.signals.json，这里放行演示表

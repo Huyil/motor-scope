@@ -35,8 +35,8 @@ ROOT = os.path.dirname(HERE)
 # 属于「本机项目数据」，会泄漏用户工程信息，发行包一律不带。
 CORE = [
     "scope_server.py", "ocd.py", "profiles.py", "gen_signals.py",
-    "record_cache.py", "api_docs.py", "usb_devices.py", "flash.py",
-    "flash_tool.py", "requirements.txt",
+    "record_cache.py", "api_docs.py", "usb_devices.py", "wave_groups.py",
+    "screenshot.py", "flash.py", "flash_tool.py", "requirements.txt",
     "LICENSE", "THIRD-PARTY-NOTICES.md", "README.md", "API.md",
     "start_scope.bat", "start_scope_sim.bat", "regen_signals.bat",
     "web", "docs", "tools",

@@ -12,7 +12,7 @@ DSH 里的 MotorScope 面板：左侧栏新增一个 `sidebar.panellist` 行（�
 2. 连同它们的控制台父进程（`cmd.exe /k ...dsh-launch.cmd` 或 `start_scope.bat`）整棵树
    `taskkill /T /F` —— 旧窗口直接关掉；
 3. 用**上一次的同一组参数**重新开一个可见控制台窗口（`python -u scope_server.py ...`）；
-4. 等 `/api/status` 就绪后自动刷新 iframe。
+4. 等 `/api/status` 就绪后挂载 iframe；LAN 信息返回后只挂载一次，避免先加载再改 src 的二次刷新。
 
 「打开」= 如果没在跑就启动（先清理残留实例）；「关闭」是**单独按键**，只有点它才会关进程树；
 「刷新」只刷新页面，不动进程；「新窗口」在浏览器里单独打开。
@@ -62,7 +62,7 @@ DSH 里的 MotorScope 面板：左侧栏新增一个 `sidebar.panellist` 行（�
 | 灰 | 未运行 |
 
 面板打开时每 3 秒刷新，只显示侧栏时每 10 秒刷新；按钮操作会立即更新。
-点开面板/切回页面时会先强制刷新一次，不至于看到过期状态。
+首次打开只挂载一次；切回页面时因 DSH 的 keyed main slot 会重新挂载 iframe（见下节）。
 
 ## 切页重载（DSH 限制）
 

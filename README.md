@@ -114,19 +114,24 @@ start_scope_sim.bat
 > 固件 AXF 生成），不进仓库。若该文件不存在，服务会自动回退到
 > `profiles/demo/<机型>.signals.json`（随仓库分发，日志会提示「已使用仿真演示符号表」）。
 > 演示表用仿真源认识的信号名（`motor.over.current` 等）和**假地址**，只为让仿真模式
-> 立刻有波形看。**实机前必须用真实固件重建符号**：UI 里「导入 AXF」/
+> 立刻有波形看。**实机前必须用真实固件重建符号**：UI 里「导入 AXF / SVD」/
 > 「重建当前机型符号」，或 `POST /api/catalog/import`。重新生成演示表：
 > `python tools/make_demo_profiles.py`。
 
-### 2.3 切换机型（DR2159 / DR1152 / DR1152_CH / LKS32-FOC）
+### 2.3 切换 / 新建机型
 
-顶栏“工程配置”卡片打开后有四张机型卡，点一下即可切换：
+顶栏“机型配置”卡片打开后有机型卡，点一下即可切换：
 
 - 每张卡带 **MCU、变量/外设数量、`●` 当前机型**；
 - 切换会换用 `profiles/<机型>/signals.json` 并断开当前调试源（地址整体变了，
   换板/换固件后请重新点“连接”）；
 - 面板里还有 **保存配置**（写 `profiles/<机型>/config.json`）和
   **重建当前机型符号**（按该机型源 AXF/SVD 重新生成）；
+- **新建机型**：点“导入 AXF / SVD”，选好固件和 SVD 后，在导入框里选
+  **新建机型**（填名称）或 **更新当前机型**，也可以取消；只选 SVD 时只会替换
+  当前机型的寄存器表。SVD 来源会写回 `profile.json`，重启/重建后仍生效；
+- **复制当前机型**：把当前机型（符号表、源文件、连接参数）复制成一个新机型，
+  之后可以再导入新的 AXF/SVD 覆盖它；原来的“工程副本”入口已由机型取代；
 - 详细目录结构、字段、LKS 识别方式和新增机型步骤见 **[profiles/README.md](profiles/README.md)**。
 
 ### 2.4 已经有 openocd 在跑
@@ -174,17 +179,42 @@ python scope_server.py --attach 127.0.0.1:6666 --open
   - 把行**拖进同一个自定义分组**，组内波形共享一套坐标轴；
   - 组头 `◉ / ○` 可单独显示/隐藏分组，默认分组也能隐藏；
   - `+ 新建分组` 创建共享轴组，`×` 删除组时组内波形回到默认分组。
-- **顶部卡片**：工程 / 录制 / 信号源 / 采样率。采样率卡显示目标值与实际值、
-  每轮耗时，底部进度条是**占用率**（一轮读内存的耗时 ÷ 目标周期；100% 表示刚好读得过来，
+- **顶部卡片**：信号源 / 机型 / 采样·录制 / 分析。采样录制卡显示目标/实际速率、每轮耗时、
+  录制点数与时长，底部进度条是**占用率**（一轮读内存的耗时 ÷ 目标周期；100% 表示刚好读得过来，
   超过就说明探针已经到顶、实际速率会低于设定值）。
+- **分析卡**：FFT 频谱、相图、极限环三类分析，基于当前窗口/服务端缓存样本；
+  上方有低高度波形预览和时间轴，拖动选择分析区间（也可用“全部/最近 10s”）；
+  会显示采样率、Nyquist、频率分辨率，并提示“信号真实更新率可能低于采样率”；
+  不做拉普拉斯波形展示（调参请看 Bode/阶跃）。
+- **录制 / 重置**：录制始终在服务端进行；「重置当前显示波形」只清当前浏览器的波形缓冲，
+  不会清服务端 `Recorder` / `.record-cache`，也不影响 CSV。
 - **中栏**：时间轴波形。每个可见分组占一个 pane；默认每路独立轴，自定义组共享轴；共享组内也按每行自己的换算/单位绘制（未设置的行按原始值），有换算/单位的通道在图例左侧标 `※`；
   图例里带 `R` 的仍走右侧 Y 轴刻度。
+- **长录制导航**：切到「整体」默认显示**最近 2 分钟**；`«10m` 把窗口起点再往前扩
+  10 分钟（2 → 12 → 22 分钟，可连续），`10m»` 往回收 10 分钟，`最新` 回到最近 2 分钟；
+  时间轴窗口整体可拖动平移（不再只能拖两端手柄），手柄也加宽了。
+- **框选测量**：波形工具条的「框选」默认关；打开后在主波形拖选区间，
+  悬浮框显示可见信号的**最大 / 最小 / 峰峰值**，并与分析面板共用同一区间。
+- **滚轮**：overview 普通滚轮按窗口约 1% 平移；follow 滚轮缩放缓一些；
+  `Ctrl+滚轮` 围绕鼠标缩放。
+- **渲染模式**：默认 **「原始」**。原始模式按每像素列取 min/max 抽稀，尖峰不会丢；
+  「均线 / 包络」只用于**可见跨度 ≥5 分钟的长期趋势**；短于 5 分钟会自动回退原始，
+  避免把真实电流纹波、阶跃和毛刺压平（均线本身还有 1~5 秒因果滞后）。
 - **波形游标**：在波形区**左键单击**可固定一个 `PIN` 时间游标，显示该时刻的竖线和数值悬浮窗（内容与鼠标悬浮一致）；再次左键移动，右键或 `Esc` 取消。
 - **数值表 / 写入表**：同一行 **1 : 2** 两列（写入表 2 倍宽）；窗口变窄时优先压缩写入表，
   820px 以下自动上下堆叠。数值列按约 6 位数字宽排，带千分位逗号；
   超长数字换行并用更小字号挤在同一行高内。
-- **顶部**：连接、暂停/继续、**复位**（SWD SYSRESETREQ）、清空、录制、CSV、截图、设置；最右侧是缩小的
-  SWD 占用指示（信号源 + 实际速率），窄屏自动隐藏速率。
+- **顶部**：连接、暂停/继续、**复位**（SWD SYSRESETREQ）、**新增输入源**、录制、CSV、截图、设置；最右侧是缩小的
+  SWD 占用指示（信号源 + 实际速率），窄屏自动隐藏速率。截图会同时**复制到剪贴板**并下载 PNG。
+- **新增信号**（顶部按钮）：1）选信号源（OpenOCD / 附加 TCL / 仿真）；2）选芯片组/型号（可选）、
+  上传 SVD/JSON、选 AXF/ELF；3）填源名称与采样率。AXF 会新建该源的机型（不切换当前机型），
+  已有配置也可直接选。型号只用于自动选 OpenOCD target 和芯片比对，SVD/AXF 里通常已有，可留空。
+- **每源 OpenOCD 配置**：每个 OpenOCD 源可单独选 OpenOCD 根目录、interface cfg、target cfg、
+  调试器 serial 和采样率；新增时选择，之后在“当前源连接”里修改，配置随源保存。
+- **多输入源**：主区每个源一张紧凑卡片，可分别连接/断开/移除；每个源绑定自己的机型
+  （AXF/寄存器表），同一个波形页/已选择页可混排不同源的信号。TCL 源即现成的附加 TCL 端口，
+  示波器 `feed.py` 每个端口一个源，可多个并存。当前 MVP 已支持多 TCL/仿真源同页；
+  多 OpenOCD 的每源探针选择、`stream`/触发窗口在后续阶段补（见 `docs/multi-source-plan.md`）。
 - **底部**：样本数、实际速率、延迟、录制状态、OpenOCD 日志。
 
 ![设置](docs/settings.png)
@@ -244,7 +274,8 @@ python scope_server.py --attach 127.0.0.1:6666 --open
   同时约 1.8s 防抖写一份到 `profiles/<机型>/config.json`（换浏览器也能恢复）；
   切换工程会恢复通道、窗口、标定、堵转判定、3 张监视卡和写入模块；
 - 工程绑定机型；切到别的机型的工程会先切后端符号/芯片，再恢复界面配置；
-- **新建（复制当前）**、**另存为**、**删除当前**、**导出 JSON**、**导入 JSON**；
+- 机型管理：**新建机型**、**复制当前机型**、**重建当前机型符号**、**保存配置**；
+- 配置快照：**导出 JSON** / **导入 JSON**；
 - 工程名支持中文；重名会弹确认；导入非法 JSON / 非 MotorScope JSON 会提示错误且不切换；
 - 切换工程会重新下发采样配置并刷新历史；SSE 保持连接；
 - 出于安全，`armed` 不跨工程恢复（见 3.1）。
@@ -287,6 +318,24 @@ python scope_server.py --attach 127.0.0.1:6666 --open
 
 ---
 
+### 3.4 刷新后从服务器同步
+
+服务器采样**不依赖浏览器**：`scope_server.py` 的采样线程和 `.record-cache/` 独立运行，
+只要调试器还连着，关闭/刷新页面不会停止采样。
+
+- 刷新页面后浏览器里的滚动样本会丢；点顶栏 **同步** 可以从服务器拉回：
+  - 当前 `config.signals`（通道/地址/标定对齐）；
+  - `/api/history` 的历史样本；
+  - `.record-cache` 当前会话的整段窗口，并把时间轴切到“整体”。
+- **同步是只读的**：不会把本地配置反推给服务器，也不会断开/重连调试器。
+- 服务器未连接时，同步只能恢复已有历史/缓存；要采新数据先点 **连接**，
+  或启动时加 `--auto`（DSH 启动器已带 `--auto`，直接运行 `start_scope.bat` 不会自动连接）。
+- 刷新后如果本地配置和服务器的采样集不同，浏览器启动时可能把服务器配置改掉：
+  服务端会清空内存 history 并开新的缓存会话；旧数据仍在 `.record-cache/` 的
+  `session-*/` 里（当前接口只暴露“当前会话”，旧会话浏览尚未实现）。
+
+---
+
 ### 3.5 DSH 侧栏插件
 
 DSH 里的 MotorScope 侧栏面板源码在 `dsh-plugin/`（host + client、构建脚本、
@@ -312,6 +361,9 @@ DSH 里的 MotorScope 侧栏面板源码在 `dsh-plugin/`（host + client、构�
 - **固件变量**：该机型源 AXF/ELF 的 DWARF（变量、结构体、数组、位域）；
 - **外设寄存器**：CW32 用头文件 `cw32l0xx.h` 的 `*_TypeDef` + `CW_xxx` 宏；
   CH32V203 / LKS32MC07x 没有可用头文件，直接解析厂商 **CMSIS-SVD**；
+- **浮点变量**：DWARF `type=float`（4 字节）自动标 `float:true`，前端、CSV、历史和缓存
+  都按 IEEE754 float32 解码显示；`NaN/Inf` 显示为 `--`。8 字节 `double` 暂不保证支持，
+  写入窗口暂不允许写 float（避免按整数位写坏）。
 - **参考**：`.map` 只用于元信息。
 
 当前四套：**DR2159 453/27**、**DR1152 503/50**、
@@ -462,7 +514,7 @@ I(A) = counts × (Vref / 4095) / (Rshunt × Gain)
   盈亏平衡点因此只有 **200 字节上下**：比这窄的合并划算，比这宽的必须拆开。
   连接后会自动标定一次探针代价（1 字 / 64 字各读 3 次），换探针或换 SWD 频率都不用手调；
   `profile.scan` 里的 `region_cost` / `word_cost` 可写死，`max_gap` / `max_words` 是硬上限。
-- **占用率**：采样率卡底部显示“一轮耗时 ÷ 目标周期”。100% 说明刚好读得过来；
+- **占用率**：采样·录制卡底部显示“一轮耗时 ÷ 目标周期”。100% 说明刚好读得过来；
   >100% 时实际速率由探针往返决定，设定值只是上限（界面底部也有实际 Hz）。
 - 本机实测（LKS32MC07x、H7-TOOL CMSIS-DAP v1、8MHz SWD）：
   - 3 路信号（两个簇，5 words / 2 块）：250Hz 目标 → **约 244Hz**
@@ -488,15 +540,18 @@ I(A) = counts × (Vref / 4095) / (Rshunt × Gain)
 
 ```bash
 python scope_server.py --auto --open          # 自动连 openocd 并开浏览器
-python scope_server.py --sim --open           # 仿真
+python scope_server.py --sim-connect --open   # 仿真并自动连接（演示用；--sim 只启用能力，启动仍为空闲）
+# 普通启动（无 --sim-connect / --auto / --attach）不会连接任何源，采样保持等待/暂停态
 python scope_server.py --attach 127.0.0.1:6666 --open
 python scope_server.py --port 8790 --rate 50
 python scope_server.py --openocd D:\your\custom\openocd   # 自定义 OpenOCD 根目录（留空则用 tools/openocd）
 python gen_signals.py                          # 重建 signals.json
-python -m unittest discover -s tests -v    # 区域/位域/写入/历史/机型/芯片识别（41 项）
+python -m unittest discover -s tests -v    # SVG/PNG/截图/导入/扫描/机型（100+ 项）
 ```
 
-Agent / 脚本读取用的 HTTP API（`/api/history` 读之前、`/api/history/next` long-poll 读之后）见 **[API.md](API.md)**。
+Agent / 脚本用的 HTTP API（连接/断开/复位、扫描芯片 ID、调试器与 HID 列表、
+按路径更新 AXF、波形截图 PNG、`/api/history` 读之前、`/api/history/next`
+long-poll 读之后）见 **[API.md](API.md)**。
 
 没有硬件也可以验证 Tcl 客户端：
 
@@ -514,6 +569,7 @@ motor-scope/
 ├─ scope_server.py      HTTP/SSE 服务、采样线程、仿真源、录制
 ├─ ocd.py               OpenOCD Tcl-RPC 客户端、进程管理、区域规划
 ├─ gen_signals.py       AXF/DWARF + 头文件/SVD → signals.json（单机型引擎）
+├─ screenshot.py        纯标准库波形截图（网页同款 pane/标尺 + 双时间轴 PNG）
 ├─ signals.json         旧版单机型符号目录（兼容回退；正常运行用 profiles/）
 ├─ profiles.py          机型工程存储 / 生成 / 切换
 ├─ profiles/            四套机型工程（symbols + chip + config，见 profiles/README.md）
@@ -523,11 +579,11 @@ motor-scope/
 ├─ regen_signals.bat    重新生成符号
 ├─ requirements.txt     pyelftools（改用系统 Python 时才需要）
 ├─ runtime/             自带便携 Python 3.13.3 + pyelftools（见 runtime/README.md）
-├─ API.md              Agent/脚本用的 HTTP API（history/next/status/catalog）
+├─ API.md              Agent/脚本用的 HTTP API（history/截图/扫描/机型/导入）
 ├─ web/                 index.html / style.css / app.js（原生 canvas，无前端依赖）
 │  └─ mcu/<型号>.info.json  寄存器描述（与 <型号>.json 模板分开导入）
-├─ tests/               mock_tcl.py + core/history/flash/profiles/chip_probe 单测
-└─ docs/                截图
+├─ tests/               mock_tcl.py + core/history/flash/profiles/import/scan/screenshot 单测
+└─ docs/                截图与调研文档
 ```
 
 ---

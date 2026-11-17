@@ -40,7 +40,7 @@ profiles/
 | `ram` | `[start, end]`，符号提取只收这个范围内的变量 |
 | `target` | 可选，OpenOCD target cfg 路径；相对路径按工程根目录解析 |
 | `interface` | 可选，覆盖 interface cfg（默认 `cmsis-dap-v1.cfg`） |
-| `source` | `axf` / `header` / `svd` / `map`；`header` 和 `svd` 二选一（CW32 用 header，CH32/LKS 用 SVD） |
+| `source` | `axf` / `header` / `svd` / `table` / `map`；`header`、`svd`、`table` 三者只保留一个（CW32 用 header，CH32/LKS/导入的 SVD 用 `svd`，独立导入的 JSON 表用 `table`） |
 | `defaults` | 默认加入波形的信号名（不存在会被跳过） |
 | `stall` | 堵转判定默认的电流/阈值信号 |
 | `scan` | 可选，采样区域合并参数 `max_gap` / `max_words`（LKS 地址跨度大时用） |
@@ -58,17 +58,23 @@ profiles/
 
 ## 3. 使用
 
-启动后顶栏“工程配置”卡片显示当前机型；点开面板：
+启动后顶栏“机型配置”卡片显示当前机型；点开面板：
 
-- **机型卡片**：四张卡，带 `●` 的是当前机型；点一下即切换（会断开当前调试源，
-  因为地址整体变了）。切换时优先恢复「本机该机型的工程」，没有则用服务器
-  `config.json`，再没有就用该机型 `defaults`。
+- **机型卡片**：每个机型一张卡，带 `●` 的是当前机型；点一下即切换（会断开当前调试源，
+  因为地址整体变了）。切换/刷新时以服务器 `config.json` 为准，浏览器 localStorage
+  只作本机快照缓存（旧缓存不会反向覆盖机型配置）；服务器为空时才用本机快照，
+  再没有就用该机型 `defaults`。
 - **保存配置**：立即把当前前端快照写到 `profiles/<机型>/config.json`；
   平时也会在改动后 1.8s 自动保存一次（同时写 localStorage，刷新不丢）。
 - **重建当前机型符号**：按 `profile.json` 的 `source` 重新生成 `signals.json`，
   并刷新变量/外设数量；会清空现有波形（地址变了）。
-- **工程副本**：仍然是浏览器里的多工程（新建/另存为/删除/导入/导出），
-  每个工程记录自己绑定的机型；切换到别的机型的工程会自动先切后端。
+- **新建机型 / 导入 AXF / SVD**：选好 AXF/ELF 和（可选）SVD 后，导入框提供
+  “新建机型 / 更新当前机型 / 取消”。新建会按 SVD 的 `<name>` 或文件名给机型
+  命名并自动推断架构/RAM；更新会写回 `profile.json` 的 `source.axf` /
+  `source.svd`（或 `source.table`），所以重启、重建都不会丢寄存器表。
+- **复制当前机型**：“新建机型”的一种入口，复制元数据 + `signals.json` +
+  `annotations.json`，之后可导入新固件覆盖。原来的“工程副本”入口已移除，
+  浏览器里的工程只作为当前机型的界面配置快照（仍可导出/导入 JSON）。
 
 命令行：
 
@@ -96,11 +102,18 @@ Windows 下用自带运行时：`runtime\python\python.exe tools\build_profiles.
 
 ## 5. 新增机型
 
-1. 在 `profiles.py` 的 `DEFAULT_PROFILES` 加一条（或直接复制一个目录改 `profile.json`）；
+**UI（推荐）**：打开“机型配置 → 导入 AXF / SVD…”，选择固件和 SVD，点“新建机型”
+并填名称即可。SVD 的 `<name>` 会自动作为型号；架构/RAM 从 AXF 推断；不需要改
+`profiles.py`，也不要求型号先在 `web/mcu/` 注册。如果 `tools/*/target/` 下有同名
+cfg（如 `n32g003.cfg`），会自动写进 `profile.target`，连接时直接使用。
+
+**手工 / 内置模板**：
+
+1. 在 `profiles.py` 的 `DEFAULT_PROFILES` 加一条（或直接复制一个现有目录改 `profile.json`）；
 2. 把型号加到 `web/mcu/index.json`（有 SVD 就用 `tools/build_mcu_tables.py` 生成）；
 3. `python3 tools/build_profiles.py --only <ID>` 生成 `signals.json`；
 4. 如果是新架构/新调试器，补 `ocd.py` 的 OpenOCD 查找或 `profile.target`；
-5. 重启服务，机型卡片会出现第五张。
+5. 重启服务，机型卡片会出现新的机型。
 
 ## 6. 已知边界
 
